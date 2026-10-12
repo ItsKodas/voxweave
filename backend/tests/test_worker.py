@@ -618,6 +618,7 @@ def test_a_saved_checkpoint_pair_is_backed_up_after_its_epoch_ends(rig):
     assert rig.run(epochs=10, save_every=5) == 1
     pair = {"G_2333333.pth.bak": 5, "D_2333333.pth.bak": 5}
     assert seen == {"saving:5": {}, "epoch_done:5": pair, "epoch_done:6": pair, "saving:10": pair}
+    assert "[worker] checkpoint of epoch 5 backed up in " in rig.log()
     assert not list(rig.exp.glob("*.tmp"))
 
 

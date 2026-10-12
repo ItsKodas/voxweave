@@ -764,15 +764,15 @@ class Job:
         if self._poll_stop():
             state.kill_now = True
         elif saved:
-            self._back_up_checkpoints()
+            self._back_up_checkpoints(epoch)
 
-    def _back_up_checkpoints(self):
+    def _back_up_checkpoints(self, epoch):
         """Copy the checkpoint pair to .bak. Called only right after an epoch ended, when no save is running.
 
         The copy still proves itself before it replaces the previous backup: the source must not have changed
         while it was read, and the copy must be a complete torch file. A bad copy is dropped and the previous
         backup stays; training carries on either way."""
-        temps = []
+        temps, started = [], time.monotonic()
         try:
             for name in CHECKPOINTS:
                 source, temp = self.exp / name, self.exp / (name + ".bak.tmp")
@@ -787,6 +787,7 @@ class Job:
                 self._mark("checkpoint")
             for name in CHECKPOINTS:
                 _unlink(self.exp / (name + ".failed"))
+            self._log("worker", "checkpoint of epoch %d backed up in %.1f s" % (epoch, time.monotonic() - started))
         except OSError as exc:
             self._log("worker", "checkpoint backup skipped, the previous backup is kept: %s" % exc)
             for temp in temps:
