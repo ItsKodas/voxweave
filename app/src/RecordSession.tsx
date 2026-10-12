@@ -63,12 +63,21 @@ export function RecordSession({ voiceId, active, onSaved }: { voiceId: string; a
     };
   }, [loadPrompt]);
 
-  // Leaving the tab must not leave the microphone running.
+  // Leaving the tab must not leave the microphone running. If the cancel fails the take may still be running,
+  // so the controls stay and the cancel is tried again when the tab is active again.
+  const retryCancel = useRef(false);
   useEffect(() => {
-    if (!active && recordingRef.current) {
-      setRecording(false);
-      studioApi.recordCancel().catch(fail);
-    }
+    if (!recordingRef.current || (active && !retryCancel.current)) return;
+    studioApi
+      .recordCancel()
+      .then(() => {
+        retryCancel.current = false;
+        if (mountedRef.current) setRecording(false);
+      })
+      .catch((e) => {
+        retryCancel.current = true;
+        if (mountedRef.current) fail(e);
+      });
   }, [active]);
 
   const run = async (action: () => Promise<void>) => {
@@ -102,9 +111,9 @@ export function RecordSession({ voiceId, active, onSaved }: { voiceId: string; a
       try {
         result = await studioApi.recordStop();
       } catch (e) {
-        // Unknown backend state: make it certainly idle, then show the original error.
-        setRecording(false);
-        await studioApi.recordCancel().catch(() => undefined);
+        // Unknown backend state: make it certainly idle, then show the original error. If even that
+        // fails, keep the controls so the user can try again.
+        await studioApi.recordCancel().then(() => setRecording(false), () => undefined);
         throw e;
       }
       setRecording(false);
@@ -125,8 +134,8 @@ export function RecordSession({ voiceId, active, onSaved }: { voiceId: string; a
 
   const cancel = () =>
     run(async () => {
-      setRecording(false);
       await studioApi.recordCancel();
+      setRecording(false);
     });
 
   if (prompt && prompt.index === null) {

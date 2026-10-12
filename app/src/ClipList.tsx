@@ -49,7 +49,7 @@ function ClipRow({ voiceId, clip, onPlay, onDeleted, onError }: {
 export function ClipList({ voiceId, version, onChanged }: { voiceId: string; version: number; onChanged: () => void }) {
   const [clips, setClips] = useState<Clip[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [playing, setPlaying] = useState<string | null>(null);
+  const [playing, setPlaying] = useState<{ index: number; url: string } | null>(null);
 
   useEffect(() => {
     let gone = false;
@@ -68,10 +68,11 @@ export function ClipList({ voiceId, version, onChanged }: { voiceId: string; ver
   }, [voiceId, version]);
 
   // The player's object URL is released when another clip replaces it and when the list unmounts.
+  const playingUrl = playing?.url ?? null;
   useEffect(() => {
-    if (playing === null) return;
-    return () => URL.revokeObjectURL(playing);
-  }, [playing]);
+    if (playingUrl === null) return;
+    return () => URL.revokeObjectURL(playingUrl);
+  }, [playingUrl]);
 
   const mounted = useRef(true);
   const latestPlay = useRef(0);
@@ -82,6 +83,14 @@ export function ClipList({ voiceId, version, onChanged }: { voiceId: string; ver
     };
   }, []);
 
+  // Another voice's list must not keep playing, or accept a clip that was still being fetched.
+  useEffect(() => {
+    return () => {
+      latestPlay.current += 1;
+      setPlaying(null);
+    };
+  }, [voiceId]);
+
   const play = async (index: number) => {
     const ticket = ++latestPlay.current;
     try {
@@ -90,7 +99,7 @@ export function ClipList({ voiceId, version, onChanged }: { voiceId: string; ver
         URL.revokeObjectURL(url); // superseded or too late: nothing will play it
         return;
       }
-      setPlaying(url);
+      setPlaying({ index, url });
     } catch (e) {
       if (mounted.current) setError((e as Error).message);
     }
@@ -98,13 +107,14 @@ export function ClipList({ voiceId, version, onChanged }: { voiceId: string; ver
 
   const deleted = (index: number) => {
     setClips((list) => (list ?? []).filter((c) => c.index !== index));
+    setPlaying((p) => (p?.index === index ? null : p));
     onChanged();
   };
 
   return (
     <section className="clips">
       {error && <p role="alert" className="error">{error}</p>}
-      {playing && <audio aria-label="Clip player" controls autoPlay src={playing} />}
+      {playing && <audio aria-label="Clip player" controls autoPlay src={playing.url} />}
       {clips !== null && clips.length === 0 && <p className="hint">No clips yet. Record a sentence or drop in audio files.</p>}
       {clips !== null && clips.length > 0 && (
         <ul aria-label="Clips" className="clip-list">

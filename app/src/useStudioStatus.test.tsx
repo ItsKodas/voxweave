@@ -7,7 +7,7 @@ import { studioApi } from "./studioApi";
 
 const STATUS = {
   recording: true, level: 0.4, seconds: 1.2, full: false,
-  import: { active: false, finished: false, total_files: 0, done_files: 0, current: null, clips_added: 0, skipped: 0, errors: [] },
+  import: { active: false, finished: false, total_files: 0, done_files: 0, current: null, clips_added: 0, skipped: 0, errors: [], voice_id: null, job: 0 },
 };
 const tick = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
 

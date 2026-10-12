@@ -21,6 +21,9 @@ export type ImportStatus = {
   clips_added: number;
   skipped: number;
   errors: string[];
+  /** The voice of the most recent job (null before any), and its number in start order (0 before any). */
+  voice_id: string | null;
+  job: number;
 };
 export type StudioStatus = { recording: boolean; level: number; seconds: number; full: boolean; import: ImportStatus };
 

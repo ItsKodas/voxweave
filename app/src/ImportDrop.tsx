@@ -3,65 +3,97 @@ import { onFilesDropped } from "./dropEvents";
 import { studioApi } from "./studioApi";
 import { useStudioStatus } from "./useStudioStatus";
 
+const WAIT_HERE = "Wait for the current import to finish before dropping more files.";
+const WAIT_OTHER = "An import into another voice is running. Wait for it to finish before importing here.";
+
 export function ImportDrop({ voiceId, active, onImported }: { voiceId: string; active: boolean; onImported: () => void }) {
-  const [started, setStarted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const status = useStudioStatus(active && started);
+  // The number of this voice's import job that this component follows. The backend keeps one status for the
+  // whole app, so a job is "mine" only when it carries my voice id and the number I started or picked up.
+  const [tracked, setTracked] = useState<number | null>(null);
+  const [watching, setWatching] = useState(false);
+  const status = useStudioStatus(active && watching);
   const job = status?.import ?? null;
-  const running = started && !(job?.finished ?? false);
-  const runningRef = useRef(running);
-  runningRef.current = running;
-  const reported = useRef(false);
+  const jobRef = useRef(job);
+  jobRef.current = job;
+  const trackedRef = useRef(tracked);
+  trackedRef.current = tracked;
+  const starting = useRef(false);
+  const reportedJob = useRef<number | null>(null);
+
+  const forMe = job !== null && job.voice_id === voiceId;
+  const mine = forMe && tracked === job.job;
+  const otherRunning = job !== null && job.active && job.voice_id !== voiceId;
 
   useEffect(() => {
     if (!active) return;
     let unsubscribe: (() => void) | null = null;
     let gone = false;
     const handle = (paths: string[]) => {
-      if (runningRef.current) {
-        setNotice("Wait for the current import to finish before dropping more files.");
+      if (gone) return;
+      const current = jobRef.current;
+      if (starting.current || current?.active) {
+        // An import into another voice already has its own notice on screen.
+        setNotice(current?.active && current.voice_id !== voiceId ? null : WAIT_HERE);
         return;
       }
+      starting.current = true;
       setError(null);
       setNotice(null);
-      reported.current = false;
+      setTracked(null); // the previous result is no longer shown, and a stale finished status is not this job's
       studioApi
         .importFiles(voiceId, paths)
-        .then(() => setStarted(true))
-        .catch((e: Error) => setError(e.message));
+        .then((res) => {
+          setTracked(res.import.job);
+          setWatching(true);
+        })
+        .catch((e: Error) => setError(e.message))
+        .finally(() => {
+          starting.current = false;
+        });
     };
-    onFilesDropped(handle).then((off) => {
-      if (gone) off();
-      else unsubscribe = off;
-    });
+    onFilesDropped(handle)
+      .then((off) => {
+        if (gone) off();
+        else unsubscribe = off;
+      })
+      .catch((e: Error) => !gone && setError(e.message));
     return () => {
       gone = true;
       unsubscribe?.();
     };
   }, [active, voiceId]);
 
-  // An import outlives this component: on mount, pick up a job that is already running.
+  // An import outlives this component. On mount (and when the tab comes back) read the status once: watch a job
+  // that is running, or one of mine that finished while the tab was hidden. A job already finished at mount is not announced.
   useEffect(() => {
     if (!active) return;
     let gone = false;
     studioApi
       .status()
       .then((s) => {
-        if (!gone && s.import.active) setStarted(true);
+        const j = s.import;
+        if (gone) return;
+        if (j.active || (j.finished && j.voice_id === voiceId && j.job === trackedRef.current)) setWatching(true);
       })
       .catch(() => undefined);
     return () => {
       gone = true;
     };
-  }, [active]);
+  }, [active, voiceId]);
+
+  // A running job of this voice that this component did not start (picked up on mount) becomes mine.
+  useEffect(() => {
+    if (job !== null && job.active && job.voice_id === voiceId && tracked !== job.job) setTracked(job.job);
+  }, [job, voiceId, tracked]);
 
   useEffect(() => {
-    if (started && job?.finished && !reported.current) {
-      reported.current = true;
+    if (mine && job.finished && reportedJob.current !== job.job) {
+      reportedJob.current = job.job;
       onImported();
     }
-  }, [started, job?.finished, onImported]);
+  }, [mine, job, onImported]);
 
   return (
     <section className="import">
@@ -74,7 +106,8 @@ export function ImportDrop({ voiceId, active, onImported }: { voiceId: string; a
         </p>
       </div>
       {notice && <p className="hint">{notice}</p>}
-      {started && job && !job.finished && (
+      {otherRunning && <p className="hint">{WAIT_OTHER}</p>}
+      {forMe && job.active && (
         <div>
           <p>
             Importing file {Math.min(job.done_files + 1, job.total_files)} of {job.total_files}
@@ -88,7 +121,7 @@ export function ImportDrop({ voiceId, active, onImported }: { voiceId: string; a
           </div>
         </div>
       )}
-      {started && job?.finished && (
+      {mine && job.finished && (
         <div>
           <p className="ok">
             Added {job.clips_added} clips.{job.skipped > 0 ? ` ${job.skipped} skipped as too quiet.` : ""}

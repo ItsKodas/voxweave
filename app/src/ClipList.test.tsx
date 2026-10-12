@@ -113,4 +113,48 @@ describe("ClipList", () => {
     await userEvent.click(within((await rows())[1]).getByRole("button", { name: "Play clip 1" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Origin not allowed");
   });
+
+  it("releases audio from a superseded play request, and shows only the latest clip", async () => {
+    let late: (url: string) => void = () => {};
+    vi.mocked(studioApi.clipAudioUrl).mockImplementation((_id, index) =>
+      index === 1 ? new Promise((r) => { late = r; }) : Promise.resolve("blob:x/2"));
+    render(<ClipList voiceId="v-1" version={0} onChanged={() => {}} />);
+    await userEvent.click(within((await rows())[1]).getByRole("button", { name: "Play clip 1" }));
+    await userEvent.click(within((await rows())[0]).getByRole("button", { name: "Play clip 2" }));
+    await vi.waitFor(() => expect(screen.getByLabelText("Clip player")).toHaveAttribute("src", "blob:x/2"));
+    late("blob:late-1");
+    await vi.waitFor(() => expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:late-1"));
+    expect(screen.getByLabelText("Clip player")).toHaveAttribute("src", "blob:x/2");
+  });
+
+  it("releases audio that arrives after the list was unmounted", async () => {
+    let late: (url: string) => void = () => {};
+    vi.mocked(studioApi.clipAudioUrl).mockReturnValue(new Promise((r) => { late = r; }));
+    const { unmount } = render(<ClipList voiceId="v-1" version={0} onChanged={() => {}} />);
+    await userEvent.click(within((await rows())[1]).getByRole("button", { name: "Play clip 1" }));
+    unmount();
+    late("blob:late");
+    await vi.waitFor(() => expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:late"));
+  });
+
+  it("stops and releases the player when the playing clip is deleted", async () => {
+    render(<ClipList voiceId="v-1" version={0} onChanged={() => {}} />);
+    await userEvent.click(within((await rows())[0]).getByRole("button", { name: "Play clip 2" }));
+    await screen.findByLabelText("Clip player");
+    await userEvent.click(within((await rows())[1]).getByRole("button", { name: "Delete clip 1" }));
+    await vi.waitFor(async () => expect(await rows()).toHaveLength(1));
+    expect(screen.getByLabelText("Clip player")).toBeInTheDocument(); // another clip's delete leaves it playing
+    await userEvent.click(within((await rows())[0]).getByRole("button", { name: "Delete clip 2" }));
+    await vi.waitFor(() => expect(screen.queryByLabelText("Clip player")).not.toBeInTheDocument());
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:x/2");
+  });
+
+  it("stops and releases the player when the voice changes", async () => {
+    const { rerender } = render(<ClipList voiceId="v-1" version={0} onChanged={() => {}} />);
+    await userEvent.click(within((await rows())[0]).getByRole("button", { name: "Play clip 2" }));
+    await screen.findByLabelText("Clip player");
+    rerender(<ClipList voiceId="v-2" version={0} onChanged={() => {}} />);
+    await vi.waitFor(() => expect(screen.queryByLabelText("Clip player")).not.toBeInTheDocument());
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:x/2");
+  });
 });

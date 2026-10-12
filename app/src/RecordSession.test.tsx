@@ -206,11 +206,52 @@ describe("RecordSession", () => {
     expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
   });
 
-  it("shows the error when Cancel fails", async () => {
-    vi.mocked(studioApi.recordCancel).mockRejectedValue(new Error("Cancel failed"));
+  it("keeps the recording controls and shows the error when Cancel fails, so it can be retried", async () => {
+    vi.mocked(studioApi.recordCancel).mockRejectedValueOnce(new Error("Cancel failed"));
     render(<RecordSession voiceId="v-1" active onSaved={() => {}} />);
     await userEvent.click(await ready());
     await userEvent.click(await screen.findByRole("button", { name: "Cancel" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Cancel failed");
+    expect(screen.getByRole("button", { name: "Stop" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(studioApi.recordCancel).toHaveBeenCalledTimes(2);
+    expect(await ready()).toBeInTheDocument();
+  });
+
+  it("stays in the recording state when Stop fails and the cleanup cancel fails too", async () => {
+    vi.mocked(studioApi.recordStop).mockRejectedValue(new Error("Backend unreachable"));
+    vi.mocked(studioApi.recordCancel).mockRejectedValue(new Error("Still unreachable"));
+    render(<RecordSession voiceId="v-1" active onSaved={() => {}} />);
+    await userEvent.click(await ready());
+    await userEvent.click(await screen.findByRole("button", { name: "Stop" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Backend unreachable");
+    expect(screen.getByRole("button", { name: "Stop" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
+  });
+
+  it("keeps recording state when the automatic cancel fails, and retries it when the tab is active again", async () => {
+    vi.mocked(studioApi.recordCancel).mockRejectedValueOnce(new Error("Cancel failed"));
+    const { rerender } = render(<RecordSession voiceId="v-1" active onSaved={() => {}} />);
+    await userEvent.click(await ready());
+    await screen.findByRole("button", { name: "Stop" });
+    rerender(<RecordSession voiceId="v-1" active={false} onSaved={() => {}} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Cancel failed");
+    expect(screen.getByRole("button", { name: "Stop" })).toBeInTheDocument();
+    expect(studioApi.recordCancel).toHaveBeenCalledTimes(1);
+    rerender(<RecordSession voiceId="v-1" active onSaved={() => {}} />);
+    await vi.waitFor(() => expect(studioApi.recordCancel).toHaveBeenCalledTimes(2));
+    expect(await ready()).toBeInTheDocument();
+  });
+
+  it("releases a take's audio that arrives after the component was unmounted", async () => {
+    let arrive: (url: string) => void = () => {};
+    vi.mocked(studioApi.clipAudioUrl).mockReturnValue(new Promise((r) => { arrive = r; }));
+    const { unmount } = render(<RecordSession voiceId="v-1" active onSaved={() => {}} />);
+    await userEvent.click(await ready());
+    await userEvent.click(await screen.findByRole("button", { name: "Stop" }));
+    await vi.waitFor(() => expect(studioApi.clipAudioUrl).toHaveBeenCalled());
+    unmount();
+    arrive("blob:late");
+    await vi.waitFor(() => expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:late"));
   });
 });
