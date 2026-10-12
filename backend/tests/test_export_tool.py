@@ -66,3 +66,29 @@ def test_old_or_unreadable_torch_versions_are_refused(tool, version):
         tool._require_safe_torch(version)
     message = str(info.value.code)
     assert "2.6" in message and "unsafe" in message
+
+
+def test_output_goes_to_the_pretrained_folder_by_default(tool, monkeypatch):
+    monkeypatch.delenv("AIVOICE_EXPORT_DIR", raising=False)
+    assert tool._output_dir("my-voice") == tool.ROOT / "data" / "pretrained" / "rvc" / "my-voice"
+
+
+def test_export_dir_variable_redirects_the_output(tool, monkeypatch, tmp_path):
+    target = tmp_path / "voices" / "abc" / "models" / "rvc.new"
+    monkeypatch.setenv("AIVOICE_EXPORT_DIR", str(target))
+    assert tool._output_dir("my-voice") == target
+
+
+def test_an_empty_export_dir_variable_is_ignored(tool, monkeypatch):
+    monkeypatch.setenv("AIVOICE_EXPORT_DIR", "")
+    assert tool._output_dir("my-voice") == tool.ROOT / "data" / "pretrained" / "rvc" / "my-voice"
+
+
+def test_the_guards_still_run_when_the_export_dir_is_set(tool, monkeypatch, tmp_path):
+    monkeypatch.setenv("AIVOICE_EXPORT_DIR", str(tmp_path / "out"))
+    monkeypatch.setattr(tool, "RVC_REPO", tmp_path / "missing")
+    monkeypatch.setattr(sys, "argv", ["export_rvc_onnx.py", "voice.pth", "my-voice"])
+    with pytest.raises(SystemExit) as info:
+        tool.main()
+    assert "RVC clone missing" in str(info.value.code)
+    assert not (tmp_path / "out").exists()

@@ -9,9 +9,13 @@ this tag fails and bakes a fixed 200-frame length into the graph):
 
 Usage:
     tools/.rvc/venv/Scripts/python tools/export_rvc_onnx.py <voice.pth> <voice-id> [--index file.index] [--name "Display Name"]
+
+The files are written to data/pretrained/rvc/<voice-id>/, or to the folder named by the environment variable
+AIVOICE_EXPORT_DIR when it is set (the training worker uses this to export into a voice's own folder).
 """
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -53,6 +57,11 @@ def _require_safe_torch(version: str) -> None:
         )
 
 
+def _output_dir(voice_id: str) -> Path:
+    override = os.environ.get("AIVOICE_EXPORT_DIR")
+    return Path(override) if override else ROOT / "data" / "pretrained" / "rvc" / voice_id
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Export an RVC v2 .pth voice to ONNX for the AI Voice backend.")
     parser.add_argument("pth", type=Path)
@@ -81,7 +90,7 @@ def main() -> None:
         sys.exit("Only pitch (f0) models are supported.")
     sample_rate = int(cpt["config"][-1])
 
-    out = ROOT / "data" / "pretrained" / "rvc" / args.voice_id
+    out = _output_dir(args.voice_id)
     out.mkdir(parents=True, exist_ok=True)
     export_onnx(str(args.pth), str(out / "model.onnx"))
     if args.index:
