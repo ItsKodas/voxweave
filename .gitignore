@@ -10,3 +10,6 @@ app/dist/
 app/src-tauri/target/
 app/src-tauri/gen/
 .superpowers/
+trainer/.venv/
+trainer/rvc/
+trainer/.cache/

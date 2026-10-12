@@ -1,0 +1,21 @@
+# Derived from rvc/requirments_cu128_py312.txt (commit 81eed5e) for training only on ROCm torch.
+# Removed: --index-url mirror line, setuptools<81 pin (only gradio 3.14 needs pkg_resources),
+# onnxruntime-gpu, coloredlogs, FreeSimpleGUI, sounddevice, gradio + its pinned web stack
+# (altair anyio fastapi httpx markdown-it-py mdit-py-plugins pydantic pyparsing starlette uvicorn websockets),
+# pymss/pymss-core (vocal separation), opencv-python-headless, torchfcpe, local-attention, einops
+# (FCPE / pymss only; not imported by train/*, infer/audio.py, infer/hubert.py, infer/rmvpe.py, infer/module/*).
+av>=15.1.0,<16
+faiss-cpu>=1.13.0,<2
+ffmpeg-python>=0.2.0,<1
+librosa>=0.10.2,<0.11
+matplotlib>=3.8.2,<4
+networkx>=3.2.0,<4
+numpy>=1.26.4,<2
+praat-parselmouth>=0.4.5,<1
+PyYAML>=6.0.1
+scikit-learn>=1.6.0,<2
+scipy>=1.13.1,<2
+soundfile>=0.13.0,<1
+tensorboard>=2.19.0
+tqdm>=4.67.0,<5
+transformers>=4.49.0,<4.50

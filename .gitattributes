@@ -1,1 +1,3 @@
 *.patch text eol=lf
+trainer/setup.sh text eol=lf
+trainer/patches/*.patch -text

@@ -1,0 +1,44 @@
+[
+  {
+    "url": "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/pretrained_v2/f0G40k.pth",
+    "path": "assets/pretrained_v2/f0G40k.pth",
+    "bytes": 73106273,
+    "sha256": "3b2c44035e782c4b14ddc0bede9e2f4a724d025cd073f736d4f43708453adfcb"
+  },
+  {
+    "url": "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/pretrained_v2/f0D40k.pth",
+    "path": "assets/pretrained_v2/f0D40k.pth",
+    "bytes": 142875703,
+    "sha256": "6b6ab091e70801b28e3f41f335f2fc5f3f35c75b39ae2628d419644ec2b0fa09"
+  },
+  {
+    "url": "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/hubert_base/config.json",
+    "path": "assets/hubert_base/config.json",
+    "bytes": 1492,
+    "sha256": "0346950779dfb7f9316fa74ed846e2b8a22a08eedfdc5387b73f327cb1a4a7cf"
+  },
+  {
+    "url": "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/hubert_base/preprocessor_config.json",
+    "path": "assets/hubert_base/preprocessor_config.json",
+    "bytes": 225,
+    "sha256": "7c1976a680fb7acc757cd36fb08eef878fa36c70b4c9d2d595df9c608bbbbf0e"
+  },
+  {
+    "url": "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/hubert_base/pytorch_model.bin",
+    "path": "assets/hubert_base/pytorch_model.bin",
+    "bytes": 189206711,
+    "sha256": "cc8c20f4b90a520757260197a3ff2505705a7adbd20ad9eeaa4e1a9b38442ef5"
+  },
+  {
+    "url": "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/rmvpe.pt",
+    "path": "assets/rmvpe/rmvpe.pt",
+    "bytes": 181184272,
+    "sha256": "6d62215f4306e3ca278246188607209f09af3dc77ed4232efdd069798c4ec193"
+  },
+  {
+    "url": "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/mute.zip",
+    "path": "../.cache/mute.zip",
+    "bytes": 312273,
+    "sha256": "ee948e85213e4ed2f2ba2f8dfcee810bfd0b63131d91450e920bbe1cbd0321d0"
+  }
+]
