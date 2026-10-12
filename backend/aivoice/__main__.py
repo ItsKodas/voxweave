@@ -2,6 +2,7 @@ import argparse
 import os
 import threading
 import time
+from pathlib import Path
 
 import psutil
 import uvicorn
@@ -25,6 +26,7 @@ def build_app():
     from aivoice.library import Library
     from aivoice.recorder import Recorder
     from aivoice.studio import Studio
+    from aivoice.training import TrainingManager
     from aivoice.transcribe import WhisperTranscriber
 
     data = config.data_dir()
@@ -35,8 +37,9 @@ def build_app():
     # The model name is read when an import first needs it, so a bad setting cannot stop startup.
     importer = Importer(library, WhisperTranscriber(lambda: config.whisper_model(data), data / "pretrained" / "whisper"))
     studio = Studio(library, Recorder(streams), importer, list_devices)
+    training = TrainingManager(data, library, Path(__file__).resolve().parents[2] / "trainer")
     return create_app(manager, data, list_devices, ort.get_available_providers(), default_devices=default_devices,
-                      studio=studio, library=library, importer=importer)
+                      studio=studio, library=library, importer=importer, training=training)
 
 
 def main() -> None:

@@ -1,3 +1,4 @@
+import logging
 import threading
 from contextlib import AbstractContextManager
 from dataclasses import asdict
@@ -12,6 +13,9 @@ from aivoice.api import log_refused
 from aivoice.importer import Importer
 from aivoice.library import Library, Voice
 from aivoice.studio import Studio
+
+
+log = logging.getLogger(__name__)
 
 
 class VoiceBody(BaseModel):
@@ -42,10 +46,8 @@ def _origin_of(url: str) -> str | None:
     return f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else None
 
 
-def library_router(studio: Studio, library: Library, importer: Importer, live_running: Callable[[], bool],
-                   exclusive: AbstractContextManager, allowed_origins: list[str]) -> APIRouter:
-    """`exclusive` is the audio lock, shared with the live-start and device-refresh routes: checking
-    "is live running?" and then starting a recording must not interleave with the reverse."""
+def same_app_only_for(allowed_origins: list[str]) -> Callable[[Request], None]:
+    """The request-origin rule of /library and /training, as a dependency."""
 
     def same_app_only(request: Request) -> None:
         # Recordings are sensitive, and a GET is exempt from the app-wide Origin check, so any web page could
@@ -65,9 +67,18 @@ def library_router(studio: Studio, library: Library, importer: Importer, live_ru
             log_refused(request)
             raise HTTPException(status_code=403, detail="Origin not allowed")
 
-    router = APIRouter(prefix="/library", dependencies=[Depends(same_app_only)])
+    return same_app_only
+
+
+def library_router(studio: Studio, library: Library, importer: Importer, live_running: Callable[[], bool],
+                   exclusive: AbstractContextManager, allowed_origins: list[str], training=None,
+                   voices_lock: AbstractContextManager | None = None) -> APIRouter:
+    """`exclusive` is the audio lock, shared with the live-start and device-refresh routes: checking
+    "is live running?" and then starting a recording must not interleave with the reverse."""
+
+    router = APIRouter(prefix="/library", dependencies=[Depends(same_app_only_for(allowed_origins))])
     # Only the pair that touches voices on disk: a delete must not queue behind a slow live start.
-    voices_lock = threading.Lock()
+    voices_lock = voices_lock if voices_lock is not None else threading.Lock()
 
     @router.get("/voices")
     def voices() -> list[dict]:
@@ -85,7 +96,14 @@ def library_router(studio: Studio, library: Library, importer: Importer, live_ru
             job = importer.status()
             if job["active"] and job["voice_id"] == voice_id:
                 raise ValueError("Wait for the import to finish before deleting this voice")
+            if training is not None and training.status(voice_id)["state"] in ("running", "cancelling"):
+                raise ValueError("Stop training before deleting this voice")
             library.delete(voice_id)
+            if training is not None:
+                try:
+                    training.forget(voice_id)
+                except Exception as exc:  # noqa: BLE001 - the voice is already gone; leftovers are only derived files
+                    log.warning("Deleted voice %s but could not remove its training files: %s", voice_id, exc)
         return {"deleted": True}
 
     @router.get("/voices/{voice_id}/clips")
@@ -114,6 +132,8 @@ def library_router(studio: Studio, library: Library, importer: Importer, live_ru
         with exclusive:
             if live_running():
                 raise ValueError("Stop live mode before recording")
+            if training is not None and training.running:
+                raise ValueError("Training is running. Wait for it to finish or cancel it before recording")
             with voices_lock:  # so a delete cannot check "not recording" and then lose the voice to a new take
                 studio.start_recording(body.voice_id, body.input_device, body.prompt)
         return studio.status()

@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import threading
 from dataclasses import asdict
@@ -26,6 +27,7 @@ ALLOWED_ORIGINS = [
     "tauri://localhost",
     "http://localhost:1420",
 ]
+SHUTDOWN_WAIT = 10.0  # seconds the backend's exit waits for a training worker to be stopped
 log = logging.getLogger(__name__)
 
 
@@ -65,11 +67,23 @@ class SettingsBody(BaseModel):
 
 def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list[Device]],
                providers: list[str], default_devices: Callable[[], dict] | None = None,
-               allowed_hosts: list[str] = ALLOWED_HOSTS, studio=None, library=None, importer=None) -> FastAPI:
-    app = FastAPI(title="AI Voice")
+               allowed_hosts: list[str] = ALLOWED_HOSTS, studio=None, library=None, importer=None,
+               training=None) -> FastAPI:
+    @contextlib.asynccontextmanager
+    async def lifespan(_: FastAPI):
+        yield
+        if training is not None:
+            # Stops a running worker so a normal exit leaves nothing for the watchdog. Not waited for long: the
+            # worker also ends itself once this process is gone.
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(asyncio.to_thread(training.shutdown)), SHUTDOWN_WAIT)
+
+    app = FastAPI(title="AI Voice", lifespan=lifespan)
     # Held while checking and then changing audio state, so recording and live mode cannot both win a race.
     audio_state = threading.Lock()
     app.state.audio_state = audio_state
+    # Taken after the audio lock; shared by the voice delete and training start so neither can pass the other's check.
+    voices_lock = threading.Lock()
 
     # Middleware added later runs earlier: Host check, then CORS, then the Origin check below.
     @app.middleware("http")
@@ -134,6 +148,8 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
         with audio_state:
             if studio is not None and studio.recording:
                 raise ValueError("Stop recording before starting live mode")
+            if training is not None and training.running:
+                raise ValueError("Training is running. Wait for it to finish or cancel it before starting live mode")
             manager.start(StartConfig(**body.model_dump()))
         return manager.stats()
 
@@ -175,6 +191,11 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
         from aivoice.api_library import library_router
 
         app.include_router(library_router(studio, library, importer, lambda: bool(manager.stats()["running"]),
-                                          audio_state, ALLOWED_ORIGINS))
+                                          audio_state, ALLOWED_ORIGINS, training, voices_lock))
+        if training is not None:
+            from aivoice.api_training import training_router
+
+            app.include_router(training_router(training, studio, lambda: bool(manager.stats()["running"]),
+                                               audio_state, voices_lock, ALLOWED_ORIGINS))
 
     return app
