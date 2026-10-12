@@ -50,3 +50,49 @@ Items above about the harvest dither, the DirectML CPU-fallback check, settings 
 - Not yet verified by a human: listening quality with a real voice, preset tuning, tray menu, Ctrl+Alt+V hotkey, hide to tray, tray Quit, device unplug detection, backend log redirection, device refresh inside a running backend.
 - No GPU pitch detector yet (RMVPE); all presets use the fast CPU detector.
 - Starlette recommends migrating the test client from httpx to httpx2; deferred pending owner approval of the new dependency.
+
+## Stage 2 (recording and import)
+
+Recorded at the end of the stage 2 build. Source: the build ledger. Every ruling states what it costs if wrong.
+
+### Decisions made during the build
+
+- Ruling: proceed without human plan review — the user instructed hands-free execution through all stages — if wrong: the plan can be amended and work redone on the branch before merge.
+- Ruling: transcripts default to English (small.en) — the user writes in English and the bundled prompts are English — if wrong: set whisper_model to a multilingual model; prompts would need a second language file.
+- Ruling: tasks are batched as 2+3, 4+5, 6+7 (small pure modules with complete code), each batch one implementer and one review — if wrong: a defect in one delays its pair.
+- Ruling: new Python packages (faster-whisper, ctranslate2, huggingface-hub, tokenizers, av, tqdm) and the ~480 MB Whisper model download are covered by the approved spec ("Whisper runs locally") and the hands-free instruction — if wrong: packages can be uninstalled and data/pretrained/whisper deleted.
+- Ruling: the recording sentence "It rained all week, yet the garden has never looked greener." stays unchanged — past simple followed by present perfect is correct, natural English, and the original finding was a Minor — if wrong: one prompt line reads slightly oddly.
+- Ruling: Task 8 fix (backend only) and Task 10 (app/src only) run at the same time with separate implementers, each staging only its own directory — the two touch disjoint files and waiting costs wall-clock for no safety gain — if wrong: a git index.lock collision, which each is told to retry.
+- Ruling: clip audio is fetched by the frontend with fetch() and played from a blob URL instead of pointing <audio src> at the backend — fetch always sends Origin, so the new /library origin check works regardless of what Referer the webview sends for media requests — carried into Task 11 — if wrong: slightly more memory per played clip.
+- Ruling: the import status gains a `voice_id` field in the backend so the UI can tell whose job it is — simplest correct attribution; the router already tracks it — if wrong: one extra field in a status payload.
+
+### Deferred minor findings
+
+Copied from the ledger. Where the code at the end of the build shows an item was fixed since, it is marked.
+
+- Task 1: minor (deferred): huggingface-hub has no upper bound (resolved 2.2.0); notes do not list transitive packages; Whisper returns "You" for near-silence (do not rely on empty transcripts)
+- Tasks 2+3: minor (deferred): duration cap not checked on resampler flush; peak memory for hour-long files; split_on_silence with tiny max_seconds or large pad_ms
+- Tasks 4+5: minor (deferred): `created` uses local time without an offset, so listing order can be wrong in the repeated daylight-saving hour
+- Task 8: minor (deferred): no test drives the lock with racing threads; no Task 8 test for a >20 s take
+- Task 9: minor (deferred): VoicesPanel load has no stale-response guard; error banner persists until next successful load; tabs lack aria-controls; confirm spy not restored in finally
+- Task 8: minor (deferred, FIX AT FINAL): a page on another localhost port is same-site and can still play clips; tighten /library so any browser request (Sec-Fetch-Site present) must carry an allowed Origin or Referer, now that the frontend fetches audio with fetch() [partly addressed: the /library check refuses a cross-site request that names no allowed Origin or Referer, but a same-site request (another port on the same host) with neither header is still allowed]
+- Task 8: minor (deferred, FIX AT FINAL): delete of a voice can race the save inside record_stop; take the voices lock in record_stop after the audio lock [still open: record_stop in api_library.py takes the audio lock only]
+- Task 8: minor (deferred): real webview headers unverified by a human; stop holds the audio lock through the disk save
+- Task 10: minor (deferred, FIX AT FINAL): a failed Cancel (or tab-inactive cancel) leaves the UI idle while the backend may still be recording, with no Stop/Cancel button to retry [still open: RecordSession.tsx clears its recording state before the cancel request is known to succeed]
+- Task 10: minor (deferred): tab going inactive during an in-flight Stop fires a concurrent cancel; in-flight-start test does not assert recordStop was not called
+
+### Open at the end of the build
+
+- The Task 11 review found two Important issues (the mount probe in ImportDrop.tsx adopts a running import that belongs to another voice, and a second import in the same mount can report the previous job's result). The ruling above adds a `voice_id` field to the import status as the fix. At the time of writing the import status in `backend/aivoice/importer.py` has no `voice_id`, so check the ledger before relying on the Voices tab with two voices and an import running.
+- The stage 1 items under "Still open after the final review" still apply.
+
+### Not verified by a human
+
+Everything below was exercised only with fake devices, generated audio and a fake transcriber. The suites passing says nothing about these.
+
+- The whole "Stage 2 first run checklist" in `README.md` (11 steps).
+- Real microphone recording: device selection, the level meter, the four rejection messages with a real voice and a real room, and that leaving the tab stops the microphone.
+- Drag and drop in the real Tauri window: that dropped file paths reach the Voices tab, and that nothing happens on the Live tab.
+- Clip playback in the real webview: clips are fetched with `fetch()` and played from a blob URL, and the `/library` origin check was written against the headers the webview is expected to send, not ones observed. If the real webview sends different Origin or Referer values, playback and every Voices call would fail with a 403.
+- Real Whisper transcription quality: how accurate `small.en` is on real recordings and on music or noisy files, the first-use download of about 500 MB, and import speed on this CPU. Whisper returns text such as "You" for near-silence, so quiet pieces are filtered by level, not by empty text.
+- Recording and live mode refusing each other on real hardware, and Refresh devices being refused during a take.
