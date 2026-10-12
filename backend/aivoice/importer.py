@@ -55,8 +55,8 @@ class Importer:
                 raise ValueError("An import is already running")
             job = _Job(len(paths))
             job.thread = threading.Thread(target=self._run, args=(job, voice_id, list(paths)), daemon=True)
-            self._job = job
             job.thread.start()
+            self._job = job  # only once the thread runs, so a failed start cannot leave a stuck active job
 
     def cancel(self) -> None:
         with self._lock:
@@ -115,7 +115,7 @@ class Importer:
                 raise _StopJob(f"Transcription failed: {exc}") from exc
             try:
                 self._library.add_clip(voice_id, piece, text, "imported", origin=path.name)
-            except LibraryError:
+            except Exception:
                 self._check_voice(voice_id)  # a deleted voice ends the job; any other cause is this file's
                 raise
             self._bump(job, "clips_added")

@@ -4,7 +4,8 @@ import time
 import numpy as np
 import pytest
 
-from aivoice.audiofile import AudioFileError, write_wav
+from aivoice.audiofile import write_wav
+from aivoice.dataset import QUIET_PEAK
 from aivoice.importer import AUDIO_EXTENSIONS, Importer
 from aivoice.library import Library, LibraryError
 
@@ -30,6 +31,16 @@ class FakeTranscriber:
             raise RuntimeError("model download failed")
         self.count += 1
         return f"line {self.count}"
+
+
+class RecordingTranscriber(FakeTranscriber):
+    def __init__(self):
+        super().__init__()
+        self.heard = []
+
+    def transcribe(self, audio16k):
+        self.heard.append(audio16k)
+        return super().transcribe(audio16k)
 
 
 def setup(tmp_path, transcriber=None):
@@ -86,10 +97,14 @@ def test_a_file_with_no_speech_is_reported(tmp_path):
 
 
 def test_too_quiet_pieces_are_skipped_and_counted(tmp_path):
-    _, voice, importer = setup(tmp_path)
+    transcriber = RecordingTranscriber()
+    _, voice, importer = setup(tmp_path, transcriber)
     audio = np.concatenate([noise(2.0, amp=0.02), silence(0.6), noise(2.0)])
     status = run(importer, voice, [wav(tmp_path, "mixed.wav", audio)])
     assert (status["clips_added"], status["skipped"]) == (1, 1)
+    # Quiet pieces must be filtered by level BEFORE Whisper sees them (it invents words for near-silence).
+    assert len(transcriber.heard) == 1
+    assert float(np.max(np.abs(transcriber.heard[0]))) >= QUIET_PEAK
 
 
 def test_transcription_failure_stops_the_job_with_one_clear_error(tmp_path):
@@ -158,7 +173,6 @@ def test_status_before_any_import():
 
 def test_common_formats_are_accepted():
     assert {".wav", ".mp3", ".flac", ".m4a", ".ogg"} <= AUDIO_EXTENSIONS
-    assert AudioFileError
 
 
 def test_a_voice_deleted_mid_import_ends_the_job_with_one_error(tmp_path):
@@ -214,6 +228,7 @@ def test_a_new_import_can_start_as_soon_as_the_last_one_reports_finished(tmp_pat
     lib, voice, importer = setup(tmp_path)
     path = wav(tmp_path, "a.wav", noise(2.0))
     importer.start(voice.id, [path])
+    # Poll status instead of wait(): wait() joins the thread and would hide the finished-but-still-exiting window.
     deadline = time.monotonic() + 10
     while not importer.status()["finished"]:
         assert time.monotonic() < deadline
@@ -256,3 +271,36 @@ def test_an_unexpected_failure_while_reading_is_reported_not_raised(tmp_path):
 
     status = run(Importer(lib, FakeTranscriber(), read_audio=broken), voice, [wav(tmp_path, "a.wav", noise(2.0))])
     assert status["finished"] and status["errors"] == ["a.wav: out of memory"]
+
+
+def test_a_failed_thread_start_does_not_leave_a_stuck_job(tmp_path, monkeypatch):
+    lib, voice, importer = setup(tmp_path)
+    path = wav(tmp_path, "a.wav", noise(2.0))
+    real_start = threading.Thread.start
+
+    def boom(self):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", boom)
+    with pytest.raises(RuntimeError):
+        importer.start(voice.id, [path])
+    assert importer.status()["active"] is False
+    monkeypatch.setattr(threading.Thread, "start", real_start)
+    assert run(importer, voice, [path])["clips_added"] == 1
+
+
+def test_any_save_failure_for_a_vanished_voice_is_one_error(tmp_path):
+    lib = Library(tmp_path / "data")
+    voice = lib.create("V")
+
+    class VanishingLibrary:
+        def __getattr__(self, name):
+            return getattr(lib, name)
+
+        def add_clip(self, *args, **kwargs):
+            lib.delete(voice.id)
+            raise FileNotFoundError("clips folder is gone")
+
+    importer = Importer(VanishingLibrary(), FakeTranscriber())
+    status = run(importer, voice, [wav(tmp_path, "a.wav", noise(2.0)), wav(tmp_path, "b.wav", noise(2.0))])
+    assert status["errors"] == ["The voice was deleted during the import"]

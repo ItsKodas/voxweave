@@ -86,7 +86,7 @@ class Recorder:
             with self._data_lock:
                 audio = np.concatenate(self._blocks) if self._blocks else np.zeros(0, dtype=np.float32)
             self._reset()
-            return audio.astype(np.float32)
+            return audio[: self._max].astype(np.float32)
 
     def cancel(self) -> None:
         with self._lock:

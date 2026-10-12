@@ -64,7 +64,7 @@ def test_recording_stops_growing_at_the_limit():
     for _ in range(5):
         streams.on_audio(block(0.5))
     assert rec.status()["full"] is True
-    assert len(rec.stop()) <= int(1.5 * SR)
+    assert len(rec.stop()) == int(1.0 * SR)
 
 
 def test_start_twice_is_refused():
