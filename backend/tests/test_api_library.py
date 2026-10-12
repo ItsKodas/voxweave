@@ -69,6 +69,17 @@ def drop_file(tmp_path, name="talk.wav"):
     return path
 
 
+def test_voice_summary_lists_the_trained_models(tmp_path):
+    client, _, _ = make(tmp_path)
+    voice = new_voice(client)
+    assert voice["models"] == []
+    folder = tmp_path / "voices" / voice["id"] / "models" / "rvc"
+    folder.mkdir(parents=True)
+    (folder / "model.onnx").write_bytes(b"x")
+    (folder / "voice.json").write_text('{"name": "V", "sample_rate": 40000}')
+    assert client.get("/library/voices").json()[0]["models"] == ["rvc"]
+
+
 def test_create_list_delete_voice(tmp_path):
     client, _, _ = make(tmp_path)
     voice = new_voice(client, "My Voice")

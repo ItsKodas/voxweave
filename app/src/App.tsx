@@ -57,6 +57,7 @@ function Main() {
   latest.current = stats;
   const [actionError, setActionError] = useState<string | null>(null);
   const [devicesVersion, setDevicesVersion] = useState(0);
+  const [voicesVersion, setVoicesVersion] = useState(0);
   const [tab, setTab] = useState<"live" | "voices">("live");
 
   useLiveShortcuts(latest, setActionError);
@@ -70,10 +71,10 @@ function Main() {
       {/* Both stay mounted so switching tabs never resets a form or interrupts a session. */}
       <div role="tabpanel" hidden={tab !== "live"}>
         <SetupCheck refreshKey={devicesVersion} />
-        <LivePanel stats={stats} actionError={actionError} onDevicesRefreshed={() => setDevicesVersion((v) => v + 1)} />
+        <LivePanel stats={stats} actionError={actionError} voicesVersion={voicesVersion} onDevicesRefreshed={() => setDevicesVersion((v) => v + 1)} />
       </div>
       <div role="tabpanel" hidden={tab !== "voices"}>
-        <VoicesPanel active={tab === "voices"} devicesVersion={devicesVersion} />
+        <VoicesPanel active={tab === "voices"} devicesVersion={devicesVersion} onModelReady={() => setVoicesVersion((v) => v + 1)} />
       </div>
     </>
   );

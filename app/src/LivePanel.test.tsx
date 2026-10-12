@@ -331,4 +331,58 @@ describe("LivePanel", () => {
     expect(await ready()).toBeEnabled();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
+
+  describe("when a trained voice appears (voicesVersion changes)", () => {
+    const DEMO = { id: "demo", name: "Demo", has_index: true };
+    const ALPHA = { id: "alpha", name: "Alpha", has_index: false };
+
+    it("adds the new voice to the list and keeps the selection and the rest of the form", async () => {
+      vi.mocked(api.voices).mockResolvedValue([DEMO, ALPHA]);
+      const { rerender } = render(<LivePanel stats={IDLE} voicesVersion={0} />);
+      await ready();
+      await userEvent.selectOptions(screen.getByLabelText("Voice"), "alpha");
+      await userEvent.selectOptions(screen.getByLabelText("Speed / quality"), "high_quality");
+      const NEW = { id: "mine", name: "Mine", has_index: false };
+      vi.mocked(api.voices).mockResolvedValue([DEMO, ALPHA, NEW]);
+      const devicesCalls = vi.mocked(api.devices).mock.calls.length;
+      rerender(<LivePanel stats={IDLE} voicesVersion={1} />);
+      expect(await screen.findByRole("option", { name: "Mine" })).toBeInTheDocument();
+      expect(screen.getByLabelText("Voice")).toHaveValue("alpha");
+      expect(screen.getByLabelText("Speed / quality")).toHaveValue("high_quality");
+      expect(api.devices).toHaveBeenCalledTimes(devicesCalls); // only the voice list is reloaded
+      await userEvent.click(screen.getByRole("button", { name: "Start" }));
+      expect(api.start).toHaveBeenCalledWith(expect.objectContaining({ voice: "alpha", preset: "high_quality" }));
+    });
+
+    it("falls back to the first voice when the selected one is gone", async () => {
+      vi.mocked(api.voices).mockResolvedValue([DEMO, ALPHA]);
+      const { rerender } = render(<LivePanel stats={IDLE} voicesVersion={0} />);
+      await ready();
+      await userEvent.selectOptions(screen.getByLabelText("Voice"), "alpha");
+      vi.mocked(api.voices).mockResolvedValue([DEMO]);
+      rerender(<LivePanel stats={IDLE} voicesVersion={1} />);
+      await vi.waitFor(() => expect(screen.queryByRole("option", { name: "Alpha" })).not.toBeInTheDocument());
+      expect(screen.getByLabelText("Voice")).toHaveValue("demo");
+    });
+
+    it("does not reload on first render or when the version is unchanged", async () => {
+      const { rerender } = render(<LivePanel stats={IDLE} voicesVersion={3} />);
+      await ready();
+      rerender(<LivePanel stats={IDLE} voicesVersion={3} />);
+      expect(api.voices).toHaveBeenCalledTimes(1);
+    });
+
+    it("leaves a running session alone and ignores a failed reload", async () => {
+      const running = { ...IDLE, running: true, mode: "converted" as const };
+      const { rerender } = render(<LivePanel stats={IDLE} voicesVersion={0} />);
+      await ready();
+      rerender(<LivePanel stats={running} voicesVersion={0} />);
+      vi.mocked(api.voices).mockRejectedValue(new Error("down"));
+      rerender(<LivePanel stats={running} voicesVersion={1} />);
+      await vi.waitFor(() => expect(api.voices).toHaveBeenCalledTimes(2));
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      expect(screen.getByLabelText("Voice")).toHaveValue("demo");
+      expect(api.stop).not.toHaveBeenCalled();
+    });
+  });
 });

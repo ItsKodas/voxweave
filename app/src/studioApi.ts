@@ -1,6 +1,14 @@
 import { call, failure, origin } from "./api";
 
-export type LibraryVoice = { id: string; name: string; created: string; minutes: number; clips: number };
+export type LibraryVoice = {
+  id: string;
+  name: string;
+  created: string;
+  minutes: number;
+  clips: number;
+  /** Trained engines that can be used live, for example ["rvc"]. */
+  models: string[];
+};
 export type Clip = {
   index: number;
   text: string;

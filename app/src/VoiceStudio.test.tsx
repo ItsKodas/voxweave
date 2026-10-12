@@ -14,13 +14,18 @@ vi.mock("./RecordSession", () => ({
 vi.mock("./ImportDrop", () => ({
   ImportDrop: ({ onImported }: { onImported: () => void }) => <button onClick={onImported}>import done</button>,
 }));
+vi.mock("./TrainPanel", () => ({
+  TrainPanel: ({ voice, active, onModelReady }: { voice: { name: string }; active: boolean; onModelReady: () => void }) => (
+    <button onClick={onModelReady}>train {voice.name} {active ? "active" : "idle"}</button>
+  ),
+}));
 vi.mock("./ClipList", () => ({
   ClipList: ({ version, onChanged }: { version: number; onChanged: () => void }) => (
     <button onClick={onChanged}>clips v{version}</button>
   ),
 }));
 
-const VOICE = { id: "v-1", name: "Alpha", created: "1", minutes: 12.3, clips: 80 };
+const VOICE = { id: "v-1", name: "Alpha", created: "1", minutes: 12.3, clips: 80, models: [] };
 
 describe("MinutesBar", () => {
   it("shows minutes against the usable and good marks", () => {
@@ -57,5 +62,15 @@ describe("VoiceStudio", () => {
     expect(screen.getByText("record devices 2")).toBeInTheDocument();
     rerender(<VoiceStudio voice={VOICE} active devicesVersion={3} onChanged={() => {}} />);
     expect(screen.getByText("record devices 3")).toBeInTheDocument();
+  });
+
+  it("shows the training panel for this voice and passes on a finished model", async () => {
+    const onModelReady = vi.fn();
+    const { rerender } = render(<VoiceStudio voice={VOICE} active onChanged={() => {}} onModelReady={onModelReady} />);
+    expect(screen.getByRole("heading", { name: "Train" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "train Alpha active" }));
+    expect(onModelReady).toHaveBeenCalledTimes(1);
+    rerender(<VoiceStudio voice={VOICE} active={false} onChanged={() => {}} onModelReady={onModelReady} />);
+    expect(screen.getByRole("button", { name: "train Alpha idle" })).toBeInTheDocument();
   });
 });

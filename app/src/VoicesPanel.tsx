@@ -2,7 +2,12 @@ import { useCallback, useEffect, useState } from "react";
 import { LibraryVoice, studioApi } from "./studioApi";
 import { VoiceStudio } from "./VoiceStudio";
 
-export function VoicesPanel({ active, devicesVersion = 0 }: { active: boolean; devicesVersion?: number }) {
+export function VoicesPanel({ active, devicesVersion = 0, onModelReady }: {
+  active: boolean;
+  devicesVersion?: number;
+  /** A training run finished (the Live tab's voice list must reload). */
+  onModelReady?: () => void;
+}) {
   const [voices, setVoices] = useState<LibraryVoice[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [name, setName] = useState("");
@@ -58,6 +63,11 @@ export function VoicesPanel({ active, devicesVersion = 0 }: { active: boolean; d
     }
   };
 
+  const modelReady = useCallback(() => {
+    void load();
+    onModelReady?.();
+  }, [load, onModelReady]);
+
   const current = voices?.find((v) => v.id === selected) ?? null;
 
   return (
@@ -94,7 +104,7 @@ export function VoicesPanel({ active, devicesVersion = 0 }: { active: boolean; d
           ))}
         </ul>
       )}
-      {current && <VoiceStudio key={current.id} voice={current} active={active} devicesVersion={devicesVersion} onChanged={() => load()} />}
+      {current && <VoiceStudio key={current.id} voice={current} active={active} devicesVersion={devicesVersion} onChanged={() => load()} onModelReady={modelReady} />}
     </section>
   );
 }

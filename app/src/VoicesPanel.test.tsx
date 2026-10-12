@@ -7,8 +7,9 @@ vi.mock("./studioApi", () => ({
   studioApi: { voices: vi.fn(), createVoice: vi.fn(), deleteVoice: vi.fn() },
 }));
 vi.mock("./VoiceStudio", () => ({
-  VoiceStudio: ({ voice, onChanged, devicesVersion }: { voice: { name: string }; onChanged: () => void; devicesVersion?: number }) => (
+  VoiceStudio: ({ voice, onChanged, devicesVersion, onModelReady }: { voice: { name: string }; onChanged: () => void; devicesVersion?: number; onModelReady?: () => void }) => (
     <>
+      <button onClick={onModelReady}>model ready for {voice.name}</button>
       <button onClick={onChanged}>studio for {voice.name}</button>
       <p>studio devices {devicesVersion}</p>
     </>
@@ -16,13 +17,13 @@ vi.mock("./VoiceStudio", () => ({
 }));
 import { studioApi } from "./studioApi";
 
-const A = { id: "a-111111", name: "Alpha", created: "1", minutes: 4.5, clips: 30 };
-const B = { id: "b-222222", name: "Beta", created: "2", minutes: 0, clips: 0 };
+const A = { id: "a-111111", name: "Alpha", created: "1", minutes: 4.5, clips: 30, models: [] };
+const B = { id: "b-222222", name: "Beta", created: "2", minutes: 0, clips: 0, models: [] };
 
 beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(studioApi.voices).mockResolvedValue([A, B]);
-  vi.mocked(studioApi.createVoice).mockResolvedValue({ id: "c-333333", name: "Gamma", created: "3", minutes: 0, clips: 0 });
+  vi.mocked(studioApi.createVoice).mockResolvedValue({ id: "c-333333", name: "Gamma", created: "3", minutes: 0, clips: 0, models: [] });
   vi.mocked(studioApi.deleteVoice).mockResolvedValue({ deleted: true });
 });
 
@@ -50,7 +51,7 @@ describe("VoicesPanel", () => {
   it("creates a voice, selects it and clears the name field", async () => {
     render(<VoicesPanel active />);
     await screen.findByRole("list", { name: "Voices" });
-    vi.mocked(studioApi.voices).mockResolvedValue([A, B, { id: "c-333333", name: "Gamma", created: "3", minutes: 0, clips: 0 }]);
+    vi.mocked(studioApi.voices).mockResolvedValue([A, B, { id: "c-333333", name: "Gamma", created: "3", minutes: 0, clips: 0, models: [] }]);
     const field = screen.getByLabelText("New voice name");
     await userEvent.type(field, "Gamma");
     await userEvent.click(screen.getByRole("button", { name: "Create voice" }));
@@ -118,5 +119,13 @@ describe("VoicesPanel", () => {
     expect(studioApi.voices).not.toHaveBeenCalled();
     rerender(<VoicesPanel active />);
     await vi.waitFor(() => expect(studioApi.voices).toHaveBeenCalledTimes(1));
+  });
+
+  it("reloads the voices and tells the app when a voice's training has finished", async () => {
+    const onModelReady = vi.fn();
+    render(<VoicesPanel active onModelReady={onModelReady} />);
+    await userEvent.click(await screen.findByRole("button", { name: "model ready for Alpha" }));
+    expect(onModelReady).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(studioApi.voices).toHaveBeenCalledTimes(2));
   });
 });

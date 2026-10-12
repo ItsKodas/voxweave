@@ -38,7 +38,7 @@ class ImportBody(BaseModel):
 
 def _summary(voice: Voice) -> dict:
     return {"id": voice.id, "name": voice.name, "created": voice.created, "minutes": voice.minutes,
-            "clips": len(voice.clips)}
+            "clips": len(voice.clips), "models": voice.models}
 
 
 def _origin_of(url: str) -> str | None:

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, Device, DeviceList, Params, Stats, Voice } from "./api";
 
 const PRESET_LABELS: Record<string, string> = {
@@ -54,9 +54,11 @@ type Props = {
   actionError?: string | null;
   /** Called after "Refresh devices" succeeded, so setup checks that depend on devices can re-run. */
   onDevicesRefreshed?: () => void;
+  /** Changes when the voice library changed (a training run finished): the voice list reloads, nothing else. */
+  voicesVersion?: number;
 };
 
-export function LivePanel({ stats, actionError = null, onDevicesRefreshed }: Props) {
+export function LivePanel({ stats, actionError = null, onDevicesRefreshed, voicesVersion = 0 }: Props) {
   const [devices, setDevices] = useState<Device[]>([]);
   const [virtualMic, setVirtualMic] = useState<number | null>(null);
   const [voices, setVoices] = useState<Voice[]>([]);
@@ -105,6 +107,25 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed }: Pro
   };
 
   useEffect(load, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // A new trained voice appears without a restart. Only the list reloads, so the form and a running session stay.
+  const seenVoicesVersion = useRef(voicesVersion);
+  useEffect(() => {
+    if (seenVoicesVersion.current === voicesVersion) return;
+    seenVoicesVersion.current = voicesVersion;
+    let stale = false;
+    api.voices().then(
+      (list) => {
+        if (stale) return;
+        setVoices(list);
+        setVoice((current) => (list.some((v) => v.id === current) ? current : (list[0]?.id ?? "")));
+      },
+      () => {}, // the list on screen is still valid; the next change reloads it again
+    );
+    return () => {
+      stale = true;
+    };
+  }, [voicesVersion]);
 
   const reportFailure = (e: unknown) => setError((e as Error).message);
 
