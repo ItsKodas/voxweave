@@ -12,6 +12,7 @@ Usage:
 """
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -20,15 +21,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 RVC_REPO = Path(__file__).resolve().parent / ".rvc" / "repo"
 PATCH = Path(__file__).resolve().parent / "rvc_onnx_export.patch"
+MIN_TORCH = (2, 6)
 
 
 def _require_patched_repo() -> None:
     if not RVC_REPO.is_dir():
         sys.exit(f"RVC clone missing at {RVC_REPO}. Follow the setup steps at the top of this file.")
-    done = subprocess.run(
-        ["git", "-C", str(RVC_REPO), "apply", "--reverse", "--check", "--ignore-whitespace", str(PATCH)],
-        capture_output=True,
-    )
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(RVC_REPO), "apply", "--reverse", "--check", "--ignore-whitespace", str(PATCH)],
+            capture_output=True,
+        )
+    except FileNotFoundError:
+        sys.exit("git was not found. Install Git and make sure it is on PATH; it is needed to check the RVC clone.")
     if done.returncode != 0:
         sys.exit(
             "The RVC clone is not patched. Run:\n"
@@ -36,20 +41,35 @@ def _require_patched_repo() -> None:
         )
 
 
-_require_patched_repo()
-sys.path.insert(0, str(RVC_REPO))
-
-import torch  # noqa: E402
-from infer.modules.onnx.export import export_onnx  # noqa: E402
+def _require_safe_torch(version: str) -> None:
+    # Compare numbers, not strings: "2.10" is newer than "2.6".
+    match = re.match(r"(\d+)\.(\d+)", version)
+    if match is None or (int(match.group(1)), int(match.group(2))) < MIN_TORCH:
+        wanted = ".".join(map(str, MIN_TORCH))
+        sys.exit(
+            f"torch {version} is too old: this exporter needs torch {wanted} or newer. Older versions load "
+            "model files in an unsafe way that can run code hidden in a .pth file. Reinstall with the setup "
+            "steps at the top of this file."
+        )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Export an RVC v2 .pth voice to ONNX for the AI Voice backend.")
     parser.add_argument("pth", type=Path)
     parser.add_argument("voice_id")
     parser.add_argument("--index", type=Path)
     parser.add_argument("--name")
     args = parser.parse_args()
+
+    # Checked after parsing so that --help works anywhere.
+    _require_patched_repo()
+    try:
+        import torch
+    except ImportError:
+        sys.exit("torch is not installed in this Python. Run this script with tools/.rvc/venv/Scripts/python.")
+    _require_safe_torch(torch.__version__)
+    sys.path.insert(0, str(RVC_REPO))
+    from infer.modules.onnx.export import export_onnx
 
     try:
         cpt = torch.load(args.pth, map_location="cpu", weights_only=True)
