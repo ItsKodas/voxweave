@@ -192,10 +192,10 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
 
         app.include_router(library_router(studio, library, importer, lambda: bool(manager.stats()["running"]),
                                           audio_state, ALLOWED_ORIGINS, training, voices_lock))
-        if training is not None:
-            from aivoice.api_training import training_router
+    if training is not None:
+        from aivoice.api_training import training_router
 
-            app.include_router(training_router(training, studio, lambda: bool(manager.stats()["running"]),
-                                               audio_state, voices_lock, ALLOWED_ORIGINS))
+        app.include_router(training_router(training, studio, lambda: bool(manager.stats()["running"]),
+                                           audio_state, voices_lock, ALLOWED_ORIGINS))
 
     return app

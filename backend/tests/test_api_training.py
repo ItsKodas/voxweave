@@ -1,5 +1,6 @@
 import json
 import logging
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
@@ -208,3 +209,76 @@ def test_shutting_the_app_down_stops_the_worker(s):
         pass
     assert s.rig.handles[0].kills == 1
     assert s.rig.manager.status()["state"] == "interrupted"
+
+
+class SlowVerify:
+    """Holds the environment check open until released."""
+
+    def __init__(self, s):
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.inner = s.rig.verify
+        s.rig.manager._verify = self
+
+    def __call__(self, fast):
+        self.entered.set()
+        assert self.release.wait(10)
+        return self.inner(fast)
+
+
+def test_refresh_does_not_probe_while_training_runs(s):
+    assert s.client.get("/training/environment").json()["ok"] is True
+    s.start_training()
+    calls = len(s.rig.verify_calls)
+    report = s.client.get("/training/environment?refresh=true").json()
+    assert report["ok"] is True and report["checked_while_training"] is True
+    assert len(s.rig.verify_calls) == calls
+    s.client.post("/training/cancel")
+    assert s.client.get("/training/environment?refresh=true").json()["checked_while_training"] is True
+    assert len(s.rig.verify_calls) == calls
+
+
+def test_refresh_probes_when_idle(s):
+    s.client.get("/training/environment")
+    report = s.client.get("/training/environment?refresh=true").json()
+    assert "checked_while_training" not in report and len(s.rig.verify_calls) == 2
+
+
+def test_a_slow_environment_check_blocks_only_the_start_request(s):
+    slow = SlowVerify(s)
+    result = {}
+    thread = threading.Thread(target=lambda: result.update(res=s.start_training()))
+    thread.start()
+    try:
+        assert slow.entered.wait(10)
+        assert s.client.post("/live/start", json=START).status_code == 200  # the audio lock is free
+        s.client.post("/live/stop")
+        assert s.client.get("/training/status").json()["state"] == "idle"  # polling does not wait either
+        assert s.client.delete(f"/library/voices/{s.rig.voice('Other')}").status_code == 200
+    finally:
+        slow.release.set()
+        thread.join(10)
+    assert "res" in result and result["res"].status_code in (200, 400)
+
+
+def test_not_ready_environment_is_a_400_before_any_lock_or_launch(s):
+    s.rig.report = FAIL
+    with s.app.state.audio_state:  # even with the audio lock held elsewhere the refusal comes back
+        res = s.start_training()
+    assert res.status_code == 400
+    assert res.json()["detail"] == "Training is not set up: torch sees no GPU; ffmpeg not found on PATH"
+    assert s.rig.launches == []
+
+
+def test_training_routes_exist_without_a_studio(tmp_path):
+    rig = Rig(tmp_path)
+    rig.build()
+    rig.data.mkdir(parents=True, exist_ok=True)
+    add_voice(rig.data, "demo")
+    manager = LiveManager(rig.data, lambda: DEVICES, lambda v: Identity(), FakeStreams())
+    client = TestClient(create_app(manager, rig.data, lambda: DEVICES, [], allowed_hosts=[*ALLOWED_HOSTS, "testserver"],
+                                   training=rig.manager))
+    voice = rig.voice()
+    assert client.get("/training/status").status_code == 200
+    assert client.post("/training/start", json={"voice_id": voice}).status_code == 200
+    assert client.post("/live/start", json=START).status_code == 400
