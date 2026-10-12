@@ -1,8 +1,6 @@
-from fastapi.testclient import TestClient
-
-from aivoice.api import create_app
+from tests.test_api import make_client
 
 
-def test_health():
-    client = TestClient(create_app())
+def test_health(tmp_path):
+    client, _ = make_client(tmp_path)
     assert client.get("/health").json() == {"status": "ok"}

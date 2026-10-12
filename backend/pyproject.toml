@@ -26,3 +26,5 @@ include = ["aivoice*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Starlette recommends migrating the test client to httpx2; deferred pending the owner's approval of a new dependency.
+filterwarnings = ["ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning"]
