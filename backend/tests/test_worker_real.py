@@ -285,6 +285,8 @@ def test_a_real_run_can_be_cancelled_and_resumed(real):
     assert any(line["message"].startswith("Continuing from epoch") for line in resumed), "the resumed event"
     assert real.log().count("Loaded checkpoint") >= 2
     assert f"Continuing from epoch {cancelled_at}" in [line["message"] for line in resumed]
+    assert min(line["percent"] for line in resumed) >= 13 + 84 * cancelled_at / 6 - 0.01, "no dip on resume"
+    assert all(line["epoch"] >= cancelled_at for line in resumed if line["stage"] == "train")
     assert "epoch_start" not in real.log() and "Loaded generator pretrained model" not in real.log().split(
         "stop requested")[-1], "the resumed run must not start again from the pretrained base"
     assert wait_until_none_left(real.experiment) == []

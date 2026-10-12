@@ -7,9 +7,9 @@ worker log lines copied from the spike notes. Time is a fake clock; no test slee
 import importlib.util
 import json
 import os
+import stat
 import subprocess
 import sys
-import time
 import zipfile
 from pathlib import Path
 
@@ -968,7 +968,7 @@ def test_kill_process_tree_runs_taskkill_on_the_whole_tree_without_a_window(work
     def fake_run(argv, **kwargs):
         seen["argv"], seen["kwargs"] = argv, kwargs
 
-    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+    monkeypatch.setattr(worker.procutil.subprocess, "run", fake_run)
     worker.kill_process_tree(4321)
     assert seen["argv"] == ["taskkill", "/PID", "4321", "/T", "/F"]
     assert seen["kwargs"].get("shell", False) is False
@@ -1034,9 +1034,7 @@ def test_the_real_runner_kills_the_tree_when_the_worker_itself_fails(worker, tmp
 
 
 def wait_until_gone(worker, pid):
-    deadline = time.monotonic() + 20
-    while worker.process_alive(pid):
-        assert time.monotonic() < deadline, f"process {pid} is still running"
+    assert worker.wait_for_exit(pid, 20), f"process {pid} is still running"
 
 
 GRANDCHILD = (
@@ -1156,12 +1154,11 @@ def test_a_swap_that_cannot_complete_puts_the_previous_model_back(rig, monkeypat
 
 
 def test_a_swap_interrupted_by_a_crash_is_repaired_at_the_next_start(rig):
-    old = rig.voice / "models" / "rvc.old"
-    old.mkdir(parents=True)
-    (old / "model.onnx").write_bytes(b"previous model")
+    valid_model_folder(rig.voice / "models" / "rvc.old")
+    parked = rig.tree(rig.voice / "models" / "rvc.old")
     rig.runner.stages["preprocess"] = lambda c: 1
     assert rig.run() == 1
-    assert rig.tree(rig.voice / "models") == {"rvc/model.onnx": b"previous model"}
+    assert rig.tree(rig.voice / "models") == {"rvc/" + name: data for name, data in parked.items()}
 
 
 # ---------------------------------------------------------------- 11. clean-up
@@ -1226,7 +1223,7 @@ def test_a_failure_before_any_stage_still_ends_with_a_final_line(rig, monkeypatc
         raise OSError("disk trouble")
 
     monkeypatch.setattr(rig.worker.os, "link", explode)
-    monkeypatch.setattr(rig.worker.shutil, "copy2", explode)
+    monkeypatch.setattr(rig.worker.shutil, "copyfile", explode)
     assert rig.run() == 1
     assert "disk trouble" in rig.final()["error"] and rig.final()["stage"] == "prepare"
 
@@ -1250,3 +1247,238 @@ def test_the_worker_imports_only_the_standard_library_and_its_two_helpers():
         elif isinstance(node, ast.ImportFrom):
             names.add((node.module or "").split(".")[0])
     assert names <= set(sys.stdlib_module_names)
+
+
+# ---------------------------------------------------------------- review fix round 1
+
+class Crash(BaseException):
+    """Stands in for the worker dying at an exact point (it is not an Exception, so nothing tidies up after it)."""
+
+
+def valid_model_folder(folder, payload=b"previous model"):
+    folder.mkdir(parents=True)
+    (folder / "model.onnx").write_bytes(payload + b"\0" * (1024 * 1024 + 1))
+    (folder / "model.index").write_bytes(b"index")
+    (folder / "voice.json").write_text('{"name": "old", "sample_rate": 40000}')
+
+
+def test_resume_refuses_an_experiment_that_lost_some_of_its_slices(rig):
+    interrupt_training(rig)
+    for folder, name in (("0_gt_wavs", "1_0.wav"), ("1_16k_wavs", "1_0.wav"), ("2a_f0", "1_0.wav.npy"),
+                         ("2b-f0nsf", "1_0.wav.npy"), ("3_feature768", "1_0.npy")):
+        (rig.exp / folder / name).unlink()
+    before = rig.tree(rig.exp)
+    assert rig.run("--resume") == 1
+    final = rig.final()
+    assert "2 of 3" in final["error"] and "Start a new training run" in final["error"]
+    assert final["resumable"] is False
+    assert rig.runner.calls == [], "it must not train on a fraction of the clips"
+    assert rig.tree(rig.exp) == before, "and it deletes nothing"
+
+
+def test_a_crash_while_an_old_experiment_is_removed_leaves_nothing_resumable(rig, monkeypatch):
+    interrupt_training(rig)
+    real_remove = rig.worker._remove_tree
+    seen = {}
+
+    def crash_partway(path):
+        if Path(path) == rig.exp:
+            seen["records"] = [n for n in ("dataset.json", "stages.json") if (rig.exp / n).exists()]
+            real_remove(rig.exp / "0_gt_wavs")
+            (rig.exp / "1_16k_wavs" / "0_0.wav").unlink()
+            raise Crash()
+        real_remove(path)
+
+    monkeypatch.setattr(rig.worker, "_remove_tree", crash_partway)
+    assert rig.run() == 1  # a fresh run that dies while it removes the old experiment
+    assert seen == {"records": []}, "the records that make a run resumable go first"
+    assert (rig.exp / "G_2333333.pth").exists(), "the old checkpoint is still lying there"
+    monkeypatch.setattr(rig.worker, "_remove_tree", real_remove)
+    rig.runner.calls.clear()
+    assert rig.run("--resume") == 1
+    assert rig.final()["error"] == CLIPS_CHANGED and rig.runner.calls == []
+    assert rig.run() == 0, "a fresh run still works"
+
+
+def test_a_saved_checkpoint_is_remembered_even_when_no_backup_could_be_made(rig, monkeypatch):
+    def no_backup(src, dst):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(rig.worker, "copy_durable", no_backup)
+    interrupt_training(rig)  # saved at epoch 5, never backed up
+    assert not list(rig.exp.glob("*.bak"))
+    for path in rig.exp.glob("*.pth"):
+        path.unlink()
+    assert rig.run("--resume") == 1
+    assert rig.final()["error"] == STATE_UNREADABLE
+    assert rig.runner.killed == ["train"] and "saving:5" not in rig.runner.points
+
+
+def test_a_damaged_parked_model_is_not_put_back(rig):
+    old = rig.voice / "models" / "rvc.old"
+    old.mkdir(parents=True)
+    (old / "model.onnx").write_bytes(b"cut short")
+    rig.runner.stages["preprocess"] = lambda c: 1
+    assert rig.run() == 1
+    assert rig.tree(rig.voice / "models") == {"rvc.old/model.onnx": b"cut short"}
+    assert "rvc.old" in rig.log()
+    del rig.runner.stages["preprocess"]
+    assert rig.run() == 0, "training still completes and installs a good model"
+    assert sorted(p.name for p in (rig.voice / "models").iterdir()) == ["rvc"]
+
+
+def test_a_final_line_is_written_even_when_the_worker_log_cannot_be_opened(rig):
+    (rig.job / "worker.log").mkdir(parents=True)  # a folder where the log file should be
+    assert rig.run() == 1
+    final = rig.final()
+    assert final["done"] is True and final["ok"] is False and final["error"]
+    assert rig.runner.calls == []
+
+
+def test_a_backup_is_dropped_when_a_checkpoint_changes_before_the_pair_is_swapped_in(rig, monkeypatch):
+    real_copy = rig.worker.copy_durable
+
+    def copy(src, dst):
+        real_copy(src, dst)
+        if Path(src).name == "D_2333333.pth" and rig.runner.points[-1] == "saving:10":
+            # the trainer starts its next save while the second file is still being copied
+            write_checkpoint(rig.exp / "G_2333333.pth", 11)
+            os.utime(rig.exp / "G_2333333.pth", ns=(1, 1))
+
+    monkeypatch.setattr(rig.worker, "copy_durable", copy)
+    rig.runner.stages["export"] = lambda c: 1
+    rig.run(epochs=20, save_every=5)
+    assert rig.runner.points.count("saving:10") == 1
+    log = rig.log()
+    assert "checkpoint of epoch 5 backed up" in log and "checkpoint of epoch 10 backed up" not in log
+    assert "checkpoint of epoch 15 backed up" in log, "the next save is backed up as usual"
+    assert not list(rig.exp.glob("*.tmp"))
+
+
+def test_a_crash_between_the_two_backup_renames_is_recovered_by_the_next_resume(rig, monkeypatch):
+    real_replace = os.replace
+
+    def replace(src, dst):
+        if Path(dst).name == "D_2333333.pth.bak" and rig.runner.points[-1] == "saving:10":
+            raise Crash()
+        real_replace(src, dst)
+
+    monkeypatch.setattr(rig.worker.os, "replace", replace)
+    assert rig.run(epochs=20) == 1
+    monkeypatch.setattr(rig.worker.os, "replace", real_replace)
+    assert read_checkpoint(rig.exp / "G_2333333.pth.bak") == 10 and read_checkpoint(rig.exp / "D_2333333.pth.bak") == 5
+    rig.runner.calls.clear(), rig.runner.points.clear(), rig.runner.killed.clear()
+    assert rig.run("--resume", epochs=20) == 0
+    assert rig.runner.points[0] == "epoch_start:10" and rig.runner.killed == []
+
+
+def test_a_crash_during_the_restore_is_recovered_by_the_next_resume(rig, monkeypatch):
+    interrupt_training(rig, point="epoch_start:12", epochs=20)
+    write_checkpoint(rig.exp / "G_2333333.pth.bak", 5), write_checkpoint(rig.exp / "D_2333333.pth.bak", 5)
+    truncate(rig.exp / "G_2333333.pth"), truncate(rig.exp / "D_2333333.pth")
+    real_replace = os.replace
+
+    def replace(src, dst):
+        if Path(src).name == "D_2333333.pth.restore":
+            raise Crash()  # the generator is restored, the discriminator is not
+        real_replace(src, dst)
+
+    monkeypatch.setattr(rig.worker.os, "replace", replace)
+    assert rig.run("--resume", epochs=20) == 1
+    monkeypatch.setattr(rig.worker.os, "replace", real_replace)
+    rig.runner.calls.clear(), rig.runner.points.clear(), rig.runner.killed.clear()
+    assert rig.run("--resume", epochs=20) == 0
+    assert "epoch_start:5" in rig.runner.points and rig.final()["ok"] is True
+    assert not any(p.startswith("saving") for p in rig.runner.points[:rig.runner.points.index("epoch_start:5")])
+
+
+def test_start_up_notes_are_written_to_the_worker_log(rig):
+    code = rig.worker.run(rig.args(), runner=rig.runner, clock=rig.clock, kill_tree=lambda pid: None,
+                          parent_alive=lambda pid: True, notes=["the job object could not be set up"])
+    assert code == 0 and "[worker] the job object could not be set up\n" in rig.log()
+
+
+@windows_only
+def test_a_read_only_recording_is_copied_not_linked_and_blocks_nothing(rig):
+    clip = rig.clips / "0002.orig.wav"
+    os.chmod(clip, stat.S_IREAD)
+    rig.recordings = rig.clips_snapshot()
+    seen = {}
+
+    def preprocess(c):
+        staging = Path(c.argv[2])
+        seen["linked"] = [n for n in sorted(os.listdir(staging)) if os.path.samefile(staging / n, rig.clips / n)]
+        seen["same bytes"] = (staging / clip.name).read_bytes() == clip.read_bytes()
+        return FakeRunner.preprocess(rig.runner, c)
+
+    rig.runner.stages["preprocess"] = preprocess
+    try:
+        assert rig.run() == 0
+        assert seen == {"linked": ["0001.orig.wav", "0003.orig.wav"], "same bytes": True}
+        assert not rig.exp.exists()
+        assert not os.access(clip, os.W_OK), "the recording is still read-only"
+        assert rig.run() == 0, "and a later run is not blocked"
+    finally:
+        os.chmod(clip, stat.S_IWRITE)
+
+
+@windows_only
+def test_a_recording_made_read_only_after_it_was_linked_does_not_block_clean_up(rig):
+    clip = rig.clips / "0002.orig.wav"
+
+    def preprocess(c):
+        os.chmod(clip, stat.S_IREAD)  # the staged hard link shares this attribute
+        rig.recordings = rig.clips_snapshot()
+        return FakeRunner.preprocess(rig.runner, c)
+
+    rig.runner.stages["preprocess"] = preprocess
+    try:
+        assert rig.run() == 0
+        assert not rig.exp.exists(), "the experiment, with its read-only staged link, is removed"
+        assert clip.exists() and not os.access(clip, os.W_OK), "the recording keeps its read-only attribute"
+    finally:
+        os.chmod(clip, stat.S_IWRITE)
+
+
+@pytest.mark.parametrize("voice_dir", ["", "missing"])
+def test_an_empty_or_missing_voice_folder_is_refused_up_front(rig, voice_dir, tmp_path):
+    args = rig.args()
+    args.voice_dir = voice_dir and str(tmp_path / voice_dir)
+    code = rig.worker.run(args, runner=rig.runner, clock=rig.clock, kill_tree=lambda pid: None)
+    assert code == 1
+    assert "voice folder" in rig.final()["error"] and rig.final()["resumable"] is False
+    assert rig.runner.calls == []
+
+
+def test_progress_does_not_dip_when_a_cancelled_run_is_resumed(rig):
+    interrupt_training(rig)  # 10 epochs, saved at 5, cancelled during epoch 7
+    first_run_lines = len(rig.progress())
+    assert rig.run("--resume") == 0
+    resumed = rig.progress()[first_run_lines:]
+    saved_percent = 13 + 84 * 5 / 10
+    assert min(line["percent"] for line in resumed) >= saved_percent
+    assert [line["percent"] for line in resumed] == sorted(line["percent"] for line in resumed)
+    training = [line for line in resumed if line["stage"] == "train"]
+    assert training and all(line["epoch"] >= 5 for line in training), "never epoch 0 once a checkpoint exists"
+    assert resumed[-1]["percent"] == 100
+
+
+def test_wait_for_exit_blocks_until_a_process_has_gone(worker):
+    quick = subprocess.Popen([sys.executable, "-c", "pass"])
+    assert worker.wait_for_exit(quick.pid, 30) is True
+    quick.wait()
+    assert worker.wait_for_exit(os.getpid(), 0) is False
+
+
+@windows_only
+@pytest.mark.parametrize("code", [0, 1, 2])
+def test_the_job_object_does_not_change_the_workers_exit_code(code):
+    script = (
+        "import importlib.util, sys\n"
+        f"spec = importlib.util.spec_from_file_location('w', {str(MODULE)!r})\n"
+        "w = importlib.util.module_from_spec(spec); spec.loader.exec_module(w)\n"
+        f"assert w.bind_children_to_this_process() is True\nsys.exit({code})\n"
+    )
+    done = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                          creationflags=subprocess.CREATE_NO_WINDOW, timeout=60)
+    assert done.returncode == code, done.stderr

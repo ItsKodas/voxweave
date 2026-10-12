@@ -3,8 +3,10 @@
   python -P trainer/worker.py --voice-dir <data/voices/id> --job-dir <data/voices/id/training>
       --experiment voice-<id> --epochs 200 --batch-size 8 --save-every 5 [--resume] [--parent-pid N] --name "<name>"
 
-Runs under the training environment's Python but uses only the standard library plus rvclog.py and filelist.py
-from this folder. It runs RVC's command-line stages one after another as subprocesses (commands and environment
+Runs under the training environment's Python but uses only the standard library plus rvclog.py, filelist.py and
+procutil.py from this folder.
+
+It runs RVC's command-line stages one after another as subprocesses (commands and environment
 are those proven in docs/superpowers/notes/2026-10-13-stage-3-training-spike.md, sections 3 and 4), appends one
 JSON line per progress step to <job-dir>/progress.jsonl, copies every line of stage output to <job-dir>/worker.log,
 and always ends with a final progress line. Exit code: 0 success, 1 failure, 2 cancelled.
@@ -19,17 +21,13 @@ What it protects:
 - The GPU. Stages are killed as a whole process tree, and on Windows every child is tied to the worker's own life.
 """
 import argparse
-import ctypes
 import hashlib
 import importlib.util
 import json
 import os
-import queue
 import re
 import shutil
-import subprocess
 import sys
-import threading
 import time
 import traceback
 import zipfile
@@ -50,6 +48,10 @@ def _sibling(name):
 
 rvclog = _sibling("rvclog")
 filelist = _sibling("filelist")
+procutil = _sibling("procutil")
+process_alive, wait_for_exit = procutil.process_alive, procutil.wait_for_exit
+kill_process_tree, make_runner = procutil.kill_process_tree, procutil.make_runner
+bind_children_to_this_process = procutil.bind_children_to_this_process
 
 STAGES = ("prepare", "preprocess", "pitch", "features", "train", "index", "export")
 STAGE_WEIGHTS = {"prepare": 1, "preprocess": 2, "pitch": 4, "features": 6, "train": 84, "index": 1, "export": 2}
@@ -62,7 +64,6 @@ CANCEL_GRACE_SECONDS = 60
 ETA_WINDOW = 10
 TAIL_LINES = 20
 MIN_MODEL_BYTES = 1024 * 1024
-NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 SAFE_EXPERIMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 
 CLIPS_CHANGED = "The clips changed since this training run started. Start a new training run."
@@ -88,179 +89,6 @@ class JobError(Exception):
 
 class Cancelled(Exception):
     """The run was stopped on request (cancel file) or because the app went away."""
-
-
-# ---------------------------------------------------------------- processes (standard library only)
-
-_kernel32_dll = None
-
-
-def _kernel32():
-    global _kernel32_dll
-    if _kernel32_dll is not None:
-        return _kernel32_dll
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    handle, dword, void_p = ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p
-    kernel32.OpenProcess.restype, kernel32.OpenProcess.argtypes = handle, [dword, ctypes.c_int, dword]
-    kernel32.WaitForSingleObject.restype, kernel32.WaitForSingleObject.argtypes = dword, [handle, dword]
-    kernel32.GetCurrentProcess.restype, kernel32.GetCurrentProcess.argtypes = handle, []
-    kernel32.CreateJobObjectW.restype, kernel32.CreateJobObjectW.argtypes = handle, [void_p, ctypes.c_wchar_p]
-    kernel32.SetInformationJobObject.restype = ctypes.c_int
-    kernel32.SetInformationJobObject.argtypes = [handle, ctypes.c_int, void_p, dword]
-    kernel32.AssignProcessToJobObject.restype = ctypes.c_int
-    kernel32.AssignProcessToJobObject.argtypes = [handle, handle]
-    _kernel32_dll = kernel32
-    return kernel32
-
-
-_process_handles = {}  # pid -> open handle, kept so that a recycled PID is never mistaken for the original process
-
-
-def process_alive(pid):
-    """True while the process with this PID is running."""
-    if os.name != "nt":
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
-        return True
-    synchronize, wait_timeout, access_denied = 0x00100000, 0x00000102, 5
-    kernel32 = _kernel32()
-    handle = _process_handles.get(pid)
-    if handle is None:
-        handle = kernel32.OpenProcess(synchronize, 0, int(pid))
-        if not handle:
-            return ctypes.get_last_error() == access_denied  # it exists but belongs to someone else
-        _process_handles[pid] = handle
-    return kernel32.WaitForSingleObject(handle, 0) == wait_timeout
-
-
-def kill_process_tree(pid):
-    """End a process and everything it started. The PID a venv launcher gives back is only a shim around the real
-    Python, so ending that one process would leave the trainer and its data-loader workers running."""
-    if os.name != "nt":
-        try:
-            os.kill(pid, 9)
-        except OSError:
-            pass
-        return
-    try:
-        subprocess.run(["taskkill", "/PID", str(int(pid)), "/T", "/F"], stdin=subprocess.DEVNULL,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=NO_WINDOW, timeout=60)
-    except (OSError, subprocess.SubprocessError):
-        pass  # the caller still ends the process it started itself
-
-
-_lifetime_job = None
-
-
-def bind_children_to_this_process():
-    """Windows: put this process in a job object that ends every process in it when its last handle closes.
-
-    The handle is held only by this process, so if the worker dies in any way at all (even killed outright, with
-    no chance to clean up) Windows ends every stage it started. Returns True when the job is in place."""
-    global _lifetime_job
-    if os.name != "nt":
-        return False
-    if _lifetime_job is not None:
-        return True
-
-    class BasicLimits(ctypes.Structure):
-        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_longlong), ("PerJobUserTimeLimit", ctypes.c_longlong),
-                    ("LimitFlags", ctypes.c_ulong), ("MinimumWorkingSetSize", ctypes.c_size_t),
-                    ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", ctypes.c_ulong),
-                    ("Affinity", ctypes.c_size_t), ("PriorityClass", ctypes.c_ulong),
-                    ("SchedulingClass", ctypes.c_ulong)]
-
-    class ExtendedLimits(ctypes.Structure):
-        _fields_ = [("BasicLimitInformation", BasicLimits), ("IoInfo", ctypes.c_ulonglong * 6),
-                    ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
-                    ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
-
-    kill_on_job_close, extended_limit_information = 0x2000, 9
-    try:
-        kernel32 = _kernel32()
-        job = kernel32.CreateJobObjectW(None, None)
-        if not job:
-            return False
-        limits = ExtendedLimits()
-        limits.BasicLimitInformation.LimitFlags = kill_on_job_close
-        if not kernel32.SetInformationJobObject(job, extended_limit_information, ctypes.byref(limits),
-                                                ctypes.sizeof(limits)):
-            return False
-        if not kernel32.AssignProcessToJobObject(job, kernel32.GetCurrentProcess()):
-            return False
-    except (OSError, AttributeError):
-        return False
-    _lifetime_job = job  # never closed on purpose: it closes when this process ends
-    return True
-
-
-def make_runner(kill_tree=kill_process_tree, popen=subprocess.Popen, poll_seconds=0.25, drain_seconds=30.0):
-    """The real stage runner: start the command, pass each output line to on_line, and end the whole process tree
-    as soon as should_stop() says so (it is asked after every line and every poll_seconds while the stage is quiet)."""
-
-    def runner(stage, argv, cwd, env, on_line, should_stop):
-        process = popen(argv, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1,
-                        creationflags=NO_WINDOW)
-        lines = queue.Queue()
-
-        def pump():
-            try:
-                for line in process.stdout:
-                    lines.put(line)
-            except (OSError, ValueError):
-                pass
-            finally:
-                lines.put(None)
-
-        reader = threading.Thread(target=pump, name="stage-output", daemon=True)
-        reader.start()
-        killed, give_up_at = False, None
-        try:
-            while True:
-                try:
-                    line = lines.get(timeout=poll_seconds)
-                except queue.Empty:
-                    line = ""
-                if line is None:
-                    break  # the output pipe closed: every process that held it has ended
-                if line:
-                    on_line(line.rstrip("\r\n"))
-                if not killed and should_stop():
-                    kill_tree(process.pid)
-                    killed = True
-                if give_up_at is None and (killed or (not line and process.poll() is not None)):
-                    give_up_at = time.monotonic() + drain_seconds  # ended or killed, yet the pipe is still open
-                elif give_up_at is not None and time.monotonic() > give_up_at:
-                    break  # something still holds the pipe; do not wait for it for ever
-            if not killed:
-                return process.wait()
-            if process.poll() is None:
-                process.kill()
-            try:
-                return process.wait(timeout=drain_seconds)
-            except subprocess.TimeoutExpired:
-                return 1
-        finally:
-            if process.poll() is None:  # only reached when something above raised
-                kill_tree(process.pid)
-                try:
-                    process.kill()
-                    process.wait(timeout=drain_seconds)
-                except (OSError, subprocess.SubprocessError):
-                    pass
-            reader.join(timeout=1.0)
-            if not reader.is_alive():  # closing under a reader that is still blocked could hang
-                try:
-                    process.stdout.close()
-                except (OSError, AttributeError):
-                    pass
-
-    return runner
 
 
 # ---------------------------------------------------------------- files
@@ -319,7 +147,16 @@ def _remove_tree(path):
     """Remove a folder of the worker's own. Never follows links and never changes file attributes, so a hard link
     to a recording is only ever unlinked."""
     if os.path.lexists(path):
-        shutil.rmtree(path)
+        shutil.rmtree(path, onexc=_remove_read_only_name)
+
+
+def _remove_read_only_name(function, path, error):
+    """rmtree could not remove an entry. A read-only file (a staged link to a recording that is read-only) is
+    removed by name, leaving the file and its attributes alone; anything else is still an error."""
+    if os.name == "nt" and isinstance(error, PermissionError) and os.path.isfile(path):
+        procutil.unlink_ignoring_read_only(path)
+    else:
+        raise error
 
 
 def _unlink(path):
@@ -348,8 +185,9 @@ class _Training:
 
 
 class Job:
-    def __init__(self, args, runner, clock, parent_alive):
+    def __init__(self, args, runner, clock, parent_alive, notes=()):
         self.args, self.runner, self.clock, self.parent_alive = args, runner, clock, parent_alive
+        self.notes = list(notes)
         self.voice_dir, self.job_dir = Path(args.voice_dir), Path(args.job_dir)
         self.experiment = args.experiment
         self.rvc = TRAINER_DIR / "rvc"
@@ -399,8 +237,11 @@ class Job:
         self.job_dir.mkdir(parents=True, exist_ok=True)
         _unlink(self.cancel_file)  # a request left over from an earlier run is not for this one
         mode = "a" if self.args.resume else "w"
-        self._log_file = open(self.job_dir / "worker.log", mode, encoding="utf-8", errors="replace", newline="\n")
+        # The progress file first: if the log cannot be opened, the run still ends with a final progress line.
         self._progress = open(self.job_dir / "progress.jsonl", mode, encoding="utf-8", newline="\n")
+        self._log_file = open(self.job_dir / "worker.log", mode, encoding="utf-8", errors="replace", newline="\n")
+        for note in self.notes:
+            self._log("worker", note)
 
     def _pipeline(self):
         self._prepare()
@@ -529,6 +370,12 @@ class Job:
     def _is_done(self, stage):
         return bool(self.done_stages.get(stage))
 
+    def _saved_epoch(self):
+        """The last epoch whose checkpoint this worker saw saved (0 when none was)."""
+        record = self.done_stages.get("checkpoint")
+        epoch = record.get("epoch") if isinstance(record, dict) else None
+        return epoch if isinstance(epoch, int) and not isinstance(epoch, bool) and epoch > 0 else 0
+
     def _mark(self, stage, done=True):
         self.done_stages[stage] = done
         write_json_atomic(self.exp / "stages.json", self.done_stages)
@@ -537,11 +384,21 @@ class Job:
 
     def _prepare(self):
         self.stage = "prepare"
-        self._emit(0.0, "Getting the clips ready")
         args = self.args
         if not SAFE_EXPERIMENT.fullmatch(self.experiment) or self.experiment.lower() == "mute":
             raise JobError("The experiment name %r is not usable: letters, digits, '-' and '_' only."
                            % self.experiment, resumable=False)
+        if not str(args.voice_dir).strip() or not self.voice_dir.is_dir():
+            raise JobError("The voice folder %r does not exist." % str(args.voice_dir), resumable=False)
+        if args.resume:
+            # Overall progress carries on from the last saved epoch: it never reads lower than that in this run.
+            saved_stages = read_json(self.exp / "stages.json")
+            self.done_stages = saved_stages if isinstance(saved_stages, dict) else {}
+            if self._saved_epoch() and args.epochs >= 1:
+                before_training = sum(STAGE_WEIGHTS[s] for s in STAGES[:STAGES.index("train")])
+                self.percent = round(before_training + STAGE_WEIGHTS["train"]
+                                     * min(self._saved_epoch(), args.epochs) / args.epochs, 2)
+        self._emit(0.0, "Getting the clips ready")
         if min(args.epochs, args.batch_size, args.save_every) < 1:
             raise JobError("Epochs, batch size and the save interval must each be at least 1.", resumable=False)
         if not (self.rvc / "train").is_dir():
@@ -559,9 +416,8 @@ class Job:
             if (not isinstance(saved, dict) or saved.get("fingerprint") != record["fingerprint"]
                     or saved.get("settings") != record["settings"]):
                 raise JobError(CLIPS_CHANGED, resumable=False)
-            saved_stages = read_json(self.exp / "stages.json")
-            self.done_stages = saved_stages if isinstance(saved_stages, dict) else {}
         else:
+            self.done_stages = {}
             self._remove_training_output()
         for folder in (self.exp, self.rvc / "assets" / "weights", self.rvc / "assets" / "indices"):
             folder.mkdir(parents=True, exist_ok=True)
@@ -583,16 +439,25 @@ class Job:
         staging.mkdir(parents=True)
         for clip in clips:
             target = staging / clip.name
+            # A link to a read-only recording would itself be read-only (they are one file), so that one is
+            # copied. copyfile copies the bytes only, never the attribute.
             try:
+                if not os.access(clip, os.W_OK):
+                    raise PermissionError("the recording is read-only")
                 os.link(clip, target)
             except OSError:
-                shutil.copy2(clip, target)
+                shutil.copyfile(clip, target)
 
     def _index_links(self):
         return (self.rvc / "assets" / "indices").glob("%s_*_%s_v2.index" % (self.experiment, self.experiment))
 
     def _remove_training_output(self):
-        """Everything an earlier run of this experiment left under trainer/rvc (never anything else)."""
+        """Everything an earlier run of this experiment left under trainer/rvc (never anything else).
+
+        The records that make a run resumable go first, so an experiment that was only partly removed (a crash, a
+        power cut) can never pass for one that can be resumed."""
+        for record in ("dataset.json", "stages.json"):
+            _unlink(self.exp / record)
         _remove_tree(self.exp)
         _unlink(self.weights)
         for link in self._index_links():
@@ -605,7 +470,12 @@ class Job:
         return len([n for n in os.listdir(folder) if n.endswith(".wav")]) if folder.is_dir() else 0
 
     def _preprocess(self):
-        if self._is_done("preprocess") and self._segments():
+        done = self.done_stages.get("preprocess")
+        if done:
+            expected, found = (done.get("segments") if isinstance(done, dict) else None), self._segments()
+            if expected != found:  # never train on a part of the voice without saying so
+                raise JobError("The prepared training data is incomplete (%s of %s slices are there). "
+                               "Start a new training run." % (found, expected), resumable=False)
             self._emit(1.0, "The clips are already sliced")
             return
         for folder in ("0_gt_wavs", "1_16k_wavs", "2a_f0", "2b-f0nsf", "3_feature768"):
@@ -630,7 +500,7 @@ class Job:
         self._require_success(code)
         if not self._segments():
             raise JobError("Slicing the clips produced no audio to train on.", resumable=False)
-        self._mark("preprocess")
+        self._mark("preprocess", {"segments": self._segments()})
         self._emit(1.0, "The clips are sliced")
 
     def _extract(self, folders, argv, what):
@@ -671,7 +541,7 @@ class Job:
             return False
 
     def _train(self):
-        self.epochs_done = 0
+        self.epochs_done = min(self._saved_epoch(), self.args.epochs) if self.args.resume else 0
         if self._model_ready():  # only a resume gets here: a fresh run removed any earlier model
             self.epochs_done = self.args.epochs
             self._emit(1.0, "Training had already finished")
@@ -759,6 +629,13 @@ class Job:
             mean = (self.epoch_times[-1] - self.epoch_times[0]) / (len(self.epoch_times) - 1)
             self.eta = round(mean * (self.args.epochs - self.epochs_done), 1)
         self._emit(self.epochs_done / self.args.epochs, "Epoch %d of %d" % (self.epochs_done, self.args.epochs))
+        if saved:
+            # Recorded as soon as a checkpoint is known to be on disk, whether or not a backup follows: a later
+            # resume that finds no checkpoint must fail rather than train from the start in silence.
+            try:
+                self._mark("checkpoint", {"epoch": epoch})
+            except OSError as exc:
+                self._log("worker", "could not record the saved epoch: %s" % exc)
         if epoch >= self.args.epochs:
             return  # the trainer now writes the final model and ends by itself: neither kill it nor copy
         if self._poll_stop():
@@ -772,19 +649,22 @@ class Job:
         The copy still proves itself before it replaces the previous backup: the source must not have changed
         while it was read, and the copy must be a complete torch file. A bad copy is dropped and the previous
         backup stays; training carries on either way."""
-        temps, started = [], time.monotonic()
+        temps, started, copied = [], time.monotonic(), {}
         try:
             for name in CHECKPOINTS:
                 source, temp = self.exp / name, self.exp / (name + ".bak.tmp")
                 temps.append(temp)
-                before = _file_state(source)
+                before = copied[name] = _file_state(source)
                 copy_durable(source, temp)
                 if _file_state(source) != before or temp.stat().st_size != before[0] or not torch_file_intact(temp):
                     raise OSError("%s changed while it was copied, or is incomplete" % name)
+            for name in CHECKPOINTS:
+                # The trainer may have begun its next save while the second file was copied. Both copies must
+                # still match what is on disk now, or the pair could be from two different epochs.
+                if _file_state(self.exp / name) != copied[name]:
+                    raise OSError("%s was saved again before the pair could be kept" % name)
             for name in CHECKPOINTS:  # both copies are good: swap the pair in together
                 os.replace(self.exp / (name + ".bak.tmp"), self.exp / (name + ".bak"))
-            if not self._is_done("checkpoint"):
-                self._mark("checkpoint")
             for name in CHECKPOINTS:
                 _unlink(self.exp / (name + ".failed"))
             self._log("worker", "checkpoint of epoch %d backed up in %.1f s" % (epoch, time.monotonic() - started))
@@ -903,6 +783,13 @@ class Job:
         models = self.voice_dir / "models"
         live, old = models / "rvc", models / "rvc.old"
         if old.is_dir() and not live.exists():
+            try:
+                self._check_export(old)
+            except JobError as exc:
+                self._log("worker", "models/rvc.old was left by an interrupted export but is not a complete model "
+                                    "(%s); it stays where it is and the voice has no model until training ends"
+                          % exc)
+                return
             os.replace(old, live)
             self._log("worker", "put back the previous model after an interrupted export")
 
@@ -938,19 +825,22 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def run(args, runner=None, clock=time.time, kill_tree=None, parent_alive=None) -> int:
+def run(args, runner=None, clock=time.time, kill_tree=None, parent_alive=None, notes=()) -> int:
     """Run the whole job. `runner(stage, argv, cwd, env, on_line, should_stop) -> exit code` runs one stage and must
     end the stage's process tree when should_stop() returns True; `kill_tree(pid)` is how the default runner does
-    that; `parent_alive(pid)` answers whether the app is still there."""
+    that; `parent_alive(pid)` answers whether the app is still there; `notes` are lines for the top of worker.log."""
     if runner is None:
         runner = make_runner(kill_tree or kill_process_tree)
-    return Job(args, runner, clock, parent_alive or process_alive).execute()
+    return Job(args, runner, clock, parent_alive or process_alive, notes).execute()
 
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    bind_children_to_this_process()
-    return run(args)
+    notes = []
+    if os.name == "nt" and not bind_children_to_this_process():
+        notes.append("the job object could not be set up: if this worker is killed outright, the stage it is "
+                     "running is not ended with it")
+    return run(args, notes=notes)
 
 
 if __name__ == "__main__":
