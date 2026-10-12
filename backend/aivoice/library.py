@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import secrets
@@ -16,6 +17,7 @@ SAMPLE_RATE = 48000
 TRAIN_RATE = 16000
 MAX_NAME = 60
 MAX_TEXT = 500
+log = logging.getLogger(__name__)
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 SOURCES = ("recorded", "imported")
 # One lock for every Library in the process, so two instances on the same folder cannot interleave.
@@ -47,6 +49,14 @@ class Voice:
     @property
     def minutes(self) -> float:
         return round(sum(c.seconds for c in self.clips) / 60.0, 2)
+
+
+def _now() -> float:
+    return time.time()
+
+
+def _now_ns() -> int:
+    return time.time_ns()
 
 
 def _slug(name: str) -> str:
@@ -117,8 +127,8 @@ class Library:
                 {"id": v.id, "name": v.name, "created": v.created, "minutes": v.minutes, "clips": len(v.clips), "models": []}
                 for v in self.list()
             ])
-        except OSError:
-            pass
+        except OSError as exc:
+            log.warning("Could not refresh voices.json: %s", exc)
 
     def list(self) -> list[Voice]:
         with self._lock:
@@ -148,7 +158,8 @@ class Library:
                     break
                 except FileExistsError:
                     continue
-            created = time.strftime("%Y-%m-%dT%H:%M:%S") + f".{time.time_ns() % 1_000_000_000:09d}"
+            seconds, fraction = divmod(_now_ns(), 1_000_000_000)
+            created = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(seconds)) + f".{fraction:09d}"
             voice = Voice(voice_id, name, created)
             self._save(voice)
             return voice
@@ -159,11 +170,11 @@ class Library:
             self._load(voice_id)
             trash = self._data / "trash"
             trash.mkdir(parents=True, exist_ok=True)
-            target = trash / f"{voice_id}-{int(time.time())}"
+            target = trash / f"{voice_id}-{int(_now())}"
             for n in range(2, 1000):
                 if not target.exists():
                     break
-                target = trash / f"{voice_id}-{int(time.time())}-{n}"
+                target = trash / f"{voice_id}-{int(_now())}-{n}"
             try:
                 # A same-drive rename, never shutil.move: a copy-then-delete fallback could half-erase the voice.
                 os.rename(self._dir(voice_id), target)
@@ -210,7 +221,11 @@ class Library:
             clip = self._find(voice, index)
             clip.text = text
             self._save(voice)  # the record first: voice.json is the truth, the .txt is a convenience copy
-            _atomic_text(self._dir(voice_id) / "clips" / f"{index:04d}.txt", text)
+            txt = self._dir(voice_id) / "clips" / f"{index:04d}.txt"
+            try:
+                _atomic_text(txt, text)
+            except OSError as exc:
+                log.warning("Saved the new transcript but could not update %s: %s", txt.name, exc)
             return clip
 
     def delete_clip(self, voice_id, index: int) -> None:
@@ -219,10 +234,11 @@ class Library:
             voice.clips.remove(self._find(voice, index))
             self._save(voice)
             for suffix in (".orig.wav", ".wav", ".txt"):
+                path = self._dir(voice_id) / "clips" / f"{index:04d}{suffix}"
                 try:
-                    (self._dir(voice_id) / "clips" / f"{index:04d}{suffix}").unlink(missing_ok=True)
-                except OSError:
-                    pass  # in use right now; the clip is already gone from the record and its number is never reused
+                    path.unlink(missing_ok=True)
+                except OSError as exc:
+                    log.warning("Could not remove %s (left behind, no longer part of the voice): %s", path.name, exc)
 
     def clip_audio_path(self, voice_id, index: int) -> Path:
         with self._lock:

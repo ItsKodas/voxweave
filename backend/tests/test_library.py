@@ -6,6 +6,7 @@ import threading
 import numpy as np
 import pytest
 
+from aivoice import library as library_module
 from aivoice.audiofile import read_wav
 from aivoice.library import Library, LibraryError
 
@@ -208,7 +209,7 @@ def test_two_threads_adding_clips_never_collide(tmp_path):
 
 
 def test_delete_voice_twice_in_one_second_keeps_both_in_trash(tmp_path, monkeypatch):
-    monkeypatch.setattr("aivoice.library.time.time", lambda: 1000.0)
+    monkeypatch.setattr("aivoice.library._now", lambda: 1000.0)
     lib = Library(tmp_path)
     for _ in range(2):
         voice = lib.create("V")
@@ -282,3 +283,93 @@ def test_a_voice_json_of_the_wrong_shape_hides_only_that_voice(tmp_path):
     (tmp_path / "voices" / bad.id / "voice.json").write_text("[1, 2]")
     assert [v.id for v in lib.list()] == [good.id]
     lib.add_clip(good.id, audio(), "x", "recorded")  # saving the good one still works
+
+
+def _break_summary(monkeypatch):
+    real = library_module._atomic_json
+
+    def picky(path, obj):
+        if path.name == "voices.json":
+            raise OSError("disk full")
+        return real(path, obj)
+
+    monkeypatch.setattr(library_module, "_atomic_json", picky)
+
+
+def test_an_unwritable_summary_never_fails_or_undoes_the_real_change(tmp_path, monkeypatch, caplog):
+    _break_summary(monkeypatch)
+    lib = Library(tmp_path)
+    with caplog.at_level("WARNING", logger="aivoice.library"):
+        voice = lib.create("V")
+        lib.add_clip(voice.id, audio(), "one", "recorded")
+        lib.add_clip(voice.id, audio(), "two", "recorded")
+        lib.update_text(voice.id, 1, "uno")
+        lib.delete_clip(voice.id, 2)
+        assert [(c.index, c.text) for c in Library(tmp_path).get(voice.id).clips] == [(1, "uno")]
+        lib.delete(voice.id)
+    assert lib.list() == []
+    assert len(list((tmp_path / "trash").iterdir())) == 1
+    assert any("voices.json" in r.getMessage() for r in caplog.records)
+    assert not (tmp_path / "voices.json").exists()
+
+
+def test_update_text_keeps_the_saved_record_when_the_txt_copy_fails(tmp_path, monkeypatch, caplog):
+    lib = Library(tmp_path)
+    voice = lib.create("V")
+    lib.add_clip(voice.id, audio(), "old", "recorded")
+    real = library_module._atomic_text
+
+    def failing(path, text):
+        raise OSError("locked")
+
+    monkeypatch.setattr(library_module, "_atomic_text", failing)
+    with caplog.at_level("WARNING", logger="aivoice.library"):
+        clip = lib.update_text(voice.id, 1, "new")
+    monkeypatch.setattr(library_module, "_atomic_text", real)
+    assert clip.text == "new"
+    assert Library(tmp_path).get(voice.id).clips[0].text == "new"
+    assert any("0001.txt" in r.getMessage() for r in caplog.records)
+
+
+def test_create_retries_when_the_generated_id_is_taken(tmp_path, monkeypatch):
+    values = iter(["aaaaaa", "aaaaaa", "bbbbbb"])
+    monkeypatch.setattr(library_module.secrets, "token_hex", lambda n: next(values))
+    lib = Library(tmp_path)
+    first = lib.create("Same")
+    lib.add_clip(first.id, audio(), "keep me", "recorded")
+    second = lib.create("Same")
+    assert (first.id, second.id) == ("same-aaaaaa", "same-bbbbbb")
+    assert [c.text for c in lib.get(first.id).clips] == ["keep me"]
+    assert (tmp_path / "voices" / first.id / "clips" / "0001.orig.wav").is_file()
+
+
+def test_a_stranded_audio_file_is_never_served_or_reused(tmp_path, monkeypatch, caplog):
+    lib = Library(tmp_path)
+    voice = lib.create("V")
+    lib.add_clip(voice.id, audio(), "x", "recorded")
+    real = type(tmp_path).unlink
+
+    def locked(self, missing_ok=False):
+        if self.name.endswith(".orig.wav"):
+            raise PermissionError("in use")
+        return real(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(type(tmp_path), "unlink", locked)
+    with caplog.at_level("WARNING", logger="aivoice.library"):
+        lib.delete_clip(voice.id, 1)
+    monkeypatch.undo()
+    assert any("0001.orig.wav" in r.getMessage() for r in caplog.records)
+    assert (tmp_path / "voices" / voice.id / "clips" / "0001.orig.wav").is_file()  # orphan on disk
+    assert lib.get(voice.id).clips == []
+    with pytest.raises(LibraryError):
+        lib.clip_audio_path(voice.id, 1)
+    assert lib.add_clip(voice.id, audio(), "y", "recorded").index == 2
+
+
+def test_created_timestamps_order_across_a_second_boundary(tmp_path, monkeypatch):
+    values = iter([1_700_000_000_999_999_999, 1_700_000_001_000_000_001])
+    monkeypatch.setattr(library_module, "_now_ns", lambda: next(values))
+    lib = Library(tmp_path)
+    first, second = lib.create("a"), lib.create("b")
+    assert first.created < second.created
+    assert [v.id for v in lib.list()] == [first.id, second.id]
