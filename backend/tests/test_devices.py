@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from aivoice.devices import DeviceError, SoundDeviceStreams, find_virtual_mic, get_device, list_devices
+from aivoice.devices import Device, DeviceError, SoundDeviceStreams, find_virtual_mic, get_device, list_devices
 
 
 class FakeSd:
@@ -80,8 +80,6 @@ def test_output_stream_duplicates_mono_to_stereo():
 
 
 def _out(index, name):
-    from aivoice.devices import Device
-
     return Device(index, name, 0, 2)
 
 
@@ -96,3 +94,21 @@ def test_prefers_main_voicemeeter_input_over_aux_regardless_of_order():
 def test_falls_back_to_aux_when_only_aux_present():
     devices = [_out(26, "VoiceMeeter Aux Input (VB-Audio VoiceMeeter AUX VAIO)")]
     assert find_virtual_mic(devices).index == 26
+
+
+def _run_output(fill):
+    stream = SoundDeviceStreams(FakeSd()).output(2, 48000, fill)
+    out = np.ones((3, 2), dtype=np.float32)
+    stream["callback"](out, 3, None, None)
+    return out
+
+
+def test_output_callback_emits_silence_when_fill_raises():
+    def boom(n):
+        raise RuntimeError("engine died")
+
+    assert _run_output(boom).tolist() == [[0.0, 0.0]] * 3
+
+
+def test_output_callback_emits_silence_on_wrong_length():
+    assert _run_output(lambda n: np.full(n + 1, 0.5, dtype=np.float32)).tolist() == [[0.0, 0.0]] * 3

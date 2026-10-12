@@ -1,6 +1,9 @@
+import threading
+
 import numpy as np
 import pytest
 
+from aivoice.ringbuffer import RingBuffer
 from aivoice.router import Router
 
 
@@ -44,3 +47,27 @@ def test_underruns_summed():
     r.push(np.ones(1, dtype=np.float32))
     r.read("mic", 5)
     assert r.underruns() == 1
+
+
+def test_push_is_safe_while_another_thread_adds_an_output(monkeypatch):
+    # Deterministic race: while push() is writing to the first output, another thread
+    # adds a new output. Iterating the live dict would raise RuntimeError.
+    r = Router(100)
+    r.add_output("mic")
+    r.add_output("monitor")
+    added = []
+    real_write = RingBuffer.write
+
+    def write_then_add(self, data):
+        real_write(self, data)
+        if not added:
+            added.append(True)
+            t = threading.Thread(target=r.add_output, args=("late",))
+            t.start()
+            t.join(timeout=2)
+            assert not t.is_alive()
+
+    monkeypatch.setattr(RingBuffer, "write", write_then_add)
+    r.push(np.ones(4, dtype=np.float32))
+    assert r.has("late")
+    assert r.underruns() == 0

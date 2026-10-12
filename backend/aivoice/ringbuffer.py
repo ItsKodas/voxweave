@@ -24,13 +24,16 @@ class RingBuffer:
     def write(self, data: np.ndarray) -> None:
         data = np.asarray(data, dtype=np.float32).ravel()
         with self._lock:
+            overflowed = False
             if len(data) > self._cap:
                 data = data[-self._cap :]
-                self.overflows += 1
+                overflowed = True
             excess = self._size + len(data) - self._cap
             if excess > 0:
                 self._read = (self._read + excess) % self._cap
                 self._size -= excess
+                overflowed = True
+            if overflowed:
                 self.overflows += 1
             start = (self._read + self._size) % self._cap
             first = min(len(data), self._cap - start)

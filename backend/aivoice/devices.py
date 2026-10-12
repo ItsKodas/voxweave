@@ -69,7 +69,14 @@ class SoundDeviceStreams:
 
     def output(self, device: int, samplerate: int, fill: Callable[[int], np.ndarray]):
         def callback(outdata, frames, time, status):
-            outdata[:] = fill(frames)[:, None]
+            # Fail closed: any failure in fill, or a wrong-length result, emits silence.
+            try:
+                audio = np.asarray(fill(frames), dtype=np.float32)
+                if audio.shape != (frames,):
+                    raise ValueError("fill returned the wrong number of samples")
+                outdata[:] = audio[:, None]
+            except Exception:
+                outdata[:] = 0
 
         return self._sd.OutputStream(
             device=device, samplerate=samplerate, channels=2, dtype="float32", latency="low",

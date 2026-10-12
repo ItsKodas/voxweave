@@ -44,3 +44,11 @@ def test_write_larger_than_capacity_keeps_newest():
     rb = RingBuffer(3)
     rb.write(np.arange(10, dtype=np.float32))
     assert rb.read(3).tolist() == [7, 8, 9]
+
+
+def test_oversized_write_into_nonempty_buffer_counts_one_overflow():
+    rb = RingBuffer(3)
+    rb.write(np.ones(2, dtype=np.float32))
+    rb.write(np.arange(10, dtype=np.float32))
+    assert rb.overflows == 1
+    assert rb.read(3).tolist() == [7, 8, 9]
