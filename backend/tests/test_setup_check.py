@@ -36,3 +36,15 @@ def test_invalid_gpu_setting_is_reported(tmp_path):
 def test_valid_gpu_setting_passes(tmp_path):
     (tmp_path / "settings.json").write_text('{"dml_device_id": 1}')
     assert by_id(run_checks(tmp_path, [MIC], []))["settings"].ok is True
+
+
+def test_trained_library_voice_counts_as_a_voice(tmp_path):
+    from tests.test_pretrained import add_library_voice
+    add_library_voice(tmp_path, "Mine", None)
+    check = by_id(run_checks(tmp_path, [MIC], []))["voice"]
+    assert check.ok is True and "1 voice model" in check.message
+
+
+def test_missing_voice_message_mentions_training(tmp_path):
+    check = by_id(run_checks(tmp_path, [MIC], []))["voice"]
+    assert check.ok is False and "train" in check.message.lower()

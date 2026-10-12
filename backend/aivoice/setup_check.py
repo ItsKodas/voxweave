@@ -35,7 +35,8 @@ def run_checks(data: Path, devices: list[Device], providers: list[str]) -> list[
                    "microphone in your other apps. Monitor-only use still works."),
         Check("base_model", vec.is_file(), "Base speech model is installed." if vec.is_file()
               else f"Base speech model is missing. Download vec-768-layer-12.onnx into {vec.parent}."),
-        Check("voice", bool(voices), f"{len(voices)} voice model(s) installed." if voices
-              else "No voice models installed. Export one with tools/export_rvc_onnx.py (see README)."),
+        Check("voice", bool(voices), f"{len(voices)} voice model(s) available." if voices
+              else "No voice models yet. Train one from a voice in the Library, or export one with "
+                   "tools/export_rvc_onnx.py (see README)."),
         _settings_check(data),
     ]

@@ -241,3 +241,16 @@ def test_refresh_devices_closes_a_failed_session_first_and_keeps_its_error(tmp_p
     manager.refresh_devices()
     assert order == [True]
     assert "disconnected" in manager.stats()["error"]
+
+
+def test_start_accepts_a_trained_library_voice(tmp_path):
+    from tests.test_pretrained import add_library_voice
+    voice = add_library_voice(tmp_path, "Mine", None)
+    built = []
+    manager = LiveManager(tmp_path, lambda: DEVICES, lambda v: built.append(v) or Identity(), FakeStreams())
+    try:
+        manager.start(cfg(voice=voice.id))
+        assert manager.stats()["running"] is True
+        assert [(v.id, v.name, v.sample_rate) for v in built] == [(voice.id, "Mine", 40000)]
+    finally:
+        manager.stop()

@@ -47,6 +47,7 @@ class Voice:
     created: str
     clips: list[Clip] = field(default_factory=list)
     next_index: int = 1  # persisted so a deleted clip's number is never handed out again
+    models: list[str] = field(default_factory=list)  # derived from the files on disk, never stored in voice.json
 
     @property
     def minutes(self) -> float:
@@ -100,6 +101,17 @@ def _damage(exc: Exception) -> str:
     return f"voice.json does not have the expected contents ({type(exc).__name__})"
 
 
+def rvc_model_sample_rate(voice_folder: Path) -> int | None:
+    """The sample rate of the trained RVC model in a voice folder, or None when it has no usable model."""
+    folder = voice_folder / "models" / "rvc"
+    try:
+        if not (folder / "model.onnx").is_file():
+            return None
+        return int(json.loads((folder / "voice.json").read_text(encoding="utf-8"))["sample_rate"])
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
 class Library:
     """Voices and their clips on disk. Each voice's voice.json is the source of truth."""
 
@@ -120,7 +132,9 @@ class Library:
         raw = json.loads((folder / "voice.json").read_text(encoding="utf-8"))
         clips = [Clip(**c) for c in raw["clips"]]
         floor = max((c.index for c in clips), default=0) + 1
-        return Voice(voice_id, str(raw["name"]), str(raw["created"]), clips, max(int(raw.get("next_index", 1)), floor))
+        models = ["rvc"] if rvc_model_sample_rate(folder) is not None else []
+        return Voice(voice_id, str(raw["name"]), str(raw["created"]), clips,
+                     max(int(raw.get("next_index", 1)), floor), models)
 
     def _load(self, voice_id) -> Voice:
         try:
@@ -139,7 +153,7 @@ class Library:
         try:
             self._data.mkdir(parents=True, exist_ok=True)
             _atomic_json(self._data / "voices.json", [
-                {"id": v.id, "name": v.name, "created": v.created, "minutes": v.minutes, "clips": len(v.clips), "models": []}
+                {"id": v.id, "name": v.name, "created": v.created, "minutes": v.minutes, "clips": len(v.clips), "models": v.models}
                 for v in self.list()
             ])
         except OSError as exc:

@@ -640,3 +640,42 @@ def test_a_folder_without_a_voice_file_is_reported_once_not_on_every_listing(tmp
             assert lib.list() == []
     messages = [r.getMessage() for r in caplog.records]
     assert len(messages) == 1 and "stray-folder" in messages[0]
+
+
+def add_model(tmp_path, voice_id, meta='{"name": "Trained", "sample_rate": 40000}', model=True):
+    folder = tmp_path / "voices" / voice_id / "models" / "rvc"
+    folder.mkdir(parents=True)
+    if model:
+        (folder / "model.onnx").write_bytes(b"x")
+    if meta is not None:
+        (folder / "voice.json").write_text(meta)
+
+
+def test_voice_models_reflect_the_files_on_disk(tmp_path):
+    lib = Library(tmp_path)
+    plain, trained = lib.create("Plain"), lib.create("Trained")
+    assert lib.get(trained.id).models == []
+    add_model(tmp_path, trained.id)
+    assert lib.get(trained.id).models == ["rvc"]
+    assert lib.get(plain.id).models == []
+    assert [v.models for v in lib.list()] == [[], ["rvc"]] or [v.models for v in lib.list()] == [["rvc"], []]
+
+
+@pytest.mark.parametrize("meta, model", [(None, True), ("{nope", True), ('{"name": "x"}', True),
+                                         ('{"name": "x", "sample_rate": "fast"}', True),
+                                         ('{"name": "x", "sample_rate": 40000}', False)])
+def test_damaged_model_folder_means_no_model(tmp_path, meta, model):
+    lib = Library(tmp_path)
+    voice = lib.create("V")
+    add_model(tmp_path, voice.id, meta=meta, model=model)
+    assert lib.get(voice.id).models == []
+
+
+def test_summary_carries_models_but_voice_json_does_not(tmp_path):
+    lib = Library(tmp_path)
+    voice = lib.create("V")
+    add_model(tmp_path, voice.id)
+    lib.add_clip(voice.id, audio(60.0), "x", "recorded")
+    manifest = json.loads((tmp_path / "voices.json").read_text(encoding="utf-8"))
+    assert manifest[0]["models"] == ["rvc"]
+    assert "models" not in json.loads((tmp_path / "voices" / voice.id / "voice.json").read_text(encoding="utf-8"))
