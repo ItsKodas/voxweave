@@ -12,7 +12,7 @@ class LiveParams:
     index_rate: float
 
 
-# high_quality uses "dio" too: harvest pitch extraction benchmarked slower than real time here.
+# Every preset uses "dio": harvest pitch extraction benchmarked slower than real time at every preset window.
 PRESETS: dict[str, LiveParams] = {
     "low_latency": LiveParams(120, 30, 400, "dio", 0.0),
     "balanced": LiveParams(250, 50, 800, "dio", 0.3),

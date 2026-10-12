@@ -26,9 +26,6 @@ def extract_f0(audio16k: np.ndarray, method: str, n_frames: int) -> np.ndarray:
         f0, t = pyworld.dio(x, 16000, f0_floor=F0_MIN, f0_ceil=F0_MAX, frame_period=10)
         f0 = pyworld.stonemask(x, f0, t, 16000)
     else:
-        # Harvest reports a perfectly periodic signal (e.g. a synthetic sine) as almost entirely
-        # unvoiced; -60 dB of fixed-seed dither is inaudible and makes it track normally.
-        x = x + 1e-3 * np.random.default_rng(0).standard_normal(len(x))
         f0, _ = pyworld.harvest(x, 16000, f0_floor=F0_MIN, f0_ceil=F0_MAX, frame_period=10)
     f0 = np.nan_to_num(f0, nan=0.0, posinf=0.0, neginf=0.0)
     return _resize(f0, n_frames).astype(np.float32)

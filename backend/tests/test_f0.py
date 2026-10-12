@@ -9,9 +9,20 @@ def sine(freq, seconds=1.0, sr=16000):
     return (0.5 * np.sin(2 * np.pi * freq * t)).astype(np.float32)
 
 
+def voice_like(freq, seconds=1.0, sr=16000):
+    """A voice-like tone: a fundamental with decaying harmonics and a slight 5 Hz vibrato.
+
+    Harvest reports a bare sine as unvoiced, which real speech never is.
+    """
+    t = np.arange(int(sr * seconds)) / sr
+    phase = 2 * np.pi * freq * t + 0.5 * np.sin(2 * np.pi * 5 * t)
+    x = sum(0.6**k * np.sin((k + 1) * phase) for k in range(6))
+    return (0.3 * x / np.max(np.abs(x))).astype(np.float32)
+
+
 @pytest.mark.parametrize("method", ["dio", "harvest"])
 def test_detects_220hz(method):
-    f0 = extract_f0(sine(220), method, 100)
+    f0 = extract_f0(voice_like(220), method, 100)
     assert f0.shape == (100,) and f0.dtype == np.float32
     voiced = f0[f0 > 0]
     assert len(voiced) > 50
