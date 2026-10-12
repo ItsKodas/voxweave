@@ -150,3 +150,40 @@ Copied from the build ledger when the stage was merged. Each line ends with what
 ## Stage 3 planning note
 
 - The WSL2 Ubuntu distro on this PC is broken (its ext4.vhdx is missing). AMD now ships official PyTorch on Windows wheels with ROCm that list the RX 7900 XTX, so stage 3 evaluates native Windows training first.
+
+## Stage 3: complete list of decisions made during the build
+
+Copied from the build ledger (`.superpowers/sdd/2026-10-13-stage-3-training/progress.md`). Each line ends with what it costs if wrong.
+
+- Ruling: train natively on Windows with AMD's ROCm PyTorch instead of WSL2 — the spike proved it works and the WSL2 distro on this PC is broken — if wrong: the worker's stage commands would need a WSL wrapper; the backend and UI are unaffected.
+- Ruling: stage 3 trains RVC only; GPT-SoVITS fine-tuning moves to stage 4 — its engine is unproven on this GPU and belongs with TTS — if wrong: stage 4 is larger.
+- Ruling: carry two patches against RVC commit 81eed5e (dilated-convolution speed fix, preprocess tail fix) — 3.4x training speed and no silently dropped audio — if wrong: revert the patches; training still works but slower.
+- Ruling: the plan gives interfaces, behaviour and tests for the worker instead of complete listings — its code must match a real external pipeline the spike already scripted — if wrong: implementers need more review rounds.
+- Ruling: no real recordings exist, so the end-to-end proof uses synthetic speech-like audio — the pipeline is proven, voice quality is not — if wrong: the first real training run by the owner reveals problems the synthetic run could not.
+- Ruling: training is tied to the app's lifetime (the worker exits when the backend exits; the job becomes interrupted and resumable) — an unseen process holding the GPU after Quit would be worse — if wrong: users must keep the app open during long training.
+- Ruling: accept the worker's deviation that a resume with no checkpoint ever saved trains from epoch 1 — nothing that existed is lost, and a saved-then-missing checkpoint still fails — provided the checkpoint mark is set at the first saved epoch, not the first backup — if wrong: an early-cancelled run resumes from scratch without saying so.
+
+## Stage 3: minor findings still open
+
+Deferred in review and not fixed in this stage. None loses user data. Items marked "FIX AT FINAL" were meant for the final whole-branch pass; check `git log` before assuming they are still open.
+
+- Environment setup: the extraction of `mute.zip` is not atomic and its done-marker is a single file, so an interrupted extraction passes `verify.py` and fails later in training. A half-written clone gives a raw git error. `verify.py` checks pretrained file sizes only (`setup.sh` checks SHA-256). Behaviour when `trainer/.venv` exists with a different Python is not defined. (FIX AT FINAL for the first.)
+- Parsing: `is_fatal_noise` in the log parser is broad (any word ending in "Error"); callers must parse a line first.
+- Library: `Library.list()` does not catch `RecursionError` from a deeply nested `voice.json` (pre-existing, the library's own file).
+- Manager and routes: the voice-delete guard relies on `training.status()`, which swallows errors and reports idle; it should use `forget`'s own refusal (FIX AT FINAL). While training runs and no passing environment report is cached (backend restarted mid-run), `environment(False)` still runs one GPU probe; it should answer from memory or say "unknown while training" (FIX AT FINAL). Routes call `training.running`, `status` and `forget` while holding the audio or voices lock, and those calls can now perform a kill lasting seconds; they should read a non-killing snapshot (FIX AT FINAL).
+- Manager: shutdown during a start's environment check can let a worker launch afterwards (the worker's parent watchdog ends it). Start reports a not-ready environment before an unknown voice or the live and recording refusals, and an idle refresh racing a start can put the full check inside the locks. For a worker whose process tree was never captured, "gone" means only the launcher shim exited, and `_pid_alive` treats "could not look" as gone.
+- Worker: a kill between the two model-swap renames leaves no `models/rvc` until the next worker run repairs it from `rvc.old`; the idea of repairing it when the backend lists voices was not done.
+- Frontend: the Live voice list should also reload when the Live tab becomes visible, so a model that finished unseen appears without a restart (FIX AT FINAL; the README tells the user to restart). A failed first status poll leaves the training panel blank with no error or retry (FIX AT FINAL). The slow environment check re-runs on every voice switch while the environment is not ready, hiding Resume meanwhile (FIX AT FINAL). Two frontend tests do not guard what their names say (overlap test, mount-again test), and the stopping flag is not independently covered.
+- Process: the re-review of the worker's last fix round (commit 2e86d54, with the real-run commit d5e0e15) was still pending when this was written.
+
+## Stage 3: not verified by a human
+
+Everything below was exercised only with synthetic audio (about 60 seconds of speech-like test sound, 2 to 8 epochs) and fakes. The suites passing says nothing about these.
+
+- The whole "Stage 3 first run checklist" in `README.md` (10 steps), and above all: **a real voice trained and then heard on the Live tab.** Voice quality, how many epochs are enough, and whether the index blend helps are all unknown.
+- A multi-hour run (200 to 300 epochs on 30 minutes of audio, about 1 h 35 min predicted from the 10 minute measurement). Stability, memory growth and heat over that time are unproven; the time estimates on screen and in the README are extrapolations.
+- Quitting the real app (tray Quit, Ctrl+C in `tauri dev`) mid-training leaves no process on the GPU, and Resume after it. The tests kill the worker directly and use fakes for the app side.
+- The Train box in the real window: stage names, bar, Cancel and Start over confirmations (`window.confirm` inside Tauri), the messages for each refusal, and the Live voice list picking up a finished model.
+- `bash trainer/setup.sh` on a machine that is not this one (clean caches, other drivers, an older Adrenalin than 26.8.1; 26.2.2 is AMD's stated minimum and has not been tried), and the real download sizes there.
+- Other GPUs, and training with `ffmpeg` and `ffprobe` installed differently from this PC's.
+- The real GPU tests last passed 3 in 5 min 32 s on this machine; they are skipped in the normal suite.
