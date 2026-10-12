@@ -27,6 +27,9 @@ transcribe = ["ctranslate2>=4.0,<5", "huggingface-hub>=0.21", "tokenizers>=0.13,
 [tool.setuptools.packages.find]
 include = ["aivoice*"]
 
+[tool.setuptools.package-data]
+aivoice = ["*.txt"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Starlette recommends migrating the test client to httpx2; deferred pending the owner's approval of a new dependency.
