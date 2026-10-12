@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import threading
 from dataclasses import asdict
 from pathlib import Path
@@ -25,6 +26,20 @@ ALLOWED_ORIGINS = [
     "tauri://localhost",
     "http://localhost:1420",
 ]
+log = logging.getLogger(__name__)
+
+
+def log_refused(request: Request) -> None:
+    """One line saying which request an origin rule refused and the headers it judged, so that a webview sending
+    headers nobody expected can be diagnosed from data/backend.log. These headers are not secrets; each is cut
+    short and shown with repr, so a hostile value can neither flood the log nor forge a line in it."""
+
+    def shown(name: str) -> str:
+        value = request.headers.get(name)
+        return "None" if value is None else repr(value[:120])
+
+    log.warning("Refused %s %s (origin not allowed): Origin=%s Referer=%s Sec-Fetch-Site=%s", request.method,
+                request.url.path[:120], shown("origin"), shown("referer"), shown("sec-fetch-site"))
 
 
 class StartBody(BaseModel):
@@ -63,6 +78,7 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
         # delivered. Browsers always send Origin on those, so refuse any origin we do not serve.
         origin = request.headers.get("origin")
         if request.method not in SAFE_METHODS and origin is not None and origin not in ALLOWED_ORIGINS:
+            log_refused(request)
             return JSONResponse(status_code=403, content={"detail": "Origin not allowed"})
         return await call_next(request)
 

@@ -1,14 +1,26 @@
+import logging
+import os
 from pathlib import Path
 from typing import Callable
 
 import numpy as np
 
+log = logging.getLogger(__name__)
+
 
 def _load_whisper(name: str, root):
+    # Must be set before the Hugging Face hub is first imported (faster_whisper imports it): it reads this once.
+    os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
     from faster_whisper import WhisperModel
 
     # CPU with 8-bit weights: CTranslate2 has no AMD GPU backend, and this is not time critical.
-    return WhisperModel(name, device="cpu", compute_type="int8", download_root=str(root))
+    options = {"device": "cpu", "compute_type": "int8", "download_root": str(root)}
+    try:
+        # A model that is already on disk loads with no network request at all.
+        return WhisperModel(name, local_files_only=True, **options)
+    except Exception as exc:  # noqa: BLE001 - not downloaded yet, or only partly: the hub raises several types
+        log.warning("The speech model %s is not fully on disk (%s); downloading it once", name, type(exc).__name__)
+    return WhisperModel(name, **options)
 
 
 class WhisperTranscriber:

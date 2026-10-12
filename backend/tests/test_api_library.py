@@ -1,3 +1,4 @@
+import errno
 import shutil
 import threading
 
@@ -456,3 +457,98 @@ def test_a_voice_delete_waits_for_a_take_that_is_being_saved(tmp_path):
     assert not (tmp_path / "voices" / voice["id"]).exists()
     trashed = list((tmp_path / "trash").glob(f"{voice['id']}-*"))
     assert len(trashed) == 1 and (trashed[0] / "clips" / "0001.orig.wav").exists()
+
+
+def test_a_full_disk_while_saving_a_take_is_a_readable_400_and_leaves_the_recorder_idle(tmp_path, monkeypatch):
+    client, mic, _ = make(tmp_path)
+    voice = new_voice(client)
+
+    def no_space(*a, **k):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr("aivoice.library.write_wav", no_space)
+    client.post("/library/record/start", json={"voice_id": voice["id"], "input_device": 1, "prompt": 0})
+    speak(mic)
+    res = client.post("/library/record/stop")
+    monkeypatch.undo()
+    assert res.status_code == 400
+    assert res.json()["detail"] == "Could not save the clip: No space left on device"
+    assert client.get("/library/status").json()["recording"] is False
+    assert client.get(f"/library/voices/{voice['id']}/clips").json() == []
+    assert record(client, mic, voice["id"])["clip"]["index"] == 1  # recording works again once there is room
+
+
+def test_disk_failures_on_the_other_library_writes_are_readable_400s(tmp_path, monkeypatch):
+    client, mic, _ = make(tmp_path)
+    voice = new_voice(client)
+    record(client, mic, voice["id"])
+
+    def no_space(*a, **k):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr("aivoice.library._atomic_json", no_space)
+    created = client.post("/library/voices", json={"name": "Another"})
+    edited = client.patch(f"/library/voices/{voice['id']}/clips/1", json={"text": "changed"})
+    deleted = client.delete(f"/library/voices/{voice['id']}/clips/1")
+    monkeypatch.undo()
+    assert (created.status_code, created.json()["detail"]) == (400, "Could not create the voice: No space left on device")
+    assert (edited.status_code, edited.json()["detail"]) == (400, "Could not save the transcript: No space left on device")
+    assert (deleted.status_code, deleted.json()["detail"]) == (400, "Could not delete the clip: No space left on device")
+    assert [v["id"] for v in client.get("/library/voices").json()] == [voice["id"]]
+    assert len(client.get(f"/library/voices/{voice['id']}/clips").json()) == 1
+    assert client.get(f"/library/voices/{voice['id']}/clips/1/audio").status_code == 200
+
+
+def test_deleting_a_clip_over_http_moves_it_to_the_trash(tmp_path):
+    client, mic, _ = make(tmp_path)
+    voice = new_voice(client)
+    record(client, mic, voice["id"])
+    assert client.delete(f"/library/voices/{voice['id']}/clips/1").json() == {"deleted": True}
+    trash = tmp_path / "trash" / voice["id"] / "clips"
+    assert sorted(p.name for p in trash.iterdir()) == ["0001.orig.wav", "0001.txt", "0001.wav"]
+    assert client.get(f"/library/voices/{voice['id']}/clips/1/audio").status_code == 400
+
+
+def _refusals(caplog):
+    return [r.getMessage() for r in caplog.records if r.levelname == "WARNING" and "Refused" in r.getMessage()]
+
+
+def test_a_refused_library_request_is_logged_with_the_headers_that_caused_it(tmp_path, caplog):
+    client, _, _ = make(tmp_path)
+    headers = {"Origin": "https://evil.example", "Referer": "https://evil.example/page?q=1", "Sec-Fetch-Site": "cross-site"}
+    with caplog.at_level("WARNING", logger="aivoice"):
+        assert client.get("/library/voices", headers=headers).status_code == 403
+    lines = _refusals(caplog)
+    assert len(lines) == 1
+    for part in ("GET", "/library/voices", "https://evil.example", "https://evil.example/page?q=1", "cross-site"):
+        assert part in lines[0]
+
+
+def test_a_refused_library_request_with_no_headers_named_says_so(tmp_path, caplog):
+    client, _, _ = make(tmp_path)
+    with caplog.at_level("WARNING", logger="aivoice"):
+        assert client.get("/library/status", headers={"Sec-Fetch-Site": "same-site"}).status_code == 403
+    lines = _refusals(caplog)
+    assert len(lines) == 1 and "/library/status" in lines[0] and "same-site" in lines[0]
+    assert "Origin=None" in lines[0] and "Referer=None" in lines[0]
+
+
+def test_a_library_write_refused_by_the_app_wide_origin_check_is_logged_too(tmp_path, caplog):
+    client, _, _ = make(tmp_path)
+    with caplog.at_level("WARNING", logger="aivoice"):
+        res = client.post("/library/voices", json={"name": "X"}, headers={"Origin": "http://unexpected.localhost"})
+    assert res.status_code == 403
+    lines = _refusals(caplog)
+    assert len(lines) == 1
+    assert "POST" in lines[0] and "/library/voices" in lines[0] and "http://unexpected.localhost" in lines[0]
+
+
+def test_allowed_library_requests_log_no_refusal_and_long_headers_are_cut(tmp_path, caplog):
+    client, _, _ = make(tmp_path)
+    with caplog.at_level("WARNING", logger="aivoice"):
+        assert client.get("/library/voices", headers={"Origin": "http://tauri.localhost"}).status_code == 200
+        assert client.get("/library/voices").status_code == 200
+        assert _refusals(caplog) == []
+        assert client.get("/library/voices", headers={"Referer": "https://evil.example/" + "x" * 5000}).status_code == 403
+    lines = _refusals(caplog)
+    assert len(lines) == 1 and len(lines[0]) < 600

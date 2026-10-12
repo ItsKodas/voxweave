@@ -1,4 +1,5 @@
 import os
+import time
 import wave
 from pathlib import Path
 
@@ -7,8 +8,23 @@ import numpy as np
 MAX_SECONDS = 3600
 
 
+REPLACE_ATTEMPTS = 8
+
+
 class AudioFileError(ValueError):
     pass
+
+
+def replace_file(src, dst) -> None:
+    """os.replace, retried briefly: Windows refuses while antivirus or an indexer has the file open."""
+    for attempt in range(1, REPLACE_ATTEMPTS + 1):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == REPLACE_ATTEMPTS:
+                raise
+            time.sleep(0.05 * attempt)
 
 
 def read_audio(path, sample_rate: int = 48000) -> np.ndarray:
@@ -45,7 +61,8 @@ def read_audio(path, sample_rate: int = 48000) -> np.ndarray:
         raise AudioFileError(f"Could not read {name}: {exc}") from exc
     if not chunks or sum(len(c) for c in chunks) == 0:
         raise AudioFileError(f"{name} contains no audio")
-    return np.nan_to_num(np.concatenate(chunks).astype(np.float32))
+    # In place: an hour of audio is 690 MB, so neither step may make a second full copy.
+    return np.nan_to_num(np.concatenate(chunks).astype(np.float32, copy=False), copy=False)
 
 
 def write_wav(path, audio: np.ndarray, sample_rate: int) -> None:
@@ -58,7 +75,7 @@ def write_wav(path, audio: np.ndarray, sample_rate: int) -> None:
             w.setsampwidth(2)
             w.setframerate(sample_rate)
             w.writeframes(pcm.tobytes())
-        os.replace(tmp, path)
+        replace_file(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise

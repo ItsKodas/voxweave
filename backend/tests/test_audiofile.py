@@ -1,3 +1,4 @@
+import os
 import wave
 
 import numpy as np
@@ -162,3 +163,48 @@ def test_write_wav_failure_cleans_tmp_and_keeps_original(tmp_path, monkeypatch):
         write_wav(target, tone(0.2, 16000), 16000)
     assert [p.name for p in tmp_path.iterdir()] == ["a.wav"]
     assert target.read_bytes() == before
+
+
+def test_write_wav_retries_when_windows_has_the_file_open(tmp_path, monkeypatch):
+    real = os.replace
+    calls = {"n": 0}
+
+    def flaky(src, dst):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise PermissionError("in use")
+        return real(src, dst)
+
+    monkeypatch.setattr("aivoice.audiofile.os.replace", flaky)
+    monkeypatch.setattr("aivoice.audiofile.time.sleep", lambda s: None)
+    audio = tone(0.1, 16000)
+    write_wav(tmp_path / "a.wav", audio, 16000)
+    monkeypatch.undo()
+    assert calls["n"] == 3
+    back, sr = read_wav(tmp_path / "a.wav")
+    assert sr == 16000 and np.allclose(back, audio, atol=1e-4)
+    assert [p.name for p in tmp_path.iterdir()] == ["a.wav"]
+
+
+def test_write_wav_gives_up_when_the_file_stays_in_use_and_leaves_no_temp_file(tmp_path, monkeypatch):
+    calls = {"n": 0}
+
+    def locked(src, dst):
+        calls["n"] += 1
+        raise PermissionError("in use")
+
+    monkeypatch.setattr("aivoice.audiofile.os.replace", locked)
+    monkeypatch.setattr("aivoice.audiofile.time.sleep", lambda s: None)
+    with pytest.raises(PermissionError):
+        write_wav(tmp_path / "a.wav", tone(0.1, 16000), 16000)
+    monkeypatch.undo()
+    assert calls["n"] > 1  # it was retried before giving up
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_read_audio_returns_float32_with_non_finite_samples_zeroed(tmp_path):
+    audio = tone(0.5, 48000)
+    write_wav(tmp_path / "a.wav", audio, 48000)
+    back = read_audio(tmp_path / "a.wav", 48000)
+    assert back.dtype == np.float32 and back.flags.writeable and np.isfinite(back).all()
+    assert np.allclose(back[: len(audio)], audio[: len(back)], atol=1e-3)

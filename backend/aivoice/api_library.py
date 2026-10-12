@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from aivoice.api import log_refused
 from aivoice.importer import Importer
 from aivoice.library import Library, Voice
 from aivoice.studio import Studio
@@ -55,11 +56,13 @@ def library_router(studio: Studio, library: Library, importer: Importer, live_ru
         referer = request.headers.get("referer")
         named = [o for o in (origin, _origin_of(referer) if referer else None) if o is not None]
         if any(o not in allowed_origins for o in named):
+            log_refused(request)
             raise HTTPException(status_code=403, detail="Origin not allowed")
         # A browser page (Sec-Fetch-Site other than "none") must name the app: a page on another localhost port
         # is same-site and may send neither header on a no-cors GET. Clients that send no Sec-Fetch-Site are not pages.
         site = request.headers.get("sec-fetch-site")
         if site is not None and site != "none" and not named:
+            log_refused(request)
             raise HTTPException(status_code=403, detail="Origin not allowed")
 
     router = APIRouter(prefix="/library", dependencies=[Depends(same_app_only)])

@@ -5,13 +5,14 @@ import re
 import secrets
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import numpy as np
 import soxr
 
-from aivoice.audiofile import write_wav
+from aivoice.audiofile import replace_file, write_wav
 
 SAMPLE_RATE = 48000
 TRAIN_RATE = 16000
@@ -20,6 +21,7 @@ MAX_TEXT = 500
 log = logging.getLogger(__name__)
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 SOURCES = ("recorded", "imported")
+CLIP_SUFFIXES = (".orig.wav", ".wav", ".txt")
 # One lock for every Library in the process, so two instances on the same folder cannot interleave.
 _LOCK = threading.RLock()
 
@@ -69,25 +71,33 @@ def _atomic_json(path: Path, obj) -> None:
         f.write(json.dumps(obj, indent=2, ensure_ascii=False))
         f.flush()
         os.fsync(f.fileno())
-    _replace(tmp, path)
-
-
-def _replace(src: Path, dst: Path) -> None:
-    """os.replace, retried briefly: Windows refuses while antivirus or an indexer has the file open."""
-    for attempt in range(8):
-        try:
-            os.replace(src, dst)
-            return
-        except PermissionError:
-            if attempt == 7:
-                raise
-            time.sleep(0.05 * (attempt + 1))
+    replace_file(tmp, path)
 
 
 def _atomic_text(path: Path, text: str) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")
-    _replace(tmp, path)
+    replace_file(tmp, path)
+
+
+@contextmanager
+def _readable(what: str):
+    """A disk failure (full, read-only, file in use) inside the block becomes a LibraryError the user can read."""
+    try:
+        yield
+    except OSError as exc:
+        reason = exc.strerror or str(exc) or type(exc).__name__
+        log.error("%s: %s", what, reason, exc_info=True)
+        raise LibraryError(f"{what}: {reason}") from exc
+
+
+def _damage(exc: Exception) -> str:
+    """Why a voice.json could not be used, for the log. Never quotes the file: only where and what kind."""
+    if isinstance(exc, json.JSONDecodeError):
+        return f"voice.json is not valid JSON (line {exc.lineno}, column {exc.colno})"
+    if isinstance(exc, OSError):
+        return f"voice.json could not be read ({exc.strerror or type(exc).__name__})"
+    return f"voice.json does not have the expected contents ({type(exc).__name__})"
 
 
 class Library:
@@ -97,19 +107,24 @@ class Library:
         self._data = data
         self._root = data / "voices"
         self._lock = _LOCK
+        self._reported: set[tuple[str, str]] = set()  # skipped folders already named in the log
 
     def _dir(self, voice_id) -> Path:
         if not isinstance(voice_id, str) or not ID_RE.match(voice_id):
             raise LibraryError("Unknown voice")
         return self._root / voice_id
 
-    def _load(self, voice_id) -> Voice:
+    def _read(self, voice_id) -> Voice:
+        """Raises LibraryError for an id that is not one, and the underlying error for a voice.json that is unusable."""
         folder = self._dir(voice_id)
+        raw = json.loads((folder / "voice.json").read_text(encoding="utf-8"))
+        clips = [Clip(**c) for c in raw["clips"]]
+        floor = max((c.index for c in clips), default=0) + 1
+        return Voice(voice_id, str(raw["name"]), str(raw["created"]), clips, max(int(raw.get("next_index", 1)), floor))
+
+    def _load(self, voice_id) -> Voice:
         try:
-            raw = json.loads((folder / "voice.json").read_text(encoding="utf-8"))
-            clips = [Clip(**c) for c in raw["clips"]]
-            floor = max((c.index for c in clips), default=0) + 1
-            return Voice(voice_id, str(raw["name"]), str(raw["created"]), clips, max(int(raw.get("next_index", 1)), floor))
+            return self._read(voice_id)
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             raise LibraryError("Unknown voice") from None
 
@@ -136,11 +151,22 @@ class Library:
                 return []
             voices = []
             for folder in self._root.iterdir():
+                if not folder.is_dir():
+                    continue
+                # A damaged or foreign folder is left alone, and named in the log so it does not just vanish.
                 try:
-                    voices.append(self._load(folder.name))
+                    voices.append(self._read(folder.name))
                 except LibraryError:
-                    continue  # damaged or foreign folder: leave it alone
+                    self._report_skipped(folder.name, "its name is not a voice id")
+                except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+                    self._report_skipped(folder.name, _damage(exc))
             return sorted(voices, key=lambda v: (v.created, v.id))
+
+    def _report_skipped(self, folder: str, reason: str) -> None:
+        # Once per folder and reason: list() runs on every save, and a long import must not flood the log.
+        if (folder, reason) not in self._reported:
+            self._reported.add((folder, reason))
+            log.warning("Skipping the folder %s in %s: %s. Nothing in it was changed.", folder, self._root, reason)
 
     def get(self, voice_id) -> Voice:
         with self._lock:
@@ -150,19 +176,35 @@ class Library:
         name = (name or "").strip()
         if not name or len(name) > MAX_NAME or any(ord(ch) < 32 for ch in name):
             raise LibraryError(f"A voice name must be 1 to {MAX_NAME} characters on one line")
-        with self._lock:
+        with self._lock, _readable("Could not create the voice"):
+            self._root.mkdir(parents=True, exist_ok=True)
             while True:
                 voice_id = f"{_slug(name)}-{secrets.token_hex(3)}"
                 try:
-                    (self._root / voice_id / "clips").mkdir(parents=True)
+                    (self._root / voice_id).mkdir()  # fails if the id is taken, so an existing voice is never reused
                     break
                 except FileExistsError:
                     continue
+            folder = self._root / voice_id
             seconds, fraction = divmod(_now_ns(), 1_000_000_000)
             created = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(seconds)) + f".{fraction:09d}"
             voice = Voice(voice_id, name, created)
-            self._save(voice)
+            try:
+                (folder / "clips").mkdir()
+                self._save(voice)
+            except OSError:
+                self._discard_new_folder(folder)
+                raise
             return voice
+
+    @staticmethod
+    def _discard_new_folder(folder: Path) -> None:
+        """Removes the folder create() made a moment ago. rmdir only removes empty folders, so nothing can be lost."""
+        for path, remove in ((folder / "voice.json.tmp", os.unlink), (folder / "clips", os.rmdir), (folder, os.rmdir)):
+            try:
+                remove(path)
+            except OSError:
+                pass
 
     def delete(self, voice_id) -> None:
         """Moves the voice to data/trash. Nothing is erased."""
@@ -189,13 +231,14 @@ class Library:
             raise LibraryError("There is no audio to save")
         if source not in SOURCES:
             raise LibraryError("A clip's source must be 'recorded' or 'imported'")
-        with self._lock:
+        with self._lock, _readable("Could not save the clip"):
             voice = self._load(voice_id)
             index = voice.next_index
             clips = self._dir(voice_id) / "clips"
             clips.mkdir(exist_ok=True)
             stem = f"{index:04d}"
-            # Audio first, record last: a crash leaves stray files, which the next save overwrites.
+            # Audio first, record last: a crash or a failed write leaves stray files that belong to no clip
+            # (never listed, never served), and the next save, which gets the same number, overwrites them.
             write_wav(clips / f"{stem}.orig.wav", audio, SAMPLE_RATE)
             write_wav(clips / f"{stem}.wav", soxr.resample(audio, SAMPLE_RATE, TRAIN_RATE), TRAIN_RATE)
             text = (text or "").strip()[:MAX_TEXT]
@@ -220,7 +263,8 @@ class Library:
             voice = self._load(voice_id)
             clip = self._find(voice, index)
             clip.text = text
-            self._save(voice)  # the record first: voice.json is the truth, the .txt is a convenience copy
+            with _readable("Could not save the transcript"):
+                self._save(voice)  # the record first: voice.json is the truth, the .txt is a convenience copy
             txt = self._dir(voice_id) / "clips" / f"{index:04d}.txt"
             try:
                 _atomic_text(txt, text)
@@ -229,16 +273,42 @@ class Library:
             return clip
 
     def delete_clip(self, voice_id, index: int) -> None:
+        """Takes the clip out of the voice and moves its files to data/trash/<voice-id>/clips. Nothing is erased."""
         with self._lock:
             voice = self._load(voice_id)
             voice.clips.remove(self._find(voice, index))
-            self._save(voice)
-            for suffix in (".orig.wav", ".wav", ".txt"):
-                path = self._dir(voice_id) / "clips" / f"{index:04d}{suffix}"
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError as exc:
-                    log.warning("Could not remove %s (left behind, no longer part of the voice): %s", path.name, exc)
+            with _readable("Could not delete the clip"):
+                self._save(voice)
+            self._trash_clip_files(voice_id, f"{index:04d}")
+
+    def _trash_clip_files(self, voice_id, stem: str) -> None:
+        # The record is already saved, so a file that cannot be moved is only a stray: it stays where it is,
+        # whole, and is never listed, served or handed to another clip.
+        clips = self._dir(voice_id) / "clips"
+        trash = self._data / "trash" / voice_id / "clips"
+        try:
+            trash.mkdir(parents=True, exist_ok=True)
+            # One name for all three files, and never one that is already in the trash.
+            name = stem
+            for n in range(1, 1000):
+                if not any((trash / f"{name}{suffix}").exists() for suffix in CLIP_SUFFIXES):
+                    break
+                name = f"{stem}-{int(_now())}" + ("" if n == 1 else f"-{n}")
+        except OSError as exc:
+            log.warning("Could not use the trash folder %s, so the files of clip %s were left in the voice's "
+                        "clips folder (no longer part of the voice): %s", trash, stem, exc)
+            return
+        for suffix in CLIP_SUFFIXES:
+            source = clips / f"{stem}{suffix}"
+            if not source.exists():
+                continue
+            try:
+                # A same-drive rename, as for a voice: never a copy-then-delete that could lose half a file.
+                # On Windows it also refuses to replace an existing file.
+                os.rename(source, trash / f"{name}{suffix}")
+            except OSError as exc:
+                log.warning("Could not move %s to the trash (left behind, no longer part of the voice): %s",
+                            source.name, exc)
 
     def clip_audio_path(self, voice_id, index: int) -> Path:
         with self._lock:

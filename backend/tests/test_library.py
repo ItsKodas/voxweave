@@ -1,3 +1,4 @@
+import errno
 import json
 import os
 import re
@@ -254,14 +255,14 @@ def test_delete_clip_survives_a_locked_audio_file(tmp_path, monkeypatch):
     lib = Library(tmp_path)
     voice = lib.create("V")
     lib.add_clip(voice.id, audio(), "x", "recorded")
-    real = type(tmp_path).unlink
+    real = os.rename
 
-    def locked(self, missing_ok=False):
-        if self.name.endswith(".orig.wav"):
+    def locked(src, dst):
+        if str(src).endswith(".orig.wav"):
             raise PermissionError("in use")
-        return real(self, missing_ok=missing_ok)
+        return real(src, dst)
 
-    monkeypatch.setattr(type(tmp_path), "unlink", locked)
+    monkeypatch.setattr("aivoice.library.os.rename", locked)
     lib.delete_clip(voice.id, 1)  # the record is gone; a stray file is harmless
     monkeypatch.undo()
     assert lib.get(voice.id).clips == []
@@ -308,7 +309,8 @@ def test_an_unwritable_summary_never_fails_or_undoes_the_real_change(tmp_path, m
         assert [(c.index, c.text) for c in Library(tmp_path).get(voice.id).clips] == [(1, "uno")]
         lib.delete(voice.id)
     assert lib.list() == []
-    assert len(list((tmp_path / "trash").iterdir())) == 1
+    assert len(list((tmp_path / "trash").glob(f"{voice.id}-*"))) == 1  # the voice itself
+    assert (tmp_path / "trash" / voice.id / "clips" / "0002.orig.wav").is_file()  # and the clip deleted before it
     assert any("voices.json" in r.getMessage() for r in caplog.records)
     assert not (tmp_path / "voices.json").exists()
 
@@ -347,14 +349,14 @@ def test_a_stranded_audio_file_is_never_served_or_reused(tmp_path, monkeypatch, 
     lib = Library(tmp_path)
     voice = lib.create("V")
     lib.add_clip(voice.id, audio(), "x", "recorded")
-    real = type(tmp_path).unlink
+    real = os.rename
 
-    def locked(self, missing_ok=False):
-        if self.name.endswith(".orig.wav"):
+    def locked(src, dst):
+        if str(src).endswith(".orig.wav"):
             raise PermissionError("in use")
-        return real(self, missing_ok=missing_ok)
+        return real(src, dst)
 
-    monkeypatch.setattr(type(tmp_path), "unlink", locked)
+    monkeypatch.setattr("aivoice.library.os.rename", locked)
     with caplog.at_level("WARNING", logger="aivoice.library"):
         lib.delete_clip(voice.id, 1)
     monkeypatch.undo()
@@ -373,3 +375,268 @@ def test_created_timestamps_order_across_a_second_boundary(tmp_path, monkeypatch
     first, second = lib.create("a"), lib.create("b")
     assert first.created < second.created
     assert [v.id for v in lib.list()] == [first.id, second.id]
+
+
+# --- deleted clips go to the trash -------------------------------------------------------------
+
+
+def _clip_bytes(folder, stem="0001"):
+    return {suffix: (folder / f"{stem}{suffix}").read_bytes() for suffix in (".orig.wav", ".wav", ".txt")}
+
+
+def test_delete_clip_moves_its_three_files_to_the_trash_intact(tmp_path):
+    lib = Library(tmp_path)
+    voice = lib.create("V")
+    lib.add_clip(voice.id, audio(), "keep me", "recorded")
+    lib.add_clip(voice.id, audio(1.0), "the other", "recorded")
+    clips = tmp_path / "voices" / voice.id / "clips"
+    before = _clip_bytes(clips)
+    lib.delete_clip(voice.id, 1)
+    trash = tmp_path / "trash" / voice.id / "clips"
+    assert sorted(p.name for p in trash.iterdir()) == ["0001.orig.wav", "0001.txt", "0001.wav"]  # and nothing else
+    assert _clip_bytes(trash) == before
+    assert [p.name for p in (tmp_path / "trash" / voice.id).iterdir()] == ["clips"]
+    assert sorted(p.name for p in clips.iterdir()) == ["0002.orig.wav", "0002.txt", "0002.wav"]
+    assert [c.index for c in lib.get(voice.id).clips] == [2]
+    restored, sr = read_wav(trash / "0001.orig.wav")
+    assert sr == 48000 and abs(len(restored) - 2 * SR) <= 2
+
+
+def test_two_deleted_clips_with_the_same_file_names_are_both_kept_in_the_trash(tmp_path, monkeypatch):
+    monkeypatch.setattr("aivoice.library._now", lambda: 1000.0)
+    lib = Library(tmp_path)
+    voice = lib.create("V")
+    record = tmp_path / "voices" / voice.id / "voice.json"
+    fresh = record.read_bytes()
+    clips = tmp_path / "voices" / voice.id / "clips"
+    kept = []
+    for seconds in (1.0, 2.0, 3.0):
+        # The record is put back to "no clips yet" (as after restoring an old copy), so number 1 is handed out again.
+        record.write_bytes(fresh)
+        assert lib.add_clip(voice.id, audio(seconds), f"{seconds} s", "recorded").index == 1
+        kept.append(_clip_bytes(clips))
+        lib.delete_clip(voice.id, 1)
+    trash = tmp_path / "trash" / voice.id / "clips"
+    names = sorted(p.name for p in trash.iterdir())
+    assert len(names) == 9 and list(clips.iterdir()) == []
+    stems = sorted({n.split(".")[0] for n in names})
+    assert len(stems) == 3 and stems[0] == "0001"
+    # Each clip's three files share one name, and every deleted clip's content is still there.
+    found = [_clip_bytes(trash, stem) for stem in stems]
+    assert all(clip in found for clip in kept) and len(found) == len(kept)
+
+
+def test_a_clip_file_that_cannot_be_moved_to_the_trash_is_left_in_place_not_erased(tmp_path, monkeypatch, caplog):
+    lib = Library(tmp_path)
+    voice = lib.create("V")
+    lib.add_clip(voice.id, audio(), "x", "recorded")
+    clips = tmp_path / "voices" / voice.id / "clips"
+    before = _clip_bytes(clips)
+    real = os.rename
+
+    def locked(src, dst):
+        if str(src).endswith(".orig.wav"):
+            raise PermissionError("in use")
+        return real(src, dst)
+
+    monkeypatch.setattr("aivoice.library.os.rename", locked)
+    with caplog.at_level("WARNING", logger="aivoice.library"):
+        lib.delete_clip(voice.id, 1)
+    monkeypatch.undo()
+    assert any("0001.orig.wav" in r.getMessage() for r in caplog.records)
+    assert lib.get(voice.id).clips == []
+    trash = tmp_path / "trash" / voice.id / "clips"
+    assert (clips / "0001.orig.wav").read_bytes() == before[".orig.wav"]  # stranded, still whole
+    assert (trash / "0001.wav").read_bytes() == before[".wav"]
+    assert (trash / "0001.txt").read_bytes() == before[".txt"]
+
+
+def test_delete_clip_never_overwrites_a_file_already_in_the_trash(tmp_path):
+    lib = Library(tmp_path)
+    voice = lib.create("V")
+    lib.add_clip(voice.id, audio(), "x", "recorded")
+    trash = tmp_path / "trash" / voice.id / "clips"
+    trash.mkdir(parents=True)
+    (trash / "0001.wav").write_bytes(b"an earlier recording")
+    lib.delete_clip(voice.id, 1)
+    assert (trash / "0001.wav").read_bytes() == b"an earlier recording"
+    assert len(list(trash.iterdir())) == 4
+    assert list((tmp_path / "voices" / voice.id / "clips").iterdir()) == []
+
+
+def test_delete_clip_with_an_unusable_trash_folder_keeps_the_files_where_they_are(tmp_path, caplog):
+    lib = Library(tmp_path)
+    voice = lib.create("V")
+    lib.add_clip(voice.id, audio(), "x", "recorded")
+    (tmp_path / "trash").write_text("a file where the trash folder should be")
+    with caplog.at_level("WARNING", logger="aivoice.library"):
+        lib.delete_clip(voice.id, 1)
+    assert lib.get(voice.id).clips == []
+    clips = tmp_path / "voices" / voice.id / "clips"
+    assert sorted(p.name for p in clips.iterdir()) == ["0001.orig.wav", "0001.txt", "0001.wav"]
+    assert any("trash" in r.getMessage() for r in caplog.records)
+
+
+# --- disk failures are readable ----------------------------------------------------------------
+
+
+def _no_space(*args, **kwargs):
+    raise OSError(errno.ENOSPC, "No space left on device")
+
+
+def _record_writes_fail(monkeypatch):
+    real = library_module._atomic_json
+
+    def picky(path, obj):
+        if path.name == "voice.json":
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real(path, obj)
+
+    monkeypatch.setattr(library_module, "_atomic_json", picky)
+
+
+def test_add_clip_on_a_full_disk_is_a_readable_error_and_registers_nothing(tmp_path, monkeypatch, caplog):
+    lib = Library(tmp_path)
+    voice = lib.create("V")
+    lib.add_clip(voice.id, audio(), "first", "recorded")
+    record = tmp_path / "voices" / voice.id / "voice.json"
+    before = record.read_bytes()
+    monkeypatch.setattr(library_module, "write_wav", _no_space)
+    with caplog.at_level("WARNING", logger="aivoice.library"):
+        with pytest.raises(LibraryError, match="Could not save the clip: No space left on device") as caught:
+            lib.add_clip(voice.id, audio(), "second", "recorded")
+    monkeypatch.undo()
+    assert isinstance(caught.value.__cause__, OSError) and caught.value.__cause__.errno == errno.ENOSPC
+    assert any("No space left" in r.getMessage() for r in caplog.records)
+    assert record.read_bytes() == before
+    assert [c.text for c in Library(tmp_path).get(voice.id).clips] == ["first"]
+    assert lib.add_clip(voice.id, audio(), "second again", "recorded").index == 2  # the number was not used up
+
+
+def test_add_clip_failing_part_way_leaves_only_harmless_strays(tmp_path, monkeypatch):
+    lib = Library(tmp_path)
+    voice = lib.create("V")
+    record = tmp_path / "voices" / voice.id / "voice.json"
+    before = record.read_bytes()
+    real = library_module.write_wav
+
+    def second_write_fails(path, samples, rate):
+        if not str(path).endswith(".orig.wav"):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real(path, samples, rate)
+
+    monkeypatch.setattr(library_module, "write_wav", second_write_fails)
+    with pytest.raises(LibraryError, match="No space left"):
+        lib.add_clip(voice.id, audio(), "x", "recorded")
+    monkeypatch.undo()
+    assert record.read_bytes() == before and lib.get(voice.id).clips == []
+    with pytest.raises(LibraryError):
+        lib.clip_audio_path(voice.id, 1)  # the stray audio is never served
+    clip = lib.add_clip(voice.id, audio(1.0), "y", "recorded")  # and the next save replaces it
+    assert clip.index == 1
+    stored, _ = read_wav(tmp_path / "voices" / voice.id / "clips" / "0001.orig.wav")
+    assert abs(len(stored) - SR) <= 2
+
+
+def test_add_clip_whose_record_cannot_be_written_is_a_readable_error(tmp_path, monkeypatch):
+    lib = Library(tmp_path)
+    voice = lib.create("V")
+    record = tmp_path / "voices" / voice.id / "voice.json"
+    before = record.read_bytes()
+    _record_writes_fail(monkeypatch)
+    with pytest.raises(LibraryError, match="Could not save the clip: No space left on device"):
+        lib.add_clip(voice.id, audio(), "x", "recorded")
+    monkeypatch.undo()
+    assert record.read_bytes() == before and lib.get(voice.id).clips == []
+
+
+def test_create_on_a_full_disk_is_a_readable_error_and_lists_no_half_made_voice(tmp_path, monkeypatch, caplog):
+    lib = Library(tmp_path)
+    kept = lib.create("Kept")
+    _record_writes_fail(monkeypatch)
+    with caplog.at_level("WARNING", logger="aivoice.library"):
+        with pytest.raises(LibraryError, match="Could not create the voice: No space left on device") as caught:
+            lib.create("New")
+    monkeypatch.undo()
+    assert isinstance(caught.value.__cause__, OSError)
+    assert any("No space left" in r.getMessage() for r in caplog.records)
+    assert [v.id for v in lib.list()] == [kept.id]
+    assert [p.name for p in (tmp_path / "voices").iterdir()] == [kept.id]  # the empty new folder was not left behind
+
+
+def test_create_when_the_voices_folder_cannot_be_made_is_a_readable_error(tmp_path):
+    (tmp_path / "voices").write_text("a file where the voices folder should be")
+    with pytest.raises(LibraryError, match="Could not create the voice: "):
+        Library(tmp_path).create("New")
+
+
+def test_update_text_on_a_full_disk_is_a_readable_error_and_keeps_the_old_transcript(tmp_path, monkeypatch, caplog):
+    lib = Library(tmp_path)
+    voice = lib.create("V")
+    lib.add_clip(voice.id, audio(), "old", "recorded")
+    _record_writes_fail(monkeypatch)
+    with caplog.at_level("WARNING", logger="aivoice.library"):
+        with pytest.raises(LibraryError, match="Could not save the transcript: No space left on device") as caught:
+            lib.update_text(voice.id, 1, "new")
+    monkeypatch.undo()
+    assert isinstance(caught.value.__cause__, OSError)
+    assert any("No space left" in r.getMessage() for r in caplog.records)
+    assert Library(tmp_path).get(voice.id).clips[0].text == "old"
+    assert (tmp_path / "voices" / voice.id / "clips" / "0001.txt").read_text(encoding="utf-8") == "old"
+
+
+def test_delete_clip_on_a_full_disk_is_a_readable_error_and_keeps_the_clip(tmp_path, monkeypatch):
+    lib = Library(tmp_path)
+    voice = lib.create("V")
+    lib.add_clip(voice.id, audio(), "x", "recorded")
+    clips = tmp_path / "voices" / voice.id / "clips"
+    before = _clip_bytes(clips)
+    _record_writes_fail(monkeypatch)
+    with pytest.raises(LibraryError, match="Could not delete the clip: No space left on device"):
+        lib.delete_clip(voice.id, 1)
+    monkeypatch.undo()
+    assert [c.index for c in lib.get(voice.id).clips] == [1]
+    assert _clip_bytes(clips) == before and not (tmp_path / "trash").exists()
+    assert lib.clip_audio_path(voice.id, 1).is_file()
+
+
+# --- damaged folders are reported --------------------------------------------------------------
+
+
+def test_a_damaged_voice_folder_is_reported_in_the_log_without_its_contents(tmp_path, caplog):
+    lib = Library(tmp_path)
+    good, bad = lib.create("Good"), lib.create("Bad")
+    (tmp_path / "voices" / bad.id / "voice.json").write_text('{"name": "private-name", half written')
+    with caplog.at_level("WARNING", logger="aivoice.library"):
+        assert [v.id for v in Library(tmp_path).list()] == [good.id]
+    messages = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(messages) == 1
+    assert bad.id in messages[0] and "JSON" in messages[0]
+    assert "private-name" not in messages[0] and "half written" not in messages[0]
+
+
+@pytest.mark.parametrize("content, reason", [
+    ("[1, 2]", "TypeError"),
+    ('{"name": "private-name", "created": "c"}', "KeyError"),
+    ('{"name": "private-name", "created": "c", "clips": [], "next_index": "private-number"}', "ValueError"),
+])
+def test_a_voice_file_of_the_wrong_shape_is_reported_by_kind_only(tmp_path, caplog, content, reason):
+    lib = Library(tmp_path)
+    bad = lib.create("Bad")
+    (tmp_path / "voices" / bad.id / "voice.json").write_text(content)
+    with caplog.at_level("WARNING", logger="aivoice.library"):
+        assert lib.list() == []
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == 1 and bad.id in messages[0] and reason in messages[0]
+    assert "private" not in messages[0]
+
+
+def test_a_folder_without_a_voice_file_is_reported_once_not_on_every_listing(tmp_path, caplog):
+    (tmp_path / "voices" / "stray-folder").mkdir(parents=True)
+    (tmp_path / "voices" / "notes.txt").write_text("not a folder: ignored quietly")
+    lib = Library(tmp_path)
+    with caplog.at_level("WARNING", logger="aivoice.library"):
+        for _ in range(3):
+            assert lib.list() == []
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == 1 and "stray-folder" in messages[0]

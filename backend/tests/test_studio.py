@@ -1,3 +1,5 @@
+import errno
+
 import numpy as np
 import pytest
 
@@ -207,3 +209,38 @@ def test_a_redo_stays_accepted_when_the_old_take_cannot_be_removed(tmp_path, mon
     assert result["accepted"] is True and result["clip"]["index"] == 2
     assert not studio.recording
     assert any("earlier take" in r.message for r in caplog.records)
+
+
+def test_redoing_a_sentence_moves_the_earlier_take_to_the_trash(tmp_path):
+    studio, lib, streams, voice = make(tmp_path)
+    studio.start_recording(voice.id, 1, 0)
+    speak(streams)
+    studio.stop_recording()
+    clips = tmp_path / "voices" / voice.id / "clips"
+    first = {name: (clips / name).read_bytes() for name in ("0001.orig.wav", "0001.wav", "0001.txt")}
+    studio.start_recording(voice.id, 1, 0)
+    speak(streams, seconds=3.0)
+    assert studio.stop_recording()["clip"]["index"] == 2
+    trash = tmp_path / "trash" / voice.id / "clips"
+    assert {p.name: p.read_bytes() for p in trash.iterdir()} == first
+    assert sorted(p.name for p in clips.iterdir()) == ["0002.orig.wav", "0002.txt", "0002.wav"]
+
+
+def test_a_take_that_cannot_be_saved_is_a_readable_error_and_keeps_the_earlier_take(tmp_path, monkeypatch):
+    studio, lib, streams, voice = make(tmp_path)
+    studio.start_recording(voice.id, 1, 0)
+    speak(streams)
+    studio.stop_recording()
+
+    def no_space(*a, **k):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr("aivoice.library.write_wav", no_space)
+    studio.start_recording(voice.id, 1, 0)
+    speak(streams)
+    with pytest.raises(ValueError, match="Could not save the clip: No space left on device"):
+        studio.stop_recording()
+    monkeypatch.undo()
+    assert not studio.recording
+    assert [c.index for c in lib.get(voice.id).clips] == [1]  # the redo failed, so the earlier take stays
+    assert not (tmp_path / "trash").exists()
