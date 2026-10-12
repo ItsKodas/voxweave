@@ -77,3 +77,22 @@ def test_output_stream_duplicates_mono_to_stereo():
     out = np.zeros((3, 2), dtype=np.float32)
     stream["callback"](out, 3, None, None)
     assert out.tolist() == [[0.5, 0.5]] * 3
+
+
+def _out(index, name):
+    from aivoice.devices import Device
+
+    return Device(index, name, 0, 2)
+
+
+def test_prefers_main_voicemeeter_input_over_aux_regardless_of_order():
+    devices = [
+        _out(26, "VoiceMeeter Aux Input (VB-Audio VoiceMeeter AUX VAIO)"),
+        _out(30, "VoiceMeeter Input (VB-Audio VoiceMeeter VAIO)"),
+    ]
+    assert find_virtual_mic(devices).index == 30
+
+
+def test_falls_back_to_aux_when_only_aux_present():
+    devices = [_out(26, "VoiceMeeter Aux Input (VB-Audio VoiceMeeter AUX VAIO)")]
+    assert find_virtual_mic(devices).index == 26

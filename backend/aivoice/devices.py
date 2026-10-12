@@ -37,9 +37,11 @@ def list_devices(sd=None) -> list[Device]:
 
 
 def find_virtual_mic(devices: list[Device]) -> Device | None:
-    for device in devices:
-        if device.max_output > 0 and any(n in device.name.lower() for n in VIRTUAL_MIC_NAMES):
-            return device
+    # VIRTUAL_MIC_NAMES is a priority order: try each fragment across all devices before the next.
+    for fragment in VIRTUAL_MIC_NAMES:
+        for device in devices:
+            if device.max_output > 0 and fragment in device.name.lower():
+                return device
     return None
 
 
