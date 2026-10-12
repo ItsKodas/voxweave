@@ -58,10 +58,17 @@ class FakeTools:
         self.trees = {}  # pid -> the processes a snapshot of that pid's tree returns
         self.calls = []
         self.taskkill_code = 0
+        self.tree_error = None
+        self.alive_pids = set()  # what a direct look at a pid says, when no tree could be listed
 
     def tree(self, pid):
         self.calls.append(("tree", pid))
+        if self.tree_error is not None:
+            raise self.tree_error
         return list(self.trees.get(pid, []))
+
+    def alive(self, pid):
+        return pid in self.alive_pids
 
     def taskkill(self, pid):
         self.calls.append(("taskkill", pid))
@@ -415,8 +422,10 @@ def test_status_never_raises(rig, monkeypatch):
     assert rig.manager.status()["state"] == "running"
     assert rig.manager.status(12345)["state"] == "idle"
     assert rig.manager.status("../x")["state"] == "idle"
+    assert rig.manager.status_failures == 0
     monkeypatch.setattr(rig.manager, "_snapshot", lambda *a: 1 / 0)
     assert rig.manager.status()["state"] == "idle"
+    assert rig.manager.status()["state"] == "idle" and rig.manager.status_failures == 2
 
 
 # 4. Exit
@@ -589,7 +598,8 @@ def test_status_returns_while_a_slow_kill_is_in_progress(rig):
     assert rig.manager.status()["state"] == "cancelled" and rig.handles[0].kills == 1
 
 
-def test_status_from_many_threads_while_a_job_runs_and_is_cancelled(rig):
+def test_status_from_many_threads_while_a_job_runs_and_is_cancelled(rig, caplog):
+    caplog.set_level(logging.WARNING, logger="aivoice.training")
     voice = rig.voice()
     stop, errors, m = threading.Event(), [], rig.manager
 
@@ -618,6 +628,8 @@ def test_status_from_many_threads_while_a_job_runs_and_is_cancelled(rig):
         for t in threads:
             t.join(30)
     assert errors == []
+    assert m.status_failures == 0  # status() swallows its own errors, so they are counted
+    assert [r.getMessage() for r in caplog.records] == []
     assert (final["state"], final["percent"]) == ("cancelled", 40.0)
     assert rig.record(voice)["state"] == "cancelled" and m.running is False and len(rig.launches) == 1
 
@@ -717,6 +729,145 @@ def test_kill_tree_raises_when_a_child_survives_everything():
     with pytest.raises(training.KillFailed, match="51"):
         training._kill_tree(50, tools)
     assert ("kill", 51) in tools.calls
+
+
+def test_an_empty_snapshot_is_not_a_verified_kill():
+    tools = FakeTools()  # nothing can be listed, taskkill fails, and the process is still there
+    tools.taskkill_code = 1
+    tools.alive_pids.add(50)
+    with pytest.raises(training.KillFailed, match="50"):
+        training._kill_tree(50, tools)
+
+    tools.alive_pids.clear()  # the same, but a direct look shows the process is gone
+    training._kill_tree(50, tools)
+
+    tools.alive_pids.add(50)
+    tools.taskkill_code = 0  # or taskkill itself says it ended it
+    training._kill_tree(50, tools)
+
+
+def test_a_tree_that_cannot_be_inspected_is_not_a_verified_kill():
+    tools = FakeTools()
+    tools.tree_error = PermissionError("access denied")
+    tools.taskkill_code = 1
+    tools.alive_pids.add(50)
+    with pytest.raises(training.KillFailed, match="50"):
+        training._kill_tree(50, tools)
+    assert ("taskkill", 50) in tools.calls
+    tools.alive_pids.clear()
+    training._kill_tree(50, tools)  # confirmed gone
+
+
+def test_the_worker_handle_checks_its_own_process_when_nothing_can_be_listed(tmp_path, monkeypatch):
+    monkeypatch.setattr(FakePopen, "calls", [])
+    monkeypatch.setattr(FakePopen, "code", None)
+    monkeypatch.setattr(training.subprocess, "Popen", FakePopen)
+    tools = FakeTools()
+    tools.taskkill_code = 1
+    handle = training._launch_worker(["python.exe", "worker.py"], tmp_path / "worker.out.log", tools)
+    with pytest.raises(training.KillFailed, match="4242"):
+        handle.kill_tree()
+    monkeypatch.setattr(FakePopen, "code", 1)  # the launcher has exited: that is confirmation enough
+    handle.kill_tree()
+
+
+def test_a_finished_run_is_not_settled_while_a_child_survives_the_kill(rig):
+    voice, other = rig.voice("a"), rig.voice("b")
+    rig.manager.start(voice)
+    child = FakeProc(4001, killable=False)
+    rig.tools.trees[4000] = [FakeProc(4000), child]
+    rig.progress(voice, {**line(percent=100.0), "done": True, "ok": True, "error": None, "cancelled": False})
+    assert rig.manager.status()["state"] == "running"  # the worker hangs after its final line
+    rig.clock += 30
+    rig.tools.trees[4000][0].alive = False  # the kill ends the launcher (the handle now reports an exit)...
+    assert rig.manager.status()["state"] == "running" and rig.handles[0].kills == 1
+    assert rig.handles[0].code == 1 and child.alive is True  # ...but a child is still running
+    s = rig.manager.status()
+    assert (s["state"], rig.manager.running) == ("running", True)
+    with pytest.raises(TrainingError, match="already running"):
+        rig.manager.start(other)
+    child.killable = True
+    assert rig.manager.status()["state"] == "running"  # the retry is not due yet
+    rig.clock += 5
+    assert rig.manager.status()["state"] == "done" and child.alive is False
+    assert rig.manager.running is False and rig.handles[0].kills == 1
+
+
+def test_survivors_reported_by_a_failed_kill_are_remembered(rig):
+    voice, other = rig.voice("a"), rig.voice("b")
+    rig.manager.start(voice)
+    rig.progress(voice, {**line(percent=100.0), "done": True, "ok": True, "error": None, "cancelled": False})
+    rig.manager.status()
+    child = FakeProc(4001, killable=False)
+    failed = training.KillFailed("processes still running: 4001")
+    failed.survivors = [child]
+    handle = rig.handles[0]
+
+    def kill_tree():  # ends the launcher, reports the child it could not end
+        handle.kills += 1
+        handle.code = 1
+        raise failed
+
+    handle.kill_tree = kill_tree
+    rig.clock += 30
+    assert rig.manager.status()["state"] == "running"
+    assert rig.manager.status()["state"] == "running" and rig.manager.running is True  # the exit changes nothing
+    with pytest.raises(TrainingError, match="already running"):
+        rig.manager.start(other)
+    child.killable = True
+    rig.clock += 5
+    assert rig.manager.status()["state"] == "done" and child.alive is False
+    assert ("kill", 4001) in rig.tools.calls and handle.kills == 1
+
+
+def test_a_clean_exit_with_a_child_still_running_sweeps_it_before_settling(rig):
+    voice = rig.voice()
+    rig.manager.start(voice)
+    child = FakeProc(4001)
+    rig.tools.trees[4000] = [FakeProc(4000), child]
+    rig.manager.status()
+    rig.tools.trees[4000][0].alive = False
+    rig.finish(voice, 0, ok=True, percent=100.0)
+    assert rig.manager.status()["state"] == "done"
+    assert child.alive is False and ("kill", 4001) in rig.tools.calls
+
+
+def test_a_child_started_after_the_last_look_is_found_and_killed_on_the_retry(rig):
+    voice = rig.voice()
+    rig.manager.start(voice)
+    shim, trainer, loader = FakeProc(4000), FakeProc(4001), FakeProc(4002, killable=False)
+    rig.tools.trees[4000] = [shim, trainer]
+    rig.manager.status()  # the last look: the loader does not exist yet
+    rig.tools.trees[4001] = [trainer, loader]
+    rig.tools.trees[4000] = []
+    shim.alive = False
+    rig.handles[0].code = 1  # the worker dies without a final line
+    assert rig.manager.status()["state"] == "running"
+    assert trainer.alive is False and loader.alive is True and ("kill", 4002) in rig.tools.calls
+    loader.killable = True
+    rig.clock += 5
+    s = rig.manager.status()
+    assert (s["state"], s["error"]) == ("failed", STOPPED)
+    assert loader.alive is False and rig.manager.running is False
+
+
+def test_an_interrupted_kill_is_retried_later(rig):
+    voice = rig.voice()
+    rig.manager.start(voice)
+    rig.manager.cancel()
+    rig.clock += 90
+    pending = [KeyboardInterrupt()]
+
+    def interrupt_once():
+        if pending:
+            raise pending.pop()
+
+    rig.handles[0].on_kill = interrupt_once
+    with pytest.raises(KeyboardInterrupt):
+        rig.manager.status()
+    assert rig.manager.status()["state"] == "cancelling" and rig.handles[0].kills == 1
+    rig.clock += 5
+    assert rig.manager.status()["state"] == "cancelled" and rig.handles[0].kills == 2
 
 
 def test_a_surviving_child_keeps_the_job_cancelling_until_a_later_kill_works(tmp_path, monkeypatch):
@@ -1129,6 +1280,26 @@ def test_forget_deletes_outside_the_lock_and_holds_the_voice_meanwhile(rig, monk
     rig.manager.start(voice)  # and the hold is released
 
 
+def test_the_hold_lasts_until_the_last_of_two_overlapping_forgets_is_done(rig, monkeypatch):
+    voice = rig.voice()
+    rig.checkpoint(voice)
+    real, nested = training.shutil.rmtree, []
+
+    def slow_rmtree(path, *args, **kwargs):
+        if not nested:
+            nested.append(True)
+            rig.manager.forget(voice)  # a second call that starts and finishes while the first is still deleting
+            with pytest.raises(TrainingError, match="being removed"):
+                rig.manager.start(voice)
+        if Path(path).exists():
+            real(path, *args, **kwargs)
+
+    monkeypatch.setattr(training.shutil, "rmtree", slow_rmtree)
+    rig.manager.forget(voice)
+    assert nested and rig.launches == []
+    rig.manager.start(voice)
+
+
 @pytest.mark.parametrize("bad", ["..", "../..", "a/b", "", None, "Voice", "mute"])
 def test_forget_only_touches_experiment_folders_of_voice_ids(rig, bad):
     logs = rig.trainer / "rvc" / "logs"
@@ -1160,12 +1331,13 @@ def test_shutdown_stops_the_worker_and_marks_the_job_interrupted(rig):
 class FakePopen:
     pid = 4242
     calls = []
+    code = None
 
     def __init__(self, argv, **kwargs):
         FakePopen.calls.append((argv, kwargs))
 
     def poll(self):
-        return None
+        return FakePopen.code
 
 
 def test_default_launch_is_windowless_detached_from_the_console_and_never_a_shell_string(tmp_path, monkeypatch):
@@ -1200,6 +1372,7 @@ def test_the_real_taskkill_is_a_windowless_argument_list_and_reports_its_exit_co
     assert training.ProcessTools().taskkill(4242) == 128
     (argv, kwargs), = ran
     assert argv == ["taskkill", "/PID", "4242", "/T", "/F"]
+    assert kwargs["timeout"] == 10  # it is part of how long one status call can be held up
     assert kwargs["creationflags"] == subprocess.CREATE_NO_WINDOW and kwargs.get("shell", False) is False
 
 
@@ -1209,6 +1382,7 @@ def test_the_real_process_snapshot_on_this_process():
     assert tree[0].pid == os.getpid()
     assert [p.pid for p in tools.survivors(tree[:1], 0)] == [os.getpid()]
     assert tools.tree(-1) == [] and tools.survivors([], 0) == []
+    assert tools.alive(os.getpid()) is True and tools.alive(-1) is False
 
 
 def test_default_verify_runs_the_script_with_the_backends_python(tmp_path, monkeypatch):

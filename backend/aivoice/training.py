@@ -6,7 +6,12 @@ are only ever run as subprocesses.
 
 A job is only ever called stopped once its processes are known to be gone. Every kill is checked against a
 list of the worker's processes taken beforehand, runs outside the manager's lock, and is tried again later if
-anything survived.
+anything survived. That also holds after a normal exit: the job is settled only when nothing on the list is alive.
+
+How long a kill can hold up the one caller that performs it (everyone else returns at once): taskkill has
+TASKKILL_TIMEOUT seconds, the processes then get TASKKILL_GRACE seconds to disappear, the stragglers are killed
+directly and given KILL_WAIT seconds, and the manager's own list is swept with another KILL_WAIT: at worst
+10 + 3 + 5 + 5 = 23 seconds, plus the time to list the processes. Normally it is well under a second.
 """
 import json
 import logging
@@ -34,6 +39,7 @@ CANCEL_TIMEOUT = 90.0  # the worker gives the trainer 60 seconds to reach a safe
 EXIT_GRACE = 30.0  # how long a worker may linger after writing its final progress line
 KILL_RETRY = 5.0  # a kill that left something running is tried again no sooner than this
 TREE_REFRESH = 10.0  # how often the list of the worker's processes is renewed while it runs
+TASKKILL_TIMEOUT = 10  # seconds taskkill itself may take
 TASKKILL_GRACE = 3.0  # seconds given to the processes to disappear after a successful taskkill
 KILL_WAIT = 5.0  # and after killing the stragglers one by one
 TAIL_BYTES = 65536
@@ -61,7 +67,11 @@ class TrainingError(ValueError):
 
 
 class KillFailed(RuntimeError):
-    """Processes that should have been stopped are still running."""
+    """Processes that should have been stopped are still running, or could not be shown to be gone."""
+
+    def __init__(self, message: str, survivors=()):
+        super().__init__(message)
+        self.survivors = list(survivors)  # the ones known to be alive, for the next attempt
 
 
 def _reason(exc: BaseException) -> str:
@@ -99,10 +109,14 @@ class ProcessTools:
         """Ends a process tree; returns taskkill's exit code. The pid of a venv Python is only a launcher shim:
         the real interpreter and the trainer's own child processes are its descendants."""
         return subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], stdin=subprocess.DEVNULL,
-                              capture_output=True, timeout=30, creationflags=_NO_WINDOW).returncode
+                              capture_output=True, timeout=TASKKILL_TIMEOUT, creationflags=_NO_WINDOW).returncode
 
     def kill(self, proc) -> None:
         proc.kill()
+
+    def alive(self, pid: int) -> bool:
+        """A direct look at one pid, for when its tree could not be listed."""
+        return _pid_alive(pid)
 
     def survivors(self, procs: list, timeout: float) -> list:
         """Those still running after waiting at most timeout seconds for them to end."""
@@ -125,19 +139,35 @@ def _end_survivors(procs: list, tools, grace: float = 0.0) -> list:
             pass
     left = tools.survivors(alive, KILL_WAIT)
     if left:
-        raise KillFailed(f"processes still running: {_pids(left)}")
+        raise KillFailed(f"processes still running: {_pids(left)}", left)
     return alive
 
 
-def _kill_tree(pid: int, tools) -> None:
-    """Ends a process and everything it started, and makes sure of it. Raises KillFailed otherwise."""
+def _kill_tree(pid: int, tools, gone=None) -> None:
+    """Ends a process and everything it started, and makes sure of it. Raises KillFailed otherwise.
+    gone() says whether the process itself has ended; by default a direct look at the pid."""
     # First the list: once a parent is gone, its children can no longer be found through it.
-    snapshot = tools.tree(pid)
+    try:
+        snapshot = tools.tree(pid)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not list the processes of %s: %s", pid, _reason(exc))
+        snapshot = []
     try:
         code = tools.taskkill(pid)
     except (OSError, subprocess.SubprocessError) as exc:
         log.warning("taskkill could not be run for process %s: %s", pid, _reason(exc))
         code = None
+    if not snapshot:
+        # Nothing was listed, so nothing can be checked off. That is only a kill if taskkill says it ended the
+        # tree, or the process is seen to be gone; "could not look" is never taken for "nothing there".
+        try:
+            is_gone = gone() if gone is not None else not tools.alive(pid)
+        except Exception:  # noqa: BLE001
+            is_gone = False
+        if code != 0 and not is_gone:
+            raise KillFailed(f"process {pid} could not be listed, taskkill gave exit code {code}, "
+                             "and it is still running")
+        return
     killed = _end_survivors(snapshot, tools, TASKKILL_GRACE if code == 0 else 0.0)
     if killed:
         log.warning("taskkill (exit code %s) left processes of %s running; ended them directly: %s",
@@ -157,7 +187,7 @@ class _Worker:
 
     def kill_tree(self) -> None:
         """Raises KillFailed if any process of the worker is still running afterwards."""
-        _kill_tree(self.pid, self._tools)
+        _kill_tree(self.pid, self._tools, gone=lambda: self._proc.poll() is not None)
         self._proc.poll()  # collect the exit code
 
 
@@ -326,9 +356,9 @@ class TrainingManager:
         self._active: str | None = None  # the voice whose worker is running
         self._starting: str | None = None  # the voice whose start is waiting for the environment check
         self._start_cancelled = False  # cancel or shutdown arrived during that wait
-        self._forgetting: set[str] = set()  # voices whose training files are being deleted right now
+        self._forgetting: dict[str, int] = {}  # voices whose training files are being deleted, per running call
         self._passed: dict | None = None  # the last full environment report, kept only if it passed
-        self._status_failed = False
+        self.status_failures = 0  # errors status() swallowed; anything but 0 is a bug worth a look at the log
         self._recover()
 
     # Paths
@@ -537,7 +567,8 @@ class TrainingManager:
 
     def _poll(self) -> _Job | None:
         """Brings the running job up to date under the lock: new progress, or an exit. Returns the job when
-        its processes now have to be stopped, which the caller does after releasing the lock (_stop)."""
+        its processes now have to be stopped or checked, which the caller does after releasing the lock (_stop).
+        A job is settled here only when there is no process left to check."""
         job = self._jobs.get(self._active) if self._active is not None else None
         if job is None or job.killing:
             return None
@@ -552,43 +583,68 @@ class TrainingManager:
             self._refresh_tree(job, now)
             if job.final is not None and job.final_at is None:
                 job.final_at = now
-            overdue = (job.forced is not None
+            overdue = (job.forced is not None or job.retry_at is not None
                        or (job.final_at is not None and now - job.final_at >= EXIT_GRACE)
                        or (job.cancel_at is not None and now - job.cancel_at >= CANCEL_TIMEOUT))
             if not overdue:
                 return None
         else:
             job.exited = True
-            if job.final is not None or not job.tree:
+            if not job.tree and job.retry_at is None:
                 self._settle(job, *self._result(job))
                 return None
-            # It went without a final line, so it did not clean up: a stage process may have outlived it.
+            # Its processes were seen, or a kill left some running: whatever its final line says, the job is
+            # not over until they are checked (and ended, if the worker left any behind).
         if job.retry_at is not None and now < job.retry_at:
             return None
         job.killing = True
         return job
 
-    def _stop(self, job: _Job) -> None:
-        """Ends the job's processes, without the lock. The job is settled only if nothing is left running;
-        otherwise it stays as it is and _poll asks again after KILL_RETRY seconds."""
-        failure = None
+    def _known_processes(self, job: _Job) -> list:
+        """The job's remembered processes plus whatever those still alive have started since the last look."""
+        known = dict.fromkeys(job.tree)
         try:
+            for proc in self._tools.survivors(list(known), 0.0):
+                known.update(dict.fromkeys(self._tools.tree(proc.pid)))
+        except Exception as exc:  # noqa: BLE001 - the remembered list still stands
+            log.warning("Could not list the training processes of %s again: %s", job.voice_id, _reason(exc))
+        return list(known)
+
+    def _stop(self, job: _Job) -> None:
+        """Ends the job's processes, without the lock (see the module text for how long this can take). The
+        job is settled only if nothing is left running; otherwise it stays as it is, remembers the survivors,
+        and _poll asks again after KILL_RETRY seconds."""
+        procs, failures, verified = list(job.tree), [], False
+        try:
+            procs = self._known_processes(job)
             if not job.exited:
-                job.handle.kill_tree()
-            leftover = _end_survivors(job.tree, self._tools)
-            if leftover:
-                log.warning("Stopped processes the training worker of %s left running: %s",
-                            job.voice_id, _pids(leftover))
-        except Exception as exc:  # noqa: BLE001
-            failure = exc
-        with self._lock:
-            job.killing = False
-            if failure is not None:
-                log.warning("Could not stop the training processes of %s, trying again in %g seconds: %s",
-                            job.voice_id, KILL_RETRY, _reason(failure))
-                job.retry_at = self._now() + KILL_RETRY
-            elif self._active == job.voice_id and self._jobs.get(job.voice_id) is job:
-                self._settle(job, *self._result(job))
+                try:
+                    job.handle.kill_tree()
+                except KillFailed as exc:
+                    failures.append(exc)
+                    procs = list(dict.fromkeys([*procs, *exc.survivors]))
+                except Exception as exc:  # noqa: BLE001
+                    failures.append(exc)
+            try:
+                leftover = _end_survivors(procs, self._tools)
+                if leftover:
+                    log.warning("Stopped processes the training worker of %s left running: %s",
+                                job.voice_id, _pids(leftover))
+            except Exception as exc:  # noqa: BLE001
+                failures.append(exc)
+            verified = not failures
+        finally:  # also on KeyboardInterrupt or SystemExit: the job must never be left marked as being killed
+            with self._lock:
+                job.killing = False
+                if self._active == job.voice_id and self._jobs.get(job.voice_id) is job:
+                    if verified:
+                        self._settle(job, *self._result(job))
+                    else:
+                        job.tree = procs
+                        job.retry_at = self._now() + KILL_RETRY
+                        log.warning("Could not stop the training processes of %s, trying again in %g seconds: %s",
+                                    job.voice_id, KILL_RETRY,
+                                    "; ".join(_reason(f) for f in failures) or "interrupted")
 
     def _service(self) -> None:
         with self._lock:
@@ -639,8 +695,8 @@ class TrainingManager:
                     job = self._present(self._jobs.get(voice_id)) if isinstance(voice_id, str) else None
                 return self._snapshot(job, voice_id)
         except Exception:  # noqa: BLE001
-            if not self._status_failed:  # once: this is called every second
-                self._status_failed = True
+            self.status_failures += 1
+            if self.status_failures == 1:  # logged once: this is called every second
                 log.exception("Could not work out the training status")
             return _idle(voice_id if isinstance(voice_id, str) else None)
 
@@ -781,7 +837,9 @@ class TrainingManager:
             if voice_id in (self._active, self._starting):
                 raise TrainingError("This voice is training. Stop the training first.")
             self._jobs.pop(voice_id, None)
-            self._forgetting.add(voice_id)  # no training of this voice may start while its files are going
+            # No training of this voice may start while its files are going; counted, so that of two
+            # overlapping calls the first to finish does not release the hold for the other.
+            self._forgetting[voice_id] = self._forgetting.get(voice_id, 0) + 1
         try:
             folder, model = self._experiment_dir(voice_id), self._small_model(voice_id)
             try:
@@ -793,4 +851,6 @@ class TrainingManager:
                             voice_id, self._trainer, _reason(exc))
         finally:
             with self._lock:
-                self._forgetting.discard(voice_id)
+                self._forgetting[voice_id] -= 1
+                if not self._forgetting[voice_id]:
+                    del self._forgetting[voice_id]
