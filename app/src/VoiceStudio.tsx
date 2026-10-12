@@ -1,3 +1,4 @@
+import { RecordSession } from "./RecordSession";
 import { LibraryVoice } from "./studioApi";
 
 export const USABLE_MINUTES = 10;
@@ -15,11 +16,13 @@ export function MinutesBar({ minutes }: { minutes: number }) {
   );
 }
 
-export function VoiceStudio({ voice }: { voice: LibraryVoice; active: boolean; onChanged: () => void }) {
+export function VoiceStudio({ voice, active, onChanged }: { voice: LibraryVoice; active: boolean; onChanged: () => void }) {
   return (
     <section className="studio" aria-label={`Voice ${voice.name}`}>
       <h2>{voice.name}</h2>
       <MinutesBar minutes={voice.minutes} />
+      <h3>Record</h3>
+      <RecordSession voiceId={voice.id} active={active} onSaved={onChanged} />
     </section>
   );
 }

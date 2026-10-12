@@ -37,3 +37,9 @@ button.danger { background: #5a2a30; padding: 4px 10px; font-size: 0.8rem; }
 .minutes progress { width: 100%; height: 10px; }
 .minutes p { font-size: 0.8rem; color: #aab0bb; margin: 4px 0 12px; }
 [hidden] { display: none !important; }
+h3 { font-size: 0.9rem; margin: 16px 0 6px; color: #aab0bb; text-transform: uppercase; letter-spacing: 0.04em; }
+.sentence { font-size: 1.25rem; line-height: 1.4; padding: 14px; background: #22252c; border-radius: 8px; margin: 8px 0; }
+.progress-line { font-size: 0.8rem; color: #aab0bb; margin: 8px 0 0; }
+.ok { color: #7bd88f; }
+button.secondary { background: #343843; }
+audio { width: 100%; margin: 6px 0; }
