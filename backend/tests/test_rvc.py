@@ -120,3 +120,20 @@ def test_blend_index_handles_zero_distance():
 
     out = blend_index(np.zeros((2, 768), dtype=np.float32), Exact(), np.ones((1, 768), dtype=np.float32), 0.5)
     assert np.all(np.isfinite(out))
+
+
+def test_make_session_refuses_cpu_fallback(monkeypatch):
+    import onnxruntime as ort
+
+    from aivoice.engines.rvc import make_session
+
+    class CpuOnly:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def get_providers(self):
+            return ["CPUExecutionProvider"]
+
+    monkeypatch.setattr(ort, "InferenceSession", CpuOnly)
+    with pytest.raises(RuntimeError, match="DirectML is not available"):
+        make_session("model.onnx")

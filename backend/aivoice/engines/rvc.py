@@ -14,10 +14,13 @@ def make_session(path: str, device_id: int = 0):
     options = ort.SessionOptions()
     options.enable_mem_pattern = False  # required by the DirectML provider
     options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-    return ort.InferenceSession(
+    session = ort.InferenceSession(
         str(path), options,
         providers=[("DmlExecutionProvider", {"device_id": device_id}), "CPUExecutionProvider"],
     )
+    if "DmlExecutionProvider" not in session.get_providers():
+        raise RuntimeError("DirectML is not available; refusing to run voice conversion on the CPU")
+    return session
 
 
 def blend_index(feats: np.ndarray, index, big_npy: np.ndarray, rate: float) -> np.ndarray:
