@@ -1,16 +1,42 @@
 """Export an RVC v2 .pth voice to ONNX for the AI Voice backend.
 
-Runs in its own venv (see README). Usage:
-    python tools/export_rvc_onnx.py <voice.pth> <voice-id> [--index file.index] [--name "Display Name"]
+One-time setup (run from the repo root; needs the patch because the stock exporter at
+this tag fails and bakes a fixed 200-frame length into the graph):
+    git -c core.autocrlf=false clone --depth 1 --branch 2.2.231006 https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI tools/.rvc/repo
+    git -C tools/.rvc/repo apply --ignore-whitespace ../../rvc_onnx_export.patch
+    uv venv --python 3.10 tools/.rvc/venv
+    uv pip install --python tools/.rvc/venv torch==2.6.0 numpy==1.26.4 onnx scipy --extra-index-url https://download.pytorch.org/whl/cpu
+
+Usage:
+    tools/.rvc/venv/Scripts/python tools/export_rvc_onnx.py <voice.pth> <voice-id> [--index file.index] [--name "Display Name"]
 """
 import argparse
 import json
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 RVC_REPO = Path(__file__).resolve().parent / ".rvc" / "repo"
+PATCH = Path(__file__).resolve().parent / "rvc_onnx_export.patch"
+
+
+def _require_patched_repo() -> None:
+    if not RVC_REPO.is_dir():
+        sys.exit(f"RVC clone missing at {RVC_REPO}. Follow the setup steps at the top of this file.")
+    done = subprocess.run(
+        ["git", "-C", str(RVC_REPO), "apply", "--reverse", "--check", "--ignore-whitespace", str(PATCH)],
+        capture_output=True,
+    )
+    if done.returncode != 0:
+        sys.exit(
+            "The RVC clone is not patched. Run:\n"
+            f"    git -C {RVC_REPO} apply --ignore-whitespace {PATCH}"
+        )
+
+
+_require_patched_repo()
 sys.path.insert(0, str(RVC_REPO))
 
 import torch  # noqa: E402

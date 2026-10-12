@@ -1,0 +1,68 @@
+diff --git a/infer/lib/infer_pack/attentions.py b/infer/lib/infer_pack/attentions.py
+index 2cc745a..c152b54 100644
+--- a/infer/lib/infer_pack/attentions.py
++++ b/infer/lib/infer_pack/attentions.py
+@@ -306,23 +306,13 @@ class MultiHeadAttention(nn.Module):
+         return ret
+ 
+     def _get_relative_embeddings(self, relative_embeddings, length: int):
+-        max_relative_position = 2 * self.window_size + 1
+-        # Pad first before slice to avoid using cond ops.
+-        pad_length: int = max(length - (self.window_size + 1), 0)
+-        slice_start_position = max((self.window_size + 1) - length, 0)
+-        slice_end_position = slice_start_position + 2 * length - 1
+-        if pad_length > 0:
+-            padded_relative_embeddings = F.pad(
+-                relative_embeddings,
+-                # commons.convert_pad_shape([[0, 0], [pad_length, pad_length], [0, 0]]),
+-                [0, 0, pad_length, pad_length, 0, 0],
+-            )
+-        else:
+-            padded_relative_embeddings = relative_embeddings
+-        used_relative_embeddings = padded_relative_embeddings[
+-            :, slice_start_position:slice_end_position
++        # Dynamic-length friendly: always pad by `length`, then slice [w+1, w+2*length).
++        padded_relative_embeddings = F.pad(
++            relative_embeddings, [0, 0, length, length, 0, 0]
++        )
++        return padded_relative_embeddings[
++            :, self.window_size + 1 : self.window_size + 2 * length
+         ]
+-        return used_relative_embeddings
+ 
+     def _relative_position_to_absolute_position(self, x):
+         """
+@@ -342,7 +332,7 @@ class MultiHeadAttention(nn.Module):
+         x_flat = F.pad(
+             x_flat,
+             # commons.convert_pad_shape([[0, 0], [0, 0], [0, int(length) - 1]])
+-            [0, int(length) - 1, 0, 0, 0, 0],
++            [0, length - 1, 0, 0, 0, 0],
+         )
+ 
+         # Reshape and slice out the padded elements.
+@@ -361,9 +351,9 @@ class MultiHeadAttention(nn.Module):
+         x = F.pad(
+             x,
+             # commons.convert_pad_shape([[0, 0], [0, 0], [0, 0], [0, int(length) - 1]])
+-            [0, int(length) - 1, 0, 0, 0, 0, 0, 0],
++            [0, length - 1, 0, 0, 0, 0, 0, 0],
+         )
+-        x_flat = x.view([batch, heads, int(length**2) + int(length * (length - 1))])
++        x_flat = x.view([batch, heads, length * (2 * length - 1)])
+         # add 0's in the beginning that will skew the elements after reshape
+         x_flat = F.pad(
+             x_flat,
+diff --git a/infer/lib/infer_pack/models_onnx.py b/infer/lib/infer_pack/models_onnx.py
+index ff60414..97308ef 100644
+--- a/infer/lib/infer_pack/models_onnx.py
++++ b/infer/lib/infer_pack/models_onnx.py
+@@ -149,7 +149,7 @@ class ResidualCouplingBlock(nn.Module):
+                 x, _ = flow(x, x_mask, g=g, reverse=reverse)
+         else:
+             for flow in reversed(self.flows):
+-                x = flow(x, x_mask, g=g, reverse=reverse)
++                x, _ = flow(x, x_mask, g=g, reverse=reverse)
+         return x
+ 
+     def remove_weight_norm(self):

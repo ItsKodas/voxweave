@@ -138,3 +138,9 @@ index ff60414..97308ef 100644
  
      def remove_weight_norm(self):
 ```
+
+## Findings for later tasks
+
+- **DirectML sessions are fast only for the first input shape they see.** Later, different shapes run roughly 5-8x slower. Each engine instance must keep one fixed window length (pad to the preset's constant window) and recreate its sessions on preset change.
+- **Harvest pitch extraction is slower than real time at the high_quality window** (about 466 ms for a 2080 ms window against a 250 ms budget). Use dio or a lighter extractor for that preset (Task 13).
+- **The RVC exporter needs the patch.** `tools/rvc_onnx_export.patch` fixes the tuple bug and the baked 200-frame length; `tools/export_rvc_onnx.py` refuses to run on an unpatched clone. Setup steps are in that script's docstring. Verified: the patch applies cleanly to a fresh tag 2.2.231006 clone and the re-exported model runs at 54/108/137 frames on DirectML.
