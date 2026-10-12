@@ -1,11 +1,44 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, Device, Params, Stats, Voice } from "./api";
+import { api, Device, DeviceList, Params, Stats, Voice } from "./api";
 
 const PRESET_LABELS: Record<string, string> = {
   low_latency: "Low latency",
   balanced: "Balanced",
   high_quality: "High quality",
 };
+
+type Selection = { input: number | null; mic: number | null; monitor: number | null };
+
+const isVirtual = (d: Device) => /voicemeeter|cable/i.test(d.name);
+
+/**
+ * Chooses devices for a fresh device list. `keep` holds the current choices, which survive when
+ * the device still exists. The virtual mic is only ever the detected one or None: a real output
+ * (speakers) is never picked for it, and the listen device is never the virtual mic.
+ */
+function chooseDevices(list: DeviceList, keep?: Selection & { hadVirtualMic: boolean }): Selection {
+  const ins = list.devices.filter((d) => d.max_input > 0);
+  const outs = list.devices.filter((d) => d.max_output > 0);
+  const has = (group: Device[], index: number | null | undefined): index is number =>
+    index != null && group.some((d) => d.index === index);
+
+  const input = has(ins, keep?.input) ? keep.input
+    : has(ins, list.default_input) ? list.default_input
+    : ins[0]?.index ?? null;
+
+  let mic = list.virtual_mic;
+  if (keep) {
+    if (has(outs, keep.mic)) mic = keep.mic;
+    else if (keep.mic === null && keep.hadVirtualMic) mic = null; // None was the user's own choice
+  }
+
+  const listenable = outs.filter((d) => d.index !== mic);
+  const monitor = has(listenable, keep?.monitor) ? keep.monitor
+    : has(listenable, list.default_output) ? list.default_output
+    : (listenable.find((d) => !isVirtual(d)) ?? listenable[0])?.index ?? null;
+
+  return { input, mic, monitor };
+}
 
 function Meter({ label, level }: { label: string; level: number }) {
   return (
@@ -16,8 +49,16 @@ function Meter({ label, level }: { label: string; level: number }) {
   );
 }
 
-export function LivePanel({ stats, actionError = null }: { stats: Stats; actionError?: string | null }) {
+type Props = {
+  stats: Stats;
+  actionError?: string | null;
+  /** Called after "Refresh devices" succeeded, so setup checks that depend on devices can re-run. */
+  onDevicesRefreshed?: () => void;
+};
+
+export function LivePanel({ stats, actionError = null, onDevicesRefreshed }: Props) {
   const [devices, setDevices] = useState<Device[]>([]);
+  const [virtualMic, setVirtualMic] = useState<number | null>(null);
   const [voices, setVoices] = useState<Voice[]>([]);
   const [presets, setPresets] = useState<Record<string, Params>>({});
   const [input, setInput] = useState<number | null>(null);
@@ -38,19 +79,22 @@ export function LivePanel({ stats, actionError = null }: { stats: Stats; actionE
 
   const [loadFailed, setLoadFailed] = useState(false);
 
+  const applyDevices = (list: DeviceList, chosen: Selection) => {
+    setDevices(list.devices);
+    setVirtualMic(list.virtual_mic);
+    setInput(chosen.input);
+    setMic(chosen.mic);
+    setMonitor(chosen.monitor);
+  };
+
   const load = () => {
     setError(null);
     setLoadFailed(false);
     Promise.all([api.devices(), api.voices(), api.presets()])
       .then(([d, v, p]) => {
-        setDevices(d.devices);
+        applyDevices(d, chooseDevices(d));
         setVoices(v);
         setPresets(p);
-        const ins = d.devices.filter((x) => x.max_input > 0);
-        const outs = d.devices.filter((x) => x.max_output > 0);
-        setInput(ins[0]?.index ?? null);
-        setMic(d.virtual_mic ?? outs[0]?.index ?? null);
-        setMonitor(outs.find((x) => x.index !== d.virtual_mic)?.index ?? null);
         setVoice(v[0]?.id ?? "");
         setLoaded(true);
       })
@@ -76,11 +120,18 @@ export function LivePanel({ stats, actionError = null }: { stats: Stats; actionE
     }
   };
 
+  const refreshDevices = () =>
+    run(async () => {
+      const list = await api.refreshDevices();
+      applyDevices(list, chooseDevices(list, { input, mic, monitor, hadVirtualMic: virtualMic !== null }));
+      onDevicesRefreshed?.();
+    });
+
   const start = () =>
     run(() =>
       api.start({
         input_device: input as number,
-        mic_device: mic as number,
+        mic_device: mic,
         voice,
         monitor_device: monitorOn ? monitor : null,
         monitor_gain: monitorGain,
@@ -115,7 +166,8 @@ export function LivePanel({ stats, actionError = null }: { stats: Stats; actionE
     return Object.keys(diff).length ? diff : null;
   };
 
-  const canStart = !busy && input !== null && mic !== null && voice !== "";
+  const hasDestination = mic !== null || (monitorOn && monitor !== null);
+  const canStart = !busy && input !== null && hasDestination && voice !== "";
   const shownError = error ?? actionError ?? stats.error;
 
   return (
@@ -132,10 +184,24 @@ export function LivePanel({ stats, actionError = null }: { stats: Stats; actionE
       </label>
       <label>
         Virtual mic
-        <select value={mic ?? ""} onChange={(e) => setMic(Number(e.target.value))} disabled={stats.running}>
+        <select
+          value={mic ?? ""}
+          onChange={(e) => setMic(e.target.value === "" ? null : Number(e.target.value))}
+          disabled={stats.running}
+        >
+          <option value="">None (listen only)</option>
           {outputs.map((d) => <option key={d.index} value={d.index}>{d.name}</option>)}
         </select>
       </label>
+      {loaded && virtualMic === null && (
+        <p className="hint">
+          No virtual mic was found, so other apps will not hear anything until VoiceMeeter is installed and
+          running. You can still listen to the converted voice yourself.
+        </p>
+      )}
+      {loaded && !hasDestination && !stats.running && (
+        <p className="hint">Choose a virtual mic or tick Listen to output to start.</p>
+      )}
       <label className="row">
         <input
           type="checkbox"
@@ -174,6 +240,9 @@ export function LivePanel({ stats, actionError = null }: { stats: Stats; actionE
           </label>
         </>
       )}
+      <button className="secondary" onClick={refreshDevices} disabled={busy || stats.running}>
+        Refresh devices
+      </button>
       <label>
         Voice
         <select value={voice} onChange={(e) => setVoice(e.target.value)} disabled={stats.running}>

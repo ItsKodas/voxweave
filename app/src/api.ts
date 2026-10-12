@@ -1,6 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export type Device = { index: number; name: string; max_input: number; max_output: number };
+/** Indices refer to `devices`. `virtual_mic` is null when no virtual mic (VoiceMeeter) is present. */
+export type DeviceList = {
+  devices: Device[];
+  virtual_mic: number | null;
+  default_input: number | null;
+  default_output: number | null;
+};
 export type Voice = { id: string; name: string; has_index: boolean };
 export type Params = {
   chunk_ms: number;
@@ -25,7 +32,8 @@ export type Stats = {
 };
 export type StartRequest = {
   input_device: number;
-  mic_device: number;
+  /** null is listen-only: nothing is sent to other apps. */
+  mic_device: number | null;
   voice: string;
   monitor_device: number | null;
   monitor_gain: number;
@@ -58,7 +66,9 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 
 export const api = {
   health: () => call<{ status: string }>("GET", "/health"),
-  devices: () => call<{ devices: Device[]; virtual_mic: number | null }>("GET", "/devices"),
+  devices: () => call<DeviceList>("GET", "/devices"),
+  /** Re-scans audio hardware. The backend refuses while live mode is running. */
+  refreshDevices: () => call<DeviceList>("POST", "/devices/refresh"),
   voices: () => call<Voice[]>("GET", "/voices"),
   presets: () => call<Record<string, Params>>("GET", "/presets"),
   setupCheck: () => call<Check[]>("GET", "/setup-check"),

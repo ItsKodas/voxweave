@@ -22,4 +22,14 @@ describe("SetupCheck", () => {
     expect(await screen.findByText("No voice models installed.")).toBeInTheDocument();
     expect(screen.queryByText("fine")).not.toBeInTheDocument();
   });
+
+  it("runs the checks again when refreshKey changes", async () => {
+    vi.mocked(api.setupCheck).mockReset().mockResolvedValueOnce([{ id: "virtual_mic", ok: false, message: "No virtual mic found." }]);
+    const { rerender } = render(<SetupCheck refreshKey={0} />);
+    expect(await screen.findByText("No virtual mic found.")).toBeInTheDocument();
+    vi.mocked(api.setupCheck).mockResolvedValueOnce([{ id: "virtual_mic", ok: true, message: "found" }]);
+    rerender(<SetupCheck refreshKey={1} />);
+    await vi.waitFor(() => expect(screen.queryByText("No virtual mic found.")).not.toBeInTheDocument());
+    expect(api.setupCheck).toHaveBeenCalledTimes(2);
+  });
 });

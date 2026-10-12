@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "./api";
-import { IDLE, useStats } from "./useStats";
+import { CRASH_MESSAGE, IDLE, useStats } from "./useStats";
 
 vi.mock("./api", () => ({ api: { wsUrl: vi.fn() } }));
 
@@ -42,11 +42,55 @@ describe("useStats", () => {
   it("resets to idle on close but keeps the last error, then reconnects", async () => {
     const { result } = renderHook(() => useStats());
     await flush();
-    act(() => FakeSocket.instances[0].onmessage?.({ data: JSON.stringify({ ...IDLE, running: true, error: "bad" }) }));
+    act(() => FakeSocket.instances[0].onmessage?.({ data: JSON.stringify({ ...IDLE, error: "bad" }) }));
     act(() => FakeSocket.instances[0].onclose?.());
     expect(result.current).toEqual({ ...IDLE, error: "bad" });
     await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
     expect(FakeSocket.instances).toHaveLength(2);
+  });
+
+  const send = (socket: FakeSocket, stats: object) =>
+    act(() => socket.onmessage?.({ data: JSON.stringify(stats) }));
+
+  it("explains that the voice engine stopped when the socket closes during live mode", async () => {
+    const { result } = renderHook(() => useStats());
+    await flush();
+    send(FakeSocket.instances[0], { ...IDLE, running: true, mode: "converted" });
+    act(() => FakeSocket.instances[0].onclose?.());
+    expect(CRASH_MESSAGE).toBe("The voice engine stopped unexpectedly. Live mode is off.");
+    expect(result.current).toEqual({ ...IDLE, error: CRASH_MESSAGE });
+  });
+
+  it("says nothing when the socket closes while live mode is off", async () => {
+    const { result } = renderHook(() => useStats());
+    await flush();
+    send(FakeSocket.instances[0], IDLE);
+    act(() => FakeSocket.instances[0].onclose?.());
+    expect(result.current).toEqual(IDLE);
+  });
+
+  it("keeps the crash explanation when the restarted engine reports idle, until live mode runs again", async () => {
+    const { result } = renderHook(() => useStats());
+    await flush();
+    send(FakeSocket.instances[0], { ...IDLE, running: true, mode: "converted" });
+    act(() => FakeSocket.instances[0].onclose?.());
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    send(FakeSocket.instances[1], IDLE);
+    expect(result.current).toEqual({ ...IDLE, error: CRASH_MESSAGE });
+    send(FakeSocket.instances[1], { ...IDLE, running: true, mode: "converted" });
+    expect(result.current.error).toBeNull();
+    send(FakeSocket.instances[1], IDLE);
+    expect(result.current.error).toBeNull();
+  });
+
+  it("replaces the crash explanation with a newer backend error", async () => {
+    const { result } = renderHook(() => useStats());
+    await flush();
+    send(FakeSocket.instances[0], { ...IDLE, running: true, mode: "converted" });
+    act(() => FakeSocket.instances[0].onclose?.());
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    send(FakeSocket.instances[1], { ...IDLE, error: "An audio device was disconnected" });
+    expect(result.current.error).toBe("An audio device was disconnected");
   });
 
   it("does not leave a socket open when unmounted during the pending url lookup", async () => {

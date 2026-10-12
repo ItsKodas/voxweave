@@ -6,7 +6,7 @@ import { IDLE } from "./useStats";
 
 vi.mock("./api", () => ({
   api: {
-    devices: vi.fn(), voices: vi.fn(), presets: vi.fn(),
+    devices: vi.fn(), refreshDevices: vi.fn(), voices: vi.fn(), presets: vi.fn(),
     start: vi.fn(), stop: vi.fn(), mode: vi.fn(), settings: vi.fn(),
   },
 }));
@@ -18,16 +18,19 @@ const PRESETS = {
   high_quality: { chunk_ms: 500, crossfade_ms: 80, context_ms: 1500, f0_method: "dio", index_rate: 0.6 },
 } as const;
 
+const MIC = { index: 1, name: "Headset Mic", max_input: 1, max_output: 0 };
+const WEBCAM = { index: 5, name: "Webcam Mic", max_input: 1, max_output: 0 };
+const HEADSET = { index: 2, name: "Headset", max_input: 0, max_output: 2 };
+const SPEAKERS = { index: 6, name: "Speakers", max_input: 0, max_output: 2 };
+const VM = { index: 3, name: "VoiceMeeter Input", max_input: 0, max_output: 8 };
+const VM_AUX = { index: 4, name: "VoiceMeeter Aux Input", max_input: 0, max_output: 8 };
+const DEVICES = { devices: [MIC, HEADSET, VM], virtual_mic: 3 as number | null, default_input: 1 as number | null, default_output: 2 as number | null };
+const NO_VIRTUAL_MIC = { ...DEVICES, devices: [MIC, SPEAKERS, HEADSET], virtual_mic: null, default_output: 6 };
+
 beforeEach(() => {
   vi.resetAllMocks();
-  vi.mocked(api.devices).mockResolvedValue({
-    devices: [
-      { index: 1, name: "Headset Mic", max_input: 1, max_output: 0 },
-      { index: 2, name: "Headset", max_input: 0, max_output: 2 },
-      { index: 3, name: "VoiceMeeter Input", max_input: 0, max_output: 8 },
-    ],
-    virtual_mic: 3,
-  });
+  vi.mocked(api.devices).mockResolvedValue(DEVICES);
+  vi.mocked(api.refreshDevices).mockResolvedValue(DEVICES);
   vi.mocked(api.voices).mockResolvedValue([{ id: "demo", name: "Demo", has_index: true }]);
   vi.mocked(api.presets).mockResolvedValue(PRESETS as never);
   vi.mocked(api.start).mockResolvedValue({ ...IDLE, running: true, mode: "converted" });
@@ -56,7 +59,157 @@ describe("LivePanel", () => {
     render(<LivePanel stats={IDLE} />);
     await ready();
     expect(screen.getByLabelText("Microphone").querySelectorAll("option")).toHaveLength(1);
-    expect(screen.getByLabelText("Virtual mic").querySelectorAll("option")).toHaveLength(2);
+    const destinations = [...screen.getByLabelText("Virtual mic").querySelectorAll("option")].map((o) => o.textContent);
+    expect(destinations).toEqual(["None (listen only)", "Headset", "VoiceMeeter Input"]);
+  });
+
+  describe("without a virtual mic", () => {
+    beforeEach(() => vi.mocked(api.devices).mockResolvedValue(NO_VIRTUAL_MIC));
+
+    it("selects None instead of a real output, explains why, and keeps Start disabled", async () => {
+      render(<LivePanel stats={IDLE} />);
+      await screen.findByText(/other apps will not hear anything until VoiceMeeter is installed/i);
+      expect(screen.getByLabelText("Virtual mic")).toHaveValue("");
+      expect(screen.getByLabelText("Virtual mic")).toHaveDisplayValue("None (listen only)");
+      expect(screen.getByRole("button", { name: "Start" })).toBeDisabled();
+      expect(screen.getByText(/choose a virtual mic or tick listen to output/i)).toBeInTheDocument();
+    });
+
+    it("starts listen-only with mic_device null and the listen device", async () => {
+      render(<LivePanel stats={IDLE} />);
+      await screen.findByText(/other apps will not hear anything/i);
+      await userEvent.click(screen.getByLabelText("Listen to output"));
+      await userEvent.click(await ready());
+      expect(api.start).toHaveBeenCalledWith(expect.objectContaining({ input_device: 1, mic_device: null, monitor_device: 6 }));
+    });
+  });
+
+  it("shows no missing-virtual-mic hint when one exists", async () => {
+    render(<LivePanel stats={IDLE} />);
+    await ready();
+    expect(screen.queryByText(/other apps will not hear anything/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/choose a virtual mic or tick/i)).not.toBeInTheDocument();
+  });
+
+  it("disables Start when neither a virtual mic nor a listen device is chosen", async () => {
+    render(<LivePanel stats={IDLE} />);
+    const start = await ready();
+    await userEvent.selectOptions(screen.getByLabelText("Virtual mic"), "None (listen only)");
+    expect(start).toBeDisabled();
+    await userEvent.click(screen.getByLabelText("Listen to output"));
+    expect(start).toBeEnabled();
+    await userEvent.click(start);
+    expect(api.start).toHaveBeenCalledWith(expect.objectContaining({ mic_device: null, monitor_device: 2 }));
+  });
+
+  describe("default devices", () => {
+    const startListening = async () => {
+      render(<LivePanel stats={IDLE} />);
+      const start = await ready();
+      await userEvent.click(screen.getByLabelText("Listen to output"));
+      await userEvent.click(start);
+      return vi.mocked(api.start).mock.calls[0][0];
+    };
+    const outputs = [VM_AUX, SPEAKERS, HEADSET, VM];
+
+    it("preselects the Windows default microphone and playback device", async () => {
+      vi.mocked(api.devices).mockResolvedValue({
+        devices: [WEBCAM, MIC, ...outputs], virtual_mic: 3, default_input: 1, default_output: 2,
+      });
+      const sent = await startListening();
+      expect(sent).toEqual(expect.objectContaining({ input_device: 1, mic_device: 3, monitor_device: 2 }));
+    });
+
+    it("falls back to the first microphone and the first non-virtual output", async () => {
+      vi.mocked(api.devices).mockResolvedValue({
+        devices: [WEBCAM, MIC, ...outputs], virtual_mic: 3, default_input: null, default_output: null,
+      });
+      const sent = await startListening();
+      expect(sent).toEqual(expect.objectContaining({ input_device: 5, monitor_device: 6 }));
+    });
+
+    it("never listens on the virtual mic even when it is the Windows default output", async () => {
+      vi.mocked(api.devices).mockResolvedValue({
+        devices: [WEBCAM, MIC, ...outputs], virtual_mic: 3, default_input: 1, default_output: 3,
+      });
+      const sent = await startListening();
+      expect(sent).toEqual(expect.objectContaining({ mic_device: 3, monitor_device: 6 }));
+    });
+
+    it("uses a virtual output to listen only when nothing else exists", async () => {
+      vi.mocked(api.devices).mockResolvedValue({
+        devices: [MIC, VM_AUX, VM], virtual_mic: 3, default_input: 1, default_output: null,
+      });
+      const sent = await startListening();
+      expect(sent).toEqual(expect.objectContaining({ mic_device: 3, monitor_device: 4 }));
+    });
+  });
+
+  describe("Refresh devices", () => {
+    it("reloads the list, keeps selections that still exist, and reports the refresh", async () => {
+      vi.mocked(api.devices).mockResolvedValue({ ...DEVICES, devices: [MIC, WEBCAM, HEADSET, SPEAKERS, VM] });
+      const onRefreshed = vi.fn();
+      render(<LivePanel stats={IDLE} onDevicesRefreshed={onRefreshed} />);
+      const start = await ready();
+      await userEvent.selectOptions(screen.getByLabelText("Microphone"), "Webcam Mic");
+      await userEvent.click(screen.getByLabelText("Listen to output"));
+      await userEvent.selectOptions(screen.getByLabelText("Listen on"), "Speakers");
+      const usb = { index: 9, name: "USB Headset", max_input: 0, max_output: 2 };
+      vi.mocked(api.refreshDevices).mockResolvedValue({ ...DEVICES, devices: [MIC, WEBCAM, HEADSET, SPEAKERS, VM, usb], default_output: 9 });
+      await userEvent.click(screen.getByRole("button", { name: "Refresh devices" }));
+      expect(await screen.findAllByRole("option", { name: "USB Headset" })).toHaveLength(2);
+      expect(api.refreshDevices).toHaveBeenCalledTimes(1);
+      expect(onRefreshed).toHaveBeenCalledTimes(1);
+      await userEvent.click(start);
+      expect(api.start).toHaveBeenCalledWith(expect.objectContaining({ input_device: 5, mic_device: 3, monitor_device: 6 }));
+    });
+
+    it("falls back to the defaults for selections that disappeared", async () => {
+      vi.mocked(api.devices).mockResolvedValue({ ...DEVICES, devices: [MIC, WEBCAM, HEADSET, SPEAKERS, VM] });
+      render(<LivePanel stats={IDLE} />);
+      const start = await ready();
+      await userEvent.selectOptions(screen.getByLabelText("Microphone"), "Webcam Mic");
+      await userEvent.click(screen.getByLabelText("Listen to output"));
+      await userEvent.selectOptions(screen.getByLabelText("Listen on"), "Speakers");
+      vi.mocked(api.refreshDevices).mockResolvedValue({ ...DEVICES, devices: [MIC, HEADSET, VM] });
+      await userEvent.click(screen.getByRole("button", { name: "Refresh devices" }));
+      await vi.waitFor(() => expect(screen.queryByRole("option", { name: "Speakers" })).not.toBeInTheDocument());
+      await userEvent.click(start);
+      expect(api.start).toHaveBeenCalledWith(expect.objectContaining({ input_device: 1, mic_device: 3, monitor_device: 2 }));
+    });
+
+    it("selects a virtual mic that appears after it was missing", async () => {
+      vi.mocked(api.devices).mockResolvedValue(NO_VIRTUAL_MIC);
+      render(<LivePanel stats={IDLE} />);
+      await screen.findByText(/other apps will not hear anything/i);
+      vi.mocked(api.refreshDevices).mockResolvedValue({ ...NO_VIRTUAL_MIC, devices: [MIC, SPEAKERS, HEADSET, VM], virtual_mic: 3 });
+      await userEvent.click(screen.getByRole("button", { name: "Refresh devices" }));
+      await vi.waitFor(() => expect(screen.getByLabelText("Virtual mic")).toHaveValue("3"));
+      expect(screen.queryByText(/other apps will not hear anything/i)).not.toBeInTheDocument();
+    });
+
+    it("keeps a deliberate None choice when a virtual mic was available all along", async () => {
+      render(<LivePanel stats={IDLE} />);
+      await ready();
+      await userEvent.selectOptions(screen.getByLabelText("Virtual mic"), "None (listen only)");
+      await userEvent.click(screen.getByRole("button", { name: "Refresh devices" }));
+      await vi.waitFor(() => expect(api.refreshDevices).toHaveBeenCalled());
+      expect(screen.getByLabelText("Virtual mic")).toHaveValue("");
+    });
+
+    it("shows the error when the refresh fails", async () => {
+      vi.mocked(api.refreshDevices).mockRejectedValue(new Error("Stop live mode before refreshing devices"));
+      render(<LivePanel stats={IDLE} />);
+      await ready();
+      await userEvent.click(screen.getByRole("button", { name: "Refresh devices" }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("Stop live mode before refreshing devices");
+    });
+
+    it("is disabled while live mode is running", async () => {
+      render(<LivePanel stats={{ ...IDLE, running: true, mode: "converted" }} />);
+      await screen.findByRole("button", { name: "Stop" });
+      expect(screen.getByRole("button", { name: "Refresh devices" })).toBeDisabled();
+    });
   });
 
   it("sends the monitor device when monitoring is on", async () => {
