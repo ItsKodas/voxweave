@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from pathlib import Path
 
 SAMPLE_RATE = 48000
@@ -33,3 +34,14 @@ def dml_device_id(data: Path) -> int:
         return int(raw)
     except ValueError:
         raise ValueError("dml_device_id in settings.json must be an integer") from None
+
+
+_MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def whisper_model(data: Path) -> str:
+    """The Whisper model used to transcribe imported audio. Raises ValueError for an odd value."""
+    raw = load_settings(data).get("whisper_model", "small.en")
+    if not isinstance(raw, str) or not _MODEL_NAME.match(raw):
+        raise ValueError("whisper_model in settings.json must be a model name such as small.en")
+    return raw

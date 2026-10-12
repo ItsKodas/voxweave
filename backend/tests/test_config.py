@@ -1,3 +1,4 @@
+import pytest
 import json
 
 from aivoice import config
@@ -26,3 +27,19 @@ def test_settings_read(tmp_path):
 def test_settings_corrupt_falls_back(tmp_path):
     (tmp_path / "settings.json").write_text("{not json")
     assert config.load_settings(tmp_path) == {"dml_device_id": 0}
+
+
+def test_whisper_model_default(tmp_path):
+    assert config.whisper_model(tmp_path) == "small.en"
+
+
+def test_whisper_model_from_settings(tmp_path):
+    (tmp_path / "settings.json").write_text(json.dumps({"whisper_model": "base.en"}))
+    assert config.whisper_model(tmp_path) == "base.en"
+
+
+@pytest.mark.parametrize("bad", [5, "", "../evil", "a b", None, "x" * 80])
+def test_whisper_model_rejects_odd_values(tmp_path, bad):
+    (tmp_path / "settings.json").write_text(json.dumps({"whisper_model": bad}))
+    with pytest.raises(ValueError, match="whisper_model"):
+        config.whisper_model(tmp_path)
