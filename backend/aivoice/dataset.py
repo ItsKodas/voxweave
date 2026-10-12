@@ -39,6 +39,7 @@ def trim_silence(audio, sr: int, threshold_db: float = -40.0, pad_ms: int = 100)
 
 
 def level_problem(audio: np.ndarray) -> str | None:
+    audio = _clean(audio)
     if len(audio) == 0 or float(np.max(np.abs(audio))) < QUIET_PEAK:
         return "too_quiet"
     clipped = int(np.count_nonzero(np.abs(audio) >= CLIP_LEVEL))
@@ -49,6 +50,7 @@ def level_problem(audio: np.ndarray) -> str | None:
 
 def clip_problem(audio: np.ndarray, sr: int) -> str | None:
     """Why an already trimmed take is unusable, or None when it is fine."""
+    audio = _clean(audio)
     if len(audio) == 0:
         return "too_quiet"
     if len(audio) < MIN_SECONDS * sr:
@@ -61,7 +63,11 @@ def clip_problem(audio: np.ndarray, sr: int) -> str | None:
 def split_on_silence(audio, sr: int, max_seconds: float = 15.0, min_seconds: float = 1.0,
                      threshold_db: float = -40.0, min_silence_ms: int = 300, pad_ms: int = 100) -> list[np.ndarray]:
     """Cut audio into utterances at pauses. An utterance longer than max_seconds is cut at its
-    quietest moment in the last 3 seconds of each window. Pieces under min_seconds are dropped."""
+    quietest moment in the last 3 seconds of each window, never leaving a tail under min_seconds.
+    Hard cutting loses no audio. Pieces under min_seconds are dropped. pad_ms must be at most half
+    of min_silence_ms so padding of neighbouring pieces cannot overlap."""
+    if pad_ms * 2 > min_silence_ms:
+        raise ValueError("pad_ms must be at most half of min_silence_ms")
     audio = _clean(audio)
     db = _frame_db(audio, sr)
     n = sr * FRAME_MS // 1000
@@ -82,14 +88,18 @@ def split_on_silence(audio, sr: int, max_seconds: float = 15.0, min_seconds: flo
 
     pad = sr * pad_ms // 1000
     limit_frames = (int(max_seconds * sr) - 2 * pad) // n  # leaves room for padding at both ends
+    min_frames = -(-int(min_seconds * sr) // n)
+    if limit_frames < 2 * min_frames + 1:
+        raise ValueError("max_seconds is too small to cut audio into pieces of at least min_seconds")
     search = min(limit_frames - 1, 3000 // FRAME_MS)
 
     pieces: list[np.ndarray] = []
     for first, end in regions:
         cuts = [first]
         while end - cuts[-1] > limit_frames:
-            window_end = cuts[-1] + limit_frames
-            lo = window_end - search
+            # Keep at least min_frames after the cut so the tail is not discarded as too short.
+            window_end = min(cuts[-1] + limit_frames, end - min_frames)
+            lo = max(window_end - search, cuts[-1] + min_frames)
             cuts.append(lo + int(np.argmin(db[lo:window_end])))
         cuts.append(end)
         for k in range(len(cuts) - 1):

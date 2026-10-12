@@ -92,3 +92,73 @@ def test_too_long_file_is_refused(tmp_path, monkeypatch):
     write_wav(tmp_path / "long.wav", tone(3.0, 16000), 16000)
     with pytest.raises(AudioFileError, match="long.wav"):
         read_audio(tmp_path / "long.wav", 16000)
+
+
+def test_non_file_strings_never_reach_ffmpeg(tmp_path, monkeypatch):
+    import av
+
+    real_open = av.open
+
+    def guarded(file, *a, **k):
+        assert not isinstance(file, str), "a string reached FFmpeg's protocol parser"
+        return real_open(file, *a, **k)
+
+    monkeypatch.setattr(av, "open", guarded)
+    monkeypatch.chdir(tmp_path)
+    for bad in ("http://127.0.0.1:9/x.wav", "concat:a.wav|b.wav", "subfile,,start,0,end,1,,:x.wav"):
+        with pytest.raises(AudioFileError):
+            read_audio(bad)
+
+
+def test_real_file_is_opened_via_file_object(tmp_path, monkeypatch):
+    import av
+
+    real_open = av.open
+    seen = []
+
+    def spy(file, *a, **k):
+        seen.append(type(file))
+        return real_open(file, *a, **k)
+
+    monkeypatch.setattr(av, "open", spy)
+    write_wav(tmp_path / "a.wav", tone(0.2, 16000), 16000)
+    read_audio(tmp_path / "a.wav", 16000)
+    assert seen and all(t is not str for t in seen)
+
+
+def test_read_wav_garbage_and_truncated_are_clear_errors(tmp_path):
+    (tmp_path / "junk.wav").write_bytes(b"not a wav at all")
+    with pytest.raises(AudioFileError, match="junk.wav"):
+        read_wav(tmp_path / "junk.wav")
+    write_wav(tmp_path / "ok.wav", tone(0.5, 16000), 16000)
+    data = (tmp_path / "ok.wav").read_bytes()
+    (tmp_path / "cut.wav").write_bytes(data[:20])
+    with pytest.raises(AudioFileError, match="cut.wav"):
+        read_wav(tmp_path / "cut.wav")
+    with pytest.raises(AudioFileError, match="gone.wav"):
+        read_wav(tmp_path / "gone.wav")
+
+
+def test_read_wav_rejects_8_bit(tmp_path):
+    with wave.open(str(tmp_path / "eight.wav"), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(1)
+        w.setframerate(8000)
+        w.writeframes(bytes(range(100)))
+    with pytest.raises(AudioFileError, match="eight.wav"):
+        read_wav(tmp_path / "eight.wav")
+
+
+def test_write_wav_failure_cleans_tmp_and_keeps_original(tmp_path, monkeypatch):
+    target = tmp_path / "a.wav"
+    write_wav(target, tone(0.1, 16000), 16000)
+    before = target.read_bytes()
+
+    def boom(*a, **k):
+        raise OSError("disk says no")
+
+    monkeypatch.setattr("aivoice.audiofile.os.replace", boom)
+    with pytest.raises(OSError):
+        write_wav(target, tone(0.2, 16000), 16000)
+    assert [p.name for p in tmp_path.iterdir()] == ["a.wav"]
+    assert target.read_bytes() == before

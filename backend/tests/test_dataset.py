@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from aivoice.dataset import (
     MAX_RECORD_SECONDS, PROBLEM_MESSAGES, clip_problem, level_problem, split_on_silence, trim_silence,
@@ -115,3 +116,36 @@ def test_long_utterance_is_cut_at_a_quiet_moment():
     assert len(pieces) == 2
     first_end = len(pieces[0]) / SR
     assert 13.0 <= first_end <= 13.3
+
+
+def test_nan_array_is_judged_on_finite_content():
+    audio = np.zeros(2 * SR, dtype=np.float32)
+    audio[5] = np.nan
+    assert level_problem(audio) == "too_quiet"
+    assert clip_problem(audio, SR) == "too_quiet"
+    assert clip_problem(np.full(3 * SR, np.nan, dtype=np.float32), SR) == "too_quiet"
+
+
+@pytest.mark.parametrize("seconds", [15.5, 15.9, 29.9, 30.3])
+def test_hard_cuts_never_drop_a_short_tail(seconds):
+    audio = noise(seconds)
+    pieces = split_on_silence(audio, SR)
+    assert all(len(p) <= 15 * SR for p in pieces)
+    assert all(len(p) >= SR for p in pieces)
+    assert np.array_equal(np.concatenate(pieces), audio)
+
+
+def test_split_rejects_unusable_parameters():
+    with pytest.raises(ValueError, match="max_seconds"):
+        split_on_silence(noise(3.0), SR, max_seconds=0.1)
+    with pytest.raises(ValueError, match="pad_ms"):
+        split_on_silence(noise(3.0), SR, pad_ms=200, min_silence_ms=300)
+
+
+def test_quiet_moment_near_window_end_would_leave_a_short_tail():
+    # Quietest spot is at 14.7 s, so a naive cut leaves a 0.8 s tail of 15.5 s of audio.
+    audio = np.concatenate([noise(14.7), noise(0.1, amp=0.02), noise(0.7)])
+    pieces = split_on_silence(audio, SR)
+    assert len(pieces) == 2
+    assert all(SR <= len(p) <= 15 * SR for p in pieces)
+    assert np.array_equal(np.concatenate(pieces), audio)
