@@ -2,6 +2,7 @@ import shutil
 import threading
 
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
 from aivoice.api import ALLOWED_HOSTS, create_app
@@ -286,3 +287,113 @@ def test_app_without_a_studio_has_no_library_routes(tmp_path):
     manager = LiveManager(tmp_path, lambda: DEVICES, lambda v: Identity(), FakeStreams())
     client = TestClient(create_app(manager, tmp_path, lambda: DEVICES, [], allowed_hosts=["testserver"]))
     assert client.get("/library/voices").status_code == 404
+
+
+class SlowStopStreams(CapturingStreams):
+    """The microphone stream's stop() blocks until released, like a PortAudio stream that is slow to close."""
+
+    def __init__(self):
+        super().__init__()
+        self.inside_stop = threading.Event()
+        self.release = threading.Event()
+
+    def input(self, device, samplerate, on_audio):
+        stream = super().input(device, samplerate, on_audio)
+        outer = self
+
+        def slow_stop():
+            outer.inside_stop.set()
+            outer.release.wait(10)
+            stream.active = False
+
+        stream.stop = slow_stop
+        return stream
+
+
+def run_in_thread(fn):
+    done = threading.Event()
+    box = {}
+
+    def target():
+        box["result"] = fn()
+        done.set()
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    return done, box, thread
+
+
+def make_slow_stop(tmp_path, refreshed):
+    add_voice(tmp_path, "demo")
+    library = Library(tmp_path)
+    mic = SlowStopStreams()
+    importer = Importer(library, Echo())
+    studio = Studio(library, Recorder(mic), importer, lambda: DEVICES, prompts=PROMPTS)
+    manager = LiveManager(tmp_path, lambda: DEVICES, lambda v: Identity(), FakeStreams(),
+                          refresh_devices=lambda: refreshed.append(1))
+    app = create_app(manager, tmp_path, lambda: DEVICES, [], allowed_hosts=[*ALLOWED_HOSTS, "testserver"],
+                     studio=studio, library=library, importer=importer)
+    return TestClient(app), mic
+
+
+@pytest.mark.parametrize("route", ["stop", "cancel"])
+def test_device_changes_wait_for_a_closing_microphone_stream(tmp_path, route):
+    refreshed = []
+    client, mic = make_slow_stop(tmp_path, refreshed)
+    voice = new_voice(client)
+    client.post("/library/record/start", json={"voice_id": voice["id"], "input_device": 1, "prompt": 0})
+    speak(mic)
+    stopping, _, stop_thread = run_in_thread(lambda: client.post(f"/library/record/{route}"))
+    assert mic.inside_stop.wait(10)
+    refresh_done, refresh_box, refresh_thread = run_in_thread(lambda: client.post("/devices/refresh"))
+    live_done, live_box, live_thread = run_in_thread(
+        lambda: client.post("/live/start", json={"input_device": 1, "mic_device": 3, "voice": "demo"}))
+    assert not refresh_done.wait(0.3) and not live_done.wait(0.1)
+    assert refreshed == []
+    mic.release.set()
+    for thread in (stop_thread, refresh_thread, live_thread):
+        thread.join(10)
+    assert stopping.is_set() and refresh_box["result"].status_code == 200 and refreshed == [1]
+    assert live_box["result"].status_code == 200
+    client.post("/live/stop")
+
+
+def test_voice_delete_and_import_do_not_queue_behind_the_audio_lock(tmp_path):
+    client, _, importer = make(tmp_path)
+    voice = new_voice(client)
+    path = drop_file(tmp_path)
+    with client.app.state.audio_state:  # as if a slow live start were in progress
+        done, box, thread = run_in_thread(lambda: client.post(
+            f"/library/voices/{voice['id']}/import", json={"paths": [str(path)]}))
+        assert done.wait(10) and box["result"].status_code == 200
+        importer.wait(10)
+        done, box, thread = run_in_thread(lambda: client.delete(f"/library/voices/{voice['id']}"))
+        assert done.wait(10) and box["result"].json() == {"deleted": True}
+
+
+def test_a_take_over_20_seconds_is_too_long_over_http(tmp_path):
+    client, mic, _ = make(tmp_path)
+    voice = new_voice(client)
+    result = record(client, mic, voice["id"], seconds=25.0)
+    assert result["accepted"] is False and result["reason"] == "too_long"
+    assert client.get(f"/library/voices/{voice['id']}/clips").json() == []
+
+
+def test_clip_audio_is_not_served_to_other_sites(tmp_path):
+    client, mic, _ = make(tmp_path)
+    voice = new_voice(client)
+    record(client, mic, voice["id"])
+    url = f"/library/voices/{voice['id']}/clips/1/audio"
+    assert client.get(url).status_code == 200
+    assert client.get(url, headers={"Sec-Fetch-Site": "cross-site"}).status_code == 403
+    assert client.get(url, headers={"Origin": "https://evil.example"}).status_code == 403
+    assert client.get(url, headers={"Referer": "https://evil.example/page"}).status_code == 403
+    assert client.get(url, headers={"Origin": "http://tauri.localhost"}).status_code == 200
+    # the app's own webview is cross-site to 127.0.0.1 but names itself
+    app_audio = {"Sec-Fetch-Site": "cross-site", "Referer": "http://tauri.localhost/"}
+    assert client.get(url, headers=app_audio).status_code == 200
+    assert client.get(url, headers={"Sec-Fetch-Site": "same-origin"}).status_code == 200
+    assert client.get("/library/voices", headers={"Sec-Fetch-Site": "cross-site"}).status_code == 403
+    assert client.post("/library/voices", json={"name": "X"}, headers={"Sec-Fetch-Site": "cross-site"}).status_code == 403
+    # stage 1 routes are unchanged
+    assert client.get("/devices", headers={"Sec-Fetch-Site": "cross-site"}).status_code == 200

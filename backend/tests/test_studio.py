@@ -178,3 +178,32 @@ def test_status_includes_import_progress(tmp_path):
     studio, _, _, _ = make(tmp_path)
     status = studio.status()
     assert status["recording"] is False and status["import"]["active"] is False
+
+
+def test_a_take_over_20_seconds_is_rejected_as_too_long(tmp_path):
+    studio, lib, streams, voice = make(tmp_path)
+    studio.start_recording(voice.id, 1, 0)
+    speak(streams, seconds=25.0)
+    result = studio.stop_recording()
+    assert result["accepted"] is False and result["reason"] == "too_long" and result["clip"] is None
+    assert lib.get(voice.id).clips == []
+    assert list((tmp_path / "voices" / voice.id / "clips").iterdir()) == []
+
+
+def test_a_redo_stays_accepted_when_the_old_take_cannot_be_removed(tmp_path, monkeypatch, caplog):
+    studio, lib, streams, voice = make(tmp_path)
+    studio.start_recording(voice.id, 1, 0)
+    speak(streams)
+    studio.stop_recording()
+
+    def refuse(*a, **k):
+        raise LibraryError("Unknown clip")
+
+    monkeypatch.setattr(lib, "delete_clip", refuse)
+    studio.start_recording(voice.id, 1, 0)
+    speak(streams)
+    with caplog.at_level("WARNING"):
+        result = studio.stop_recording()
+    assert result["accepted"] is True and result["clip"]["index"] == 2
+    assert not studio.recording
+    assert any("earlier take" in r.message for r in caplog.records)

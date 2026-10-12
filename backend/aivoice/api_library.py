@@ -1,8 +1,10 @@
 import threading
+from contextlib import AbstractContextManager
 from dataclasses import asdict
 from typing import Callable
+from urllib.parse import urlsplit
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -34,12 +36,31 @@ def _summary(voice: Voice) -> dict:
             "clips": len(voice.clips)}
 
 
+def _origin_of(url: str) -> str | None:
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else None
+
+
 def library_router(studio: Studio, library: Library, importer: Importer, live_running: Callable[[], bool],
-                   exclusive=None) -> APIRouter:
-    """`exclusive` is shared with the live-start and device-refresh routes, so checking "is live running?"
-    and then starting a recording cannot interleave with checking "is recording?" and then starting live."""
-    router = APIRouter(prefix="/library")
-    guard = exclusive if exclusive is not None else threading.Lock()
+                   exclusive: AbstractContextManager, allowed_origins: list[str]) -> APIRouter:
+    """`exclusive` is the audio lock, shared with the live-start and device-refresh routes: checking
+    "is live running?" and then starting a recording must not interleave with the reverse."""
+
+    def same_app_only(request: Request) -> None:
+        # Recordings are sensitive, and a GET is exempt from the app-wide Origin check, so any web page could
+        # embed a clip in <audio>. Browsers name the page in Origin or Referer; refuse any that is not the app.
+        # The app's own webview (an allowed origin) is cross-site to 127.0.0.1, so Sec-Fetch-Site alone cannot
+        # tell it from a foreign page: cross-site is accepted only when Origin or Referer names the app.
+        origin = request.headers.get("origin")
+        referer = request.headers.get("referer")
+        named = [o for o in (origin, _origin_of(referer) if referer else None) if o is not None]
+        if any(o not in allowed_origins for o in named) or (
+                request.headers.get("sec-fetch-site") == "cross-site" and not named):
+            raise HTTPException(status_code=403, detail="Origin not allowed")
+
+    router = APIRouter(prefix="/library", dependencies=[Depends(same_app_only)])
+    # Only the pair that touches voices on disk: a delete must not queue behind a slow live start.
+    voices_lock = threading.Lock()
     importing: dict[str, str | None] = {"voice": None}  # the voice of the most recent import run
 
     @router.get("/voices")
@@ -52,7 +73,7 @@ def library_router(studio: Studio, library: Library, importer: Importer, live_ru
 
     @router.delete("/voices/{voice_id}")
     def delete_voice(voice_id: str) -> dict:
-        with guard:
+        with voices_lock:
             if studio.recording:
                 raise ValueError("Stop recording before deleting a voice")
             if importing["voice"] == voice_id and importer.status()["active"]:
@@ -83,24 +104,27 @@ def library_router(studio: Studio, library: Library, importer: Importer, live_ru
 
     @router.post("/record/start")
     def record_start(body: RecordBody) -> dict:
-        with guard:
+        with exclusive:
             if live_running():
                 raise ValueError("Stop live mode before recording")
-            studio.start_recording(body.voice_id, body.input_device, body.prompt)
+            with voices_lock:  # so a delete cannot check "not recording" and then lose the voice to a new take
+                studio.start_recording(body.voice_id, body.input_device, body.prompt)
         return studio.status()
 
     @router.post("/record/stop")
     def record_stop() -> dict:
-        return studio.stop_recording()
+        with exclusive:  # the stream may still be closing after recording reads False: devices must wait
+            return studio.stop_recording()
 
     @router.post("/record/cancel")
     def record_cancel() -> dict:
-        studio.cancel_recording()
+        with exclusive:
+            studio.cancel_recording()
         return studio.status()
 
     @router.post("/voices/{voice_id}/import")
     def import_files(voice_id: str, body: ImportBody) -> dict:
-        with guard:  # so a delete of this voice cannot slip in between the start and the bookkeeping
+        with voices_lock:  # so a delete of this voice cannot slip in between the start and the bookkeeping
             importer.start(voice_id, body.paths)
             importing["voice"] = voice_id
         return studio.status()

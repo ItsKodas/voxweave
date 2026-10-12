@@ -1,3 +1,4 @@
+import logging
 import threading
 from dataclasses import asdict
 from typing import Callable
@@ -5,9 +6,11 @@ from typing import Callable
 from aivoice.dataset import PROBLEM_MESSAGES, clip_problem, trim_silence
 from aivoice.devices import Device, get_device
 from aivoice.importer import Importer
-from aivoice.library import SAMPLE_RATE, Library
+from aivoice.library import SAMPLE_RATE, Library, LibraryError
 from aivoice.prompts import load_prompts, next_prompt
 from aivoice.recorder import Recorder
+
+log = logging.getLogger(__name__)
 
 
 class Studio:
@@ -62,7 +65,10 @@ class Studio:
             earlier = [c.index for c in self._library.get(voice_id).clips if c.prompt == prompt]
             clip = self._library.add_clip(voice_id, trimmed, self._prompts[prompt], "recorded", prompt=prompt)
             for index in earlier:  # a redo replaces the earlier take, but only once the new one is saved
-                self._library.delete_clip(voice_id, index)
+                try:
+                    self._library.delete_clip(voice_id, index)
+                except LibraryError as exc:  # the new take is saved, so the take is still accepted
+                    log.warning("Saved the new take but could not remove the earlier take (clip %s): %s", index, exc)
             return {"accepted": True, "reason": None, "message": None, "clip": asdict(clip)}
 
     def cancel_recording(self) -> None:

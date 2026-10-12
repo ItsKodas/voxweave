@@ -54,6 +54,7 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
     app = FastAPI(title="AI Voice")
     # Held while checking and then changing audio state, so recording and live mode cannot both win a race.
     audio_state = threading.Lock()
+    app.state.audio_state = audio_state
 
     # Middleware added later runs earlier: Host check, then CORS, then the Origin check below.
     @app.middleware("http")
@@ -158,6 +159,6 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
         from aivoice.api_library import library_router
 
         app.include_router(library_router(studio, library, importer, lambda: bool(manager.stats()["running"]),
-                                          exclusive=audio_state))
+                                          audio_state, ALLOWED_ORIGINS))
 
     return app
