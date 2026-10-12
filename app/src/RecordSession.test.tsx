@@ -32,7 +32,8 @@ beforeEach(() => {
   vi.mocked(studioApi.recordStart).mockResolvedValue(IDLE);
   vi.mocked(studioApi.recordCancel).mockResolvedValue(IDLE);
   vi.mocked(studioApi.recordStop).mockResolvedValue({ accepted: true, reason: null, message: null, clip: CLIP });
-  vi.mocked(studioApi.clipAudioUrl).mockResolvedValue("http://127.0.0.1:1/audio");
+  vi.mocked(studioApi.clipAudioUrl).mockResolvedValue("blob:take-7");
+  URL.revokeObjectURL = vi.fn();
 });
 
 const ready = () => screen.findByRole("button", { name: "Record" });
@@ -57,9 +58,24 @@ describe("RecordSession", () => {
     expect(await screen.findByText(/Saved/)).toBeInTheDocument();
     expect(onSaved).toHaveBeenCalledTimes(1);
     expect(studioApi.clipAudioUrl).toHaveBeenCalledWith("v-1", 7);
-    expect(await screen.findByLabelText("Play back the take")).toHaveAttribute("src", "http://127.0.0.1:1/audio");
+    expect(await screen.findByLabelText("Play back the take")).toHaveAttribute("src", "blob:take-7");
     expect(screen.getByRole("button", { name: "Next sentence" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Redo" })).toBeInTheDocument();
+  });
+
+  it("releases the take's object URL when it is replaced and when unmounted", async () => {
+    vi.mocked(studioApi.clipAudioUrl).mockResolvedValueOnce("blob:take-7").mockResolvedValueOnce("blob:take-8");
+    const { unmount } = render(<RecordSession voiceId="v-1" active onSaved={() => {}} />);
+    await userEvent.click(await ready());
+    await userEvent.click(await screen.findByRole("button", { name: "Stop" }));
+    await screen.findByLabelText("Play back the take");
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Redo" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Stop" }));
+    await vi.waitFor(() => expect(screen.getByLabelText("Play back the take")).toHaveAttribute("src", "blob:take-8"));
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:take-7");
+    unmount();
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:take-8");
   });
 
   it("shows the level and elapsed time while recording", async () => {

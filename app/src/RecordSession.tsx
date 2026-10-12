@@ -29,6 +29,13 @@ export function RecordSession({ voiceId, active, onSaved }: { voiceId: string; a
     [voiceId],
   );
 
+  // Release a take's object URL when it is replaced or the component unmounts.
+  const takeUrl = saved?.url ?? null;
+  useEffect(() => {
+    if (takeUrl === null) return;
+    return () => URL.revokeObjectURL(takeUrl);
+  }, [takeUrl]);
+
   useEffect(() => {
     mountedRef.current = true;
     return () => {
@@ -109,6 +116,10 @@ export function RecordSession({ voiceId, active, onSaved }: { voiceId: string; a
       setSaved({ clip, url: null });
       onSaved();
       const url = await studioApi.clipAudioUrl(voiceId, clip.index);
+      if (!mountedRef.current) {
+        URL.revokeObjectURL(url);
+        return;
+      }
       setSaved({ clip, url });
     });
 

@@ -1,4 +1,4 @@
-import { call, origin } from "./api";
+import { call, failure, origin } from "./api";
 
 export type LibraryVoice = { id: string; name: string; created: string; minutes: number; clips: number };
 export type Clip = {
@@ -33,7 +33,15 @@ export const studioApi = {
   clips: (id: string) => call<Clip[]>("GET", `${voicePath(id)}/clips`),
   editClip: (id: string, index: number, text: string) => call<Clip>("PATCH", `${voicePath(id)}/clips/${index}`, { text }),
   deleteClip: (id: string, index: number) => call<{ deleted: boolean }>("DELETE", `${voicePath(id)}/clips/${index}`),
-  clipAudioUrl: async (id: string, index: number) => `http://${await origin()}${voicePath(id)}/clips/${index}/audio`,
+  /**
+   * Fetches the clip (fetch always names the app's origin, which the backend requires for /library) and returns
+   * an object URL for playback. The caller owns it and must release it with URL.revokeObjectURL.
+   */
+  clipAudioUrl: async (id: string, index: number): Promise<string> => {
+    const res = await fetch(`http://${await origin()}${voicePath(id)}/clips/${index}/audio`);
+    if (!res.ok) throw await failure(res);
+    return URL.createObjectURL(await res.blob());
+  },
   prompt: (id: string, after?: number) =>
     call<Prompt>("GET", `${voicePath(id)}/prompt${after === undefined ? "" : `?after=${after}`}`),
   recordStart: (voiceId: string, inputDevice: number, prompt: number) =>

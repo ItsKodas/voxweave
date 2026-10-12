@@ -1,3 +1,6 @@
+import { useCallback, useState } from "react";
+import { ClipList } from "./ClipList";
+import { ImportDrop } from "./ImportDrop";
 import { RecordSession } from "./RecordSession";
 import { LibraryVoice } from "./studioApi";
 
@@ -17,12 +20,22 @@ export function MinutesBar({ minutes }: { minutes: number }) {
 }
 
 export function VoiceStudio({ voice, active, onChanged }: { voice: LibraryVoice; active: boolean; onChanged: () => void }) {
+  const [version, setVersion] = useState(0);
+  const changed = useCallback(() => {
+    setVersion((v) => v + 1);
+    onChanged();
+  }, [onChanged]);
+
   return (
     <section className="studio" aria-label={`Voice ${voice.name}`}>
       <h2>{voice.name}</h2>
       <MinutesBar minutes={voice.minutes} />
       <h3>Record</h3>
-      <RecordSession voiceId={voice.id} active={active} onSaved={onChanged} />
+      <RecordSession voiceId={voice.id} active={active} onSaved={changed} />
+      <h3>Import</h3>
+      <ImportDrop voiceId={voice.id} active={active} onImported={changed} />
+      <h3>Clips</h3>
+      <ClipList voiceId={voice.id} version={version} onChanged={onChanged} />
     </section>
   );
 }

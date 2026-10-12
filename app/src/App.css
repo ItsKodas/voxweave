@@ -43,3 +43,12 @@ h3 { font-size: 0.9rem; margin: 16px 0 6px; color: #aab0bb; text-transform: uppe
 .ok { color: #7bd88f; }
 button.secondary { background: #343843; }
 audio { width: 100%; margin: 6px 0; }
+
+.dropzone { border: 2px dashed #343843; border-radius: 8px; padding: 12px; text-align: center; }
+.dropzone p { margin: 4px 0; }
+.errors { color: #ffb4bb; font-size: 0.8rem; padding-left: 18px; }
+.clip-list { list-style: none; padding: 0; }
+.clip-list li { display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: center; margin-bottom: 8px; }
+.clip-list .tag { grid-column: 1 / -1; font-size: 0.72rem; color: #7d8491; }
+.clip-list input { padding: 6px; background: #22252c; color: inherit; border: 1px solid #343843; border-radius: 6px; }
+.clip-list button { padding: 4px 10px; font-size: 0.8rem; }

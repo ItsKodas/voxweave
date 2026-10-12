@@ -50,17 +50,19 @@ export async function origin(): Promise<string> {
   return `127.0.0.1:${port}`;
 }
 
+/** The backend's readable `detail` for a failed response, or a generic message. */
+export async function failure(res: Response): Promise<Error> {
+  const data = await res.json().catch(() => ({}));
+  return new Error(typeof data?.detail === "string" ? data.detail : `Request failed (${res.status})`);
+}
+
 export async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`http://${await origin()}${path}`, {
     method,
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    const detail = typeof data.detail === "string" ? data.detail : `Request failed (${res.status})`;
-    throw new Error(detail);
-  }
+  if (!res.ok) throw await failure(res);
   return res.json() as Promise<T>;
 }
 
