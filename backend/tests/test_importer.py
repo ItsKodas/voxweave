@@ -66,7 +66,7 @@ def test_imports_each_utterance_as_a_transcribed_clip(tmp_path):
     path = wav(tmp_path, "talk.wav", np.concatenate([noise(2.0), silence(0.6), noise(3.0)]))
     status = run(importer, voice, [path])
     assert status == {"active": False, "finished": True, "total_files": 1, "done_files": 1, "current": None,
-                      "clips_added": 2, "skipped": 0, "errors": []}
+                      "clips_added": 2, "skipped": 0, "errors": [], "voice_id": voice.id, "job": 1}
     clips = lib.get(voice.id).clips
     assert [(c.text, c.source, c.origin) for c in clips] == [("line 1", "imported", "talk.wav"), ("line 2", "imported", "talk.wav")]
 
@@ -168,7 +168,7 @@ def test_status_before_any_import():
     lib = Library.__new__(Library)
     assert Importer(lib, FakeTranscriber()).status() == {
         "active": False, "finished": False, "total_files": 0, "done_files": 0, "current": None,
-        "clips_added": 0, "skipped": 0, "errors": []}
+        "clips_added": 0, "skipped": 0, "errors": [], "voice_id": None, "job": 0}
 
 
 def test_common_formats_are_accepted():
@@ -304,3 +304,13 @@ def test_any_save_failure_for_a_vanished_voice_is_one_error(tmp_path):
     importer = Importer(VanishingLibrary(), FakeTranscriber())
     status = run(importer, voice, [wav(tmp_path, "a.wav", noise(2.0)), wav(tmp_path, "b.wav", noise(2.0))])
     assert status["errors"] == ["The voice was deleted during the import"]
+
+
+def test_status_names_the_voice_and_numbers_each_job(tmp_path):
+    lib, voice, importer = setup(tmp_path)
+    other = lib.create("Other")
+    path = wav(tmp_path, "a.wav", noise(2.0))
+    first = run(importer, voice, [path])
+    assert first["voice_id"] == voice.id and first["job"] == 1 and first["finished"]
+    second = run(importer, other, [path])
+    assert second["voice_id"] == other.id and second["job"] == 2  # a finished job keeps its voice until the next one

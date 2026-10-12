@@ -17,15 +17,18 @@ class _StopJob(Exception):
 
 def _idle() -> dict:
     return {"active": False, "finished": False, "total_files": 0, "done_files": 0, "current": None,
-            "clips_added": 0, "skipped": 0, "errors": []}
+            "clips_added": 0, "skipped": 0, "errors": [],
+            # Which voice the most recent job belongs to (None before any job), and that job's number:
+            # 1, 2, 3... in start order (0 before any job), so a client can tell a new job from the last one.
+            "voice_id": None, "job": 0}
 
 
 class _Job:
     """One import run. Each run owns its status and cancel flag, so a thread that is still
     finishing can never write into, or be cancelled by, the next run."""
 
-    def __init__(self, total: int):
-        self.status = {**_idle(), "active": True, "total_files": total}
+    def __init__(self, total: int, voice_id: str, number: int):
+        self.status = {**_idle(), "active": True, "total_files": total, "voice_id": voice_id, "job": number}
         self.cancel = threading.Event()
         self.thread: threading.Thread | None = None
 
@@ -39,6 +42,7 @@ class Importer:
         self._read = read_audio
         self._lock = threading.Lock()  # guards _job and every job's status
         self._job: _Job | None = None
+        self._count = 0
 
     def start(self, voice_id: str, paths: list[str]) -> None:
         self._library.get(voice_id)
@@ -53,9 +57,10 @@ class Importer:
             # Thread.is_alive(), which stays true for a moment after the job is already finished.
             if self._job is not None and self._job.status["active"]:
                 raise ValueError("An import is already running")
-            job = _Job(len(paths))
+            job = _Job(len(paths), voice_id, self._count + 1)
             job.thread = threading.Thread(target=self._run, args=(job, voice_id, list(paths)), daemon=True)
             job.thread.start()
+            self._count += 1
             self._job = job  # only once the thread runs, so a failed start cannot leave a stuck active job
 
     def cancel(self) -> None:

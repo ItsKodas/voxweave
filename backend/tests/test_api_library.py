@@ -353,8 +353,13 @@ def test_device_changes_wait_for_a_closing_microphone_stream(tmp_path, route):
     mic.release.set()
     for thread in (stop_thread, refresh_thread, live_thread):
         thread.join(10)
-    assert stopping.is_set() and refresh_box["result"].status_code == 200 and refreshed == [1]
-    assert live_box["result"].status_code == 200
+    assert stopping.is_set() and live_box["result"].status_code == 200
+    # Both waited for the stream. Which of the two then takes the audio lock first is up to the scheduler, and
+    # a refresh that comes second is correctly refused because live mode is running.
+    if refresh_box["result"].status_code == 200:
+        assert refreshed == [1]
+    else:
+        assert refresh_box["result"].status_code == 400 and refreshed == []
     client.post("/live/stop")
 
 
@@ -392,8 +397,62 @@ def test_clip_audio_is_not_served_to_other_sites(tmp_path):
     # the app's own webview is cross-site to 127.0.0.1 but names itself
     app_audio = {"Sec-Fetch-Site": "cross-site", "Referer": "http://tauri.localhost/"}
     assert client.get(url, headers=app_audio).status_code == 200
-    assert client.get(url, headers={"Sec-Fetch-Site": "same-origin"}).status_code == 200
+    assert client.get(url, headers={"Sec-Fetch-Site": "same-origin"}).status_code == 403  # a page, naming nobody
     assert client.get("/library/voices", headers={"Sec-Fetch-Site": "cross-site"}).status_code == 403
     assert client.post("/library/voices", json={"name": "X"}, headers={"Sec-Fetch-Site": "cross-site"}).status_code == 403
     # stage 1 routes are unchanged
     assert client.get("/devices", headers={"Sec-Fetch-Site": "cross-site"}).status_code == 200
+
+
+def test_library_requires_the_app_to_be_named_when_a_browser_page_asks(tmp_path):
+    client, _, _ = make(tmp_path)
+    url = "/library/voices"
+    assert client.get(url, headers={"Sec-Fetch-Site": "same-site"}).status_code == 403
+    assert client.get(url, headers={"Sec-Fetch-Site": "same-origin"}).status_code == 403
+    assert client.get(url, headers={"Sec-Fetch-Site": "cross-site", "Origin": "http://tauri.localhost"}).status_code == 200
+    assert client.get(url, headers={"Sec-Fetch-Site": "same-site", "Referer": "http://localhost:1420/"}).status_code == 200
+    assert client.get(url, headers={"Sec-Fetch-Site": "none"}).status_code == 200
+    assert client.get(url).status_code == 200
+    assert client.get(url, headers={"Sec-Fetch-Site": "same-site", "Origin": "http://localhost:9999"}).status_code == 403
+    assert client.get("/devices", headers={"Sec-Fetch-Site": "same-site"}).status_code == 200  # stage 1 unchanged
+
+
+class SlowSaveLibrary(Library):
+    """add_clip blocks until released, like a slow disk."""
+
+    def __init__(self, data):
+        super().__init__(data)
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def add_clip(self, *args, **kwargs):
+        self.entered.set()
+        self.release.wait(10)
+        return super().add_clip(*args, **kwargs)
+
+
+def test_a_voice_delete_waits_for_a_take_that_is_being_saved(tmp_path):
+    add_voice(tmp_path, "demo")
+    library = SlowSaveLibrary(tmp_path)
+    mic = CapturingStreams()
+    importer = Importer(library, Echo())
+    studio = Studio(library, Recorder(mic), importer, lambda: DEVICES, prompts=PROMPTS)
+    manager = LiveManager(tmp_path, lambda: DEVICES, lambda v: Identity(), FakeStreams())
+    app = create_app(manager, tmp_path, lambda: DEVICES, [], allowed_hosts=[*ALLOWED_HOSTS, "testserver"],
+                     studio=studio, library=library, importer=importer)
+    client = TestClient(app)
+    voice = new_voice(client)
+    client.post("/library/record/start", json={"voice_id": voice["id"], "input_device": 1, "prompt": 0})
+    speak(mic)
+    stopped, stop_box, stop_thread = run_in_thread(lambda: client.post("/library/record/stop"))
+    assert library.entered.wait(10)
+    deleted, delete_box, delete_thread = run_in_thread(lambda: client.delete(f"/library/voices/{voice['id']}"))
+    assert not deleted.wait(0.4)  # held back until the save finishes
+    library.release.set()
+    stop_thread.join(10)
+    delete_thread.join(10)
+    assert stop_box["result"].json()["accepted"] is True
+    assert delete_box["result"].json() == {"deleted": True}
+    assert not (tmp_path / "voices" / voice["id"]).exists()
+    trashed = list((tmp_path / "trash").glob(f"{voice['id']}-*"))
+    assert len(trashed) == 1 and (trashed[0] / "clips" / "0001.orig.wav").exists()

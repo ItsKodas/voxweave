@@ -54,14 +54,17 @@ def library_router(studio: Studio, library: Library, importer: Importer, live_ru
         origin = request.headers.get("origin")
         referer = request.headers.get("referer")
         named = [o for o in (origin, _origin_of(referer) if referer else None) if o is not None]
-        if any(o not in allowed_origins for o in named) or (
-                request.headers.get("sec-fetch-site") == "cross-site" and not named):
+        if any(o not in allowed_origins for o in named):
+            raise HTTPException(status_code=403, detail="Origin not allowed")
+        # A browser page (Sec-Fetch-Site other than "none") must name the app: a page on another localhost port
+        # is same-site and may send neither header on a no-cors GET. Clients that send no Sec-Fetch-Site are not pages.
+        site = request.headers.get("sec-fetch-site")
+        if site is not None and site != "none" and not named:
             raise HTTPException(status_code=403, detail="Origin not allowed")
 
     router = APIRouter(prefix="/library", dependencies=[Depends(same_app_only)])
     # Only the pair that touches voices on disk: a delete must not queue behind a slow live start.
     voices_lock = threading.Lock()
-    importing: dict[str, str | None] = {"voice": None}  # the voice of the most recent import run
 
     @router.get("/voices")
     def voices() -> list[dict]:
@@ -76,7 +79,8 @@ def library_router(studio: Studio, library: Library, importer: Importer, live_ru
         with voices_lock:
             if studio.recording:
                 raise ValueError("Stop recording before deleting a voice")
-            if importing["voice"] == voice_id and importer.status()["active"]:
+            job = importer.status()
+            if job["active"] and job["voice_id"] == voice_id:
                 raise ValueError("Wait for the import to finish before deleting this voice")
             library.delete(voice_id)
         return {"deleted": True}
@@ -114,7 +118,8 @@ def library_router(studio: Studio, library: Library, importer: Importer, live_ru
     @router.post("/record/stop")
     def record_stop() -> dict:
         with exclusive:  # the stream may still be closing after recording reads False: devices must wait
-            return studio.stop_recording()
+            with voices_lock:  # a delete must not pass its "not recording" check while the take is being saved
+                return studio.stop_recording()
 
     @router.post("/record/cancel")
     def record_cancel() -> dict:
@@ -124,9 +129,8 @@ def library_router(studio: Studio, library: Library, importer: Importer, live_ru
 
     @router.post("/voices/{voice_id}/import")
     def import_files(voice_id: str, body: ImportBody) -> dict:
-        with voices_lock:  # so a delete of this voice cannot slip in between the start and the bookkeeping
+        with voices_lock:  # so a delete of this voice cannot slip in between the check and the start
             importer.start(voice_id, body.paths)
-            importing["voice"] = voice_id
         return studio.status()
 
     @router.post("/import/cancel")
