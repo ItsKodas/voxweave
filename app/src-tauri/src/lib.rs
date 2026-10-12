@@ -4,7 +4,7 @@ use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
@@ -48,12 +48,51 @@ fn spawn_backend(port: u16) -> std::io::Result<Child> {
     cmd.spawn()
 }
 
+const MIN_HEALTHY_RUN: Duration = Duration::from_secs(5);
+const MIN_DELAY: Duration = Duration::from_secs(1);
+const MAX_DELAY: Duration = Duration::from_secs(30);
+
+/// Restart delay after a backend exit: a short run doubles the previous delay (capped), a long run resets it.
+fn next_delay(previous: Duration, ran_for: Duration) -> Duration {
+    if ran_for >= MIN_HEALTHY_RUN {
+        MIN_DELAY
+    } else {
+        (previous * 2).clamp(MIN_DELAY, MAX_DELAY)
+    }
+}
+
+/// Kills the backend and its descendants. Each backend is a venv launcher plus the real interpreter as its child.
+fn kill_tree(child: &mut Child) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// Keeps the backend alive. A restarted backend has no live session, so live mode comes back stopped.
 fn supervise(port: u16, child: Arc<Mutex<Option<Child>>>, quitting: Arc<AtomicBool>) {
     thread::spawn(move || {
+        let mut delay = MIN_DELAY / 2;
         while !quitting.load(Ordering::SeqCst) {
+            if let Some(mut old) = child.lock().unwrap().take() {
+                kill_tree(&mut old);
+            }
+            let started = Instant::now();
             match spawn_backend(port) {
-                Ok(process) => *child.lock().unwrap() = Some(process),
+                Ok(mut process) => {
+                    let mut guard = child.lock().unwrap();
+                    if quitting.load(Ordering::SeqCst) {
+                        kill_tree(&mut process);
+                        return;
+                    }
+                    *guard = Some(process);
+                }
                 Err(err) => eprintln!("failed to start backend: {err}"),
             }
             loop {
@@ -67,11 +106,11 @@ fn supervise(port: u16, child: Arc<Mutex<Option<Child>>>, quitting: Arc<AtomicBo
                     None => true,
                 };
                 if exited {
-                    *guard = None;
                     break;
                 }
             }
-            thread::sleep(Duration::from_secs(1));
+            delay = next_delay(delay, started.elapsed());
+            thread::sleep(delay);
         }
     });
 }
@@ -86,7 +125,7 @@ pub fn run() {
     let port = free_port();
     let child = Arc::new(Mutex::new(None));
     let quitting = Arc::new(AtomicBool::new(false));
-    supervise(port, child.clone(), quitting.clone());
+    let (setup_child, setup_quitting) = (child.clone(), quitting.clone());
 
     let app = tauri::Builder::default()
         .plugin(
@@ -100,9 +139,20 @@ pub fn run() {
         )
         .manage(Backend { port })
         .invoke_handler(tauri::generate_handler![backend_port])
-        .setup(|app| {
-            app.global_shortcut()
-                .register(Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyV))?;
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Live mode keeps running in the tray; "Quit" in the tray menu exits.
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
+        .setup(move |app| {
+            if let Err(err) = app
+                .global_shortcut()
+                .register(Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyV))
+            {
+                eprintln!("could not register Ctrl+Alt+V: {err}");
+            }
 
             let converted = MenuItem::with_id(app, "converted", "Converted", true, None::<&str>)?;
             let muted = MenuItem::with_id(app, "muted", "Muted", true, None::<&str>)?;
@@ -127,6 +177,7 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+            supervise(port, setup_child, setup_quitting);
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -136,7 +187,7 @@ pub fn run() {
         if let RunEvent::Exit = event {
             quitting.store(true, Ordering::SeqCst);
             if let Some(mut process) = child.lock().unwrap().take() {
-                let _ = process.kill();
+                kill_tree(&mut process);
             }
         }
     });
@@ -151,6 +202,20 @@ mod tests {
         let port = free_port();
         assert!(port > 0);
         assert!(TcpListener::bind(("127.0.0.1", port)).is_ok());
+    }
+
+    #[test]
+    fn next_delay_doubles_on_short_runs_and_caps() {
+        let short = Duration::from_secs(1);
+        assert_eq!(next_delay(Duration::from_secs(1), short), Duration::from_secs(2));
+        assert_eq!(next_delay(Duration::from_secs(2), short), Duration::from_secs(4));
+        assert_eq!(next_delay(Duration::from_secs(20), short), Duration::from_secs(30));
+        assert_eq!(next_delay(Duration::from_secs(30), short), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn next_delay_resets_after_a_long_run() {
+        assert_eq!(next_delay(Duration::from_secs(30), Duration::from_secs(5)), Duration::from_secs(1));
     }
 
     #[test]
