@@ -49,7 +49,9 @@ class FakeStreams:
         return self._make("in", device)
 
     def output(self, device, samplerate, fill):
-        return self._make("out", device)
+        stream = self._make("out", device)
+        stream.fill = fill
+        return stream
 
     def _make(self, kind, device):
         if device == self.fail_on:
@@ -262,3 +264,87 @@ def test_stats_shape():
                           "underruns", "slow_chunks", "suggest_faster"}
     assert stats["in_level"] == 0.5 and stats["mode"] == "converted"
     assert stats["latency_ms"] >= PARAMS.chunk_ms + PARAMS.crossfade_ms
+
+
+def test_start_primes_every_output_with_one_chunk_of_silence():
+    session, proc, router, _ = make(outputs={"mic": 3, "monitor": 2})
+    session.start()
+    try:
+        for name in ("mic", "monitor"):
+            assert router.buffered(name) == proc.chunk
+    finally:
+        session.stop()
+    for name in ("mic", "monitor"):
+        assert np.all(router.read(name, proc.chunk) == 0.0)
+        assert router.buffered(name) == 0
+
+
+def test_restart_is_primed_with_exactly_one_chunk_again():
+    session, proc, router, _ = make()
+    session.start()
+    session.feed(np.full(proc.chunk * 2, 0.5, dtype=np.float32))
+    assert wait_until(lambda: router.buffered("mic") == proc.chunk * 3)
+    session.stop()
+    session.start()
+    try:
+        assert router.buffered("mic") == proc.chunk
+    finally:
+        session.stop()
+    assert np.all(router.read("mic", proc.chunk) == 0.0)
+
+
+def test_device_gets_silence_and_keeps_the_primed_chunk_until_audio_flows():
+    session, proc, router, streams = make()
+    session.start()
+    try:
+        fill = streams.streams[1].fill
+        assert np.all(fill(480) == 0.0) and len(fill(480)) == 480
+        assert router.buffered("mic") == proc.chunk
+        assert router.underruns() == 0
+    finally:
+        session.stop()
+
+
+def run_real_time(session, proc, router, streams, infer_delays, block=480):
+    """Sample-clock model of real time. The device drains `block` samples every block period from
+    the moment the streams start; chunk k has been captured at k * chunk and its converted output
+    is pushed infer_delays[k - 1] samples later. Returns everything the device played."""
+    fill = streams.streams[1].fill
+    pushes = [(k * proc.chunk + delay, k) for k, delay in enumerate(infer_delays, start=1)]
+    end = pushes[-1][0]
+    events = sorted([(t, 0) for t in range(block, end + 1, block)] + [(t, 1) for t, _ in pushes])
+    played = []
+    for _, kind in events:
+        if kind == 0:
+            played.append(fill(block))
+            continue
+        before = router.buffered("mic")
+        session.feed(np.full(proc.chunk, 0.5, dtype=np.float32))
+        assert wait_until(lambda: router.buffered("mic") > before)
+    return np.concatenate(played)
+
+
+def test_late_inference_within_one_chunk_causes_no_underrun_or_gap():
+    session, proc, router, streams = make()
+    fast, late = proc.chunk // 10, proc.chunk * 7 // 10
+    session.start()
+    try:
+        played = run_real_time(session, proc, router, streams, [fast, fast, late, fast, fast, late, fast])
+    finally:
+        session.stop()
+    assert router.underruns() == 0
+    audible = np.flatnonzero(played)
+    assert len(audible) > proc.chunk * 3
+    assert np.all(played[audible[0] : audible[-1] + 1] != 0.0)
+
+
+def test_monitor_only_session_reports_latency_from_the_monitor_buffer():
+    session, proc, router, streams = make(outputs={"monitor": 2})
+    session.start()
+    try:
+        assert [(s.kind, s.device) for s in streams.streams] == [("in", 1), ("out", 2)]
+        stats = session.stats()
+        assert stats["running"] is True
+        assert stats["latency_ms"] >= PARAMS.chunk_ms + PARAMS.crossfade_ms + PARAMS.chunk_ms
+    finally:
+        session.stop()

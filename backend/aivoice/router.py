@@ -41,6 +41,14 @@ class Router:
         for out in outputs:
             out.buffer.write(audio * out.gain if out.enabled else np.zeros_like(audio))
 
+    def prime(self, n: int) -> None:
+        """Drop anything still buffered and leave exactly n samples of silence in every output."""
+        with self._lock:
+            outputs = list(self._outputs.values())
+        for out in outputs:
+            out.buffer.clear()
+            out.buffer.write(np.zeros(n, dtype=np.float32))
+
     def read(self, name: str, n: int) -> np.ndarray:
         return self._outputs[name].buffer.read(n)
 

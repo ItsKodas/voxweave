@@ -71,3 +71,15 @@ def test_push_is_safe_while_another_thread_adds_an_output(monkeypatch):
     r.push(np.ones(4, dtype=np.float32))
     assert r.has("late")
     assert r.underruns() == 0
+
+
+def test_prime_replaces_buffered_audio_with_exact_silence_on_every_output():
+    router = Router(1000)
+    router.add_output("mic")
+    router.add_output("monitor", gain=2.0)
+    router.push(np.full(300, 0.5, dtype=np.float32))
+    router.prime(100)
+    for name in ("mic", "monitor"):
+        assert router.buffered(name) == 100
+        assert np.all(router.read(name, 100) == 0.0)
+    assert router.underruns() == 0

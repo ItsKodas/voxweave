@@ -16,6 +16,11 @@ class LiveSession:
 
     Fail-closed: microphone samples only ever go into the private input buffer. The router
     receives processor output, or silence after any fault.
+
+    Each start primes every output with one chunk of silence, and the devices are handed plain
+    silence (leaving that chunk untouched) until the first converted chunk arrives. From then on
+    the output runs one chunk ahead of the device, so an inference that is late by less than a
+    chunk neither inserts a gap nor counts as a dropout.
     """
 
     def __init__(self, processor: StreamProcessor, router: Router, sample_rate: int, stream_factory,
@@ -32,6 +37,7 @@ class LiveSession:
         self._streams: list = []
         self._thread: threading.Thread | None = None
         self._failed = False
+        self._flowing = False
         self._in_level = 0.0
         self._out_level = 0.0
         # start()/stop() are serialized by _lifecycle. The worker thread never takes it, so stop()
@@ -64,6 +70,7 @@ class LiveSession:
             out = self.processor.process(block)
             self._out_level = float(np.max(np.abs(out)))
             self.router.push(out)
+            self._flowing = True
             return True
         except Exception as exc:  # noqa: BLE001 - any fault must fail closed, never reach the worker
             self._fail(str(exc) or type(exc).__name__)
@@ -72,6 +79,12 @@ class LiveSession:
             except Exception:  # noqa: BLE001
                 pass
             return False
+
+    def _fill(self, name: str, n: int) -> np.ndarray:
+        """Audio output callback. Silence until converted audio flows, then the router's output."""
+        if not self._flowing:
+            return np.zeros(n, dtype=np.float32)
+        return self.router.read(name, n)
 
     def check_devices(self) -> bool:
         if all(s.active for s in list(self._streams)):
@@ -95,6 +108,8 @@ class LiveSession:
             self._failed = False
             self._in_level = self._out_level = 0.0
             self._inbuf = RingBuffer(self.sample_rate * 4)
+            self._flowing = False
+            self.router.prime(self.processor.chunk)
             streams: list = []
             with self._streams_lock:
                 self._streams = streams  # visible early so a failed open can close what was opened
@@ -102,7 +117,7 @@ class LiveSession:
                 streams.append(self._factory.input(self._input_device, self.sample_rate, self.feed))
                 for name, device in self._output_devices.items():
                     streams.append(
-                        self._factory.output(device, self.sample_rate, lambda n, name=name: self.router.read(name, n))
+                        self._factory.output(device, self.sample_rate, lambda n, name=name: self._fill(name, n))
                     )
                 for stream in streams:
                     stream.start()
@@ -155,7 +170,9 @@ class LiveSession:
         p = self.processor
         streams = list(self._streams)
         stream_ms = sum(getattr(s, "latency", 0.0) for s in streams[:2]) * 1000.0
-        buffered_ms = 1000.0 * self.router.buffered("mic") / self.sample_rate if self.router.has("mic") else 0.0
+        # Latency is reported for the virtual mic; a listen-only session has just the monitor.
+        output = next((name for name in ("mic", "monitor") if self.router.has(name)), None)
+        buffered_ms = 1000.0 * self.router.buffered(output) / self.sample_rate if output else 0.0
         return {
             "running": self.running,
             "mode": p.mode,

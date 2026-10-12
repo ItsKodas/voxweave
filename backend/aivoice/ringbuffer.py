@@ -21,6 +21,11 @@ class RingBuffer:
         with self._lock:
             return self._size
 
+    def clear(self) -> None:
+        with self._lock:
+            self._read = 0
+            self._size = 0
+
     def write(self, data: np.ndarray) -> None:
         data = np.asarray(data, dtype=np.float32).ravel()
         with self._lock:
