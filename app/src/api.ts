@@ -45,12 +45,12 @@ export type SettingsPatch = { pitch_shift?: number; monitor_enabled?: boolean; m
 
 let port: number | null = null;
 
-async function origin(): Promise<string> {
+export async function origin(): Promise<string> {
   if (port === null) port = await invoke<number>("backend_port");
   return `127.0.0.1:${port}`;
 }
 
-async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+export async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`http://${await origin()}${path}`, {
     method,
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },

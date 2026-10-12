@@ -21,3 +21,19 @@ button.secondary { padding: 5px 12px; background: #2c303a; font-weight: 400; fon
 details { margin: 10px 0; }
 summary { cursor: pointer; color: #aab0bb; font-size: 0.85rem; }
 footer { margin-top: 20px; font-size: 0.75rem; color: #7d8491; }
+
+.tabs { display: flex; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid #343843; }
+.tabs button { background: none; color: #aab0bb; border-radius: 6px 6px 0 0; padding: 8px 16px; }
+.tabs button[aria-selected="true"] { color: #fff; background: #22252c; }
+.row { display: flex; gap: 8px; align-items: flex-end; }
+.row label { flex: 1; margin: 0; }
+.row input { display: block; width: 100%; margin-top: 4px; padding: 6px; background: #22252c; color: inherit; border: 1px solid #343843; border-radius: 6px; }
+.voice-list { list-style: none; padding: 0; margin: 12px 0; }
+.voice-list li { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; }
+.voice-list li.selected { background: #22252c; }
+button.link { flex: 1; text-align: left; background: none; color: inherit; font-weight: 400; padding: 6px; }
+button.link span { color: #aab0bb; font-size: 0.8rem; }
+button.danger { background: #5a2a30; padding: 4px 10px; font-size: 0.8rem; }
+.minutes progress { width: 100%; height: 10px; }
+.minutes p { font-size: 0.8rem; color: #aab0bb; margin: 4px 0 12px; }
+[hidden] { display: none !important; }

@@ -1,0 +1,46 @@
+import { call, origin } from "./api";
+
+export type LibraryVoice = { id: string; name: string; created: string; minutes: number; clips: number };
+export type Clip = {
+  index: number;
+  text: string;
+  seconds: number;
+  source: "recorded" | "imported";
+  prompt: number | null;
+  origin: string | null;
+};
+/** `index` is null once every sentence has been recorded. */
+export type Prompt = { index: number | null; text: string | null; total: number; recorded: number };
+export type TakeResult = { accepted: boolean; reason: string | null; message: string | null; clip: Clip | null };
+export type ImportStatus = {
+  active: boolean;
+  finished: boolean;
+  total_files: number;
+  done_files: number;
+  current: string | null;
+  clips_added: number;
+  skipped: number;
+  errors: string[];
+};
+export type StudioStatus = { recording: boolean; level: number; seconds: number; full: boolean; import: ImportStatus };
+
+const voicePath = (id: string) => `/library/voices/${encodeURIComponent(id)}`;
+
+export const studioApi = {
+  voices: () => call<LibraryVoice[]>("GET", "/library/voices"),
+  createVoice: (name: string) => call<LibraryVoice>("POST", "/library/voices", { name }),
+  deleteVoice: (id: string) => call<{ deleted: boolean }>("DELETE", voicePath(id)),
+  clips: (id: string) => call<Clip[]>("GET", `${voicePath(id)}/clips`),
+  editClip: (id: string, index: number, text: string) => call<Clip>("PATCH", `${voicePath(id)}/clips/${index}`, { text }),
+  deleteClip: (id: string, index: number) => call<{ deleted: boolean }>("DELETE", `${voicePath(id)}/clips/${index}`),
+  clipAudioUrl: async (id: string, index: number) => `http://${await origin()}${voicePath(id)}/clips/${index}/audio`,
+  prompt: (id: string, after?: number) =>
+    call<Prompt>("GET", `${voicePath(id)}/prompt${after === undefined ? "" : `?after=${after}`}`),
+  recordStart: (voiceId: string, inputDevice: number, prompt: number) =>
+    call<StudioStatus>("POST", "/library/record/start", { voice_id: voiceId, input_device: inputDevice, prompt }),
+  recordStop: () => call<TakeResult>("POST", "/library/record/stop"),
+  recordCancel: () => call<StudioStatus>("POST", "/library/record/cancel"),
+  importFiles: (id: string, paths: string[]) => call<StudioStatus>("POST", `${voicePath(id)}/import`, { paths }),
+  importCancel: () => call<StudioStatus>("POST", "/library/import/cancel"),
+  status: () => call<StudioStatus>("GET", "/library/status"),
+};

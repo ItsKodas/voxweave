@@ -5,6 +5,7 @@ import { LivePanel } from "./LivePanel";
 import { SetupCheck } from "./SetupCheck";
 import { useLiveShortcuts } from "./useLiveShortcuts";
 import { useStats } from "./useStats";
+import { VoicesPanel } from "./VoicesPanel";
 
 const START_TIMEOUT_MS = 15_000;
 
@@ -56,13 +57,24 @@ function Main() {
   latest.current = stats;
   const [actionError, setActionError] = useState<string | null>(null);
   const [devicesVersion, setDevicesVersion] = useState(0);
+  const [tab, setTab] = useState<"live" | "voices">("live");
 
   useLiveShortcuts(latest, setActionError);
 
   return (
     <>
-      <SetupCheck refreshKey={devicesVersion} />
-      <LivePanel stats={stats} actionError={actionError} onDevicesRefreshed={() => setDevicesVersion((v) => v + 1)} />
+      <div role="tablist" className="tabs">
+        <button role="tab" aria-selected={tab === "live"} onClick={() => setTab("live")}>Live</button>
+        <button role="tab" aria-selected={tab === "voices"} onClick={() => setTab("voices")}>Voices</button>
+      </div>
+      {/* Both stay mounted so switching tabs never resets a form or interrupts a session. */}
+      <div role="tabpanel" hidden={tab !== "live"}>
+        <SetupCheck refreshKey={devicesVersion} />
+        <LivePanel stats={stats} actionError={actionError} onDevicesRefreshed={() => setDevicesVersion((v) => v + 1)} />
+      </div>
+      <div role="tabpanel" hidden={tab !== "voices"}>
+        <VoicesPanel active={tab === "voices"} />
+      </div>
     </>
   );
 }

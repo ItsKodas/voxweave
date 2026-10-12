@@ -13,6 +13,9 @@ vi.mock("./LivePanel", () => ({
     <button onClick={onDevicesRefreshed}>live panel</button>
   ),
 }));
+vi.mock("./VoicesPanel", () => ({
+  VoicesPanel: ({ active }: { active: boolean }) => <p>voices panel {active ? "active" : "idle"}</p>,
+}));
 import { api } from "./api";
 
 const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
@@ -74,5 +77,25 @@ describe("App", () => {
     expect(screen.getByText("setup check 0")).toBeInTheDocument();
     act(() => screen.getByRole("button", { name: "live panel" }).click());
     expect(screen.getByText("setup check 1")).toBeInTheDocument();
+  });
+
+  it("starts on the Live tab with the Voices panel idle", async () => {
+    vi.mocked(api.health).mockResolvedValue({ status: "ok" });
+    render(<App />);
+    await advance(0);
+    expect(screen.getByRole("tab", { name: "Live" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("button", { name: "live panel" })).toBeVisible();
+    expect(screen.getByText("voices panel idle")).not.toBeVisible();
+  });
+
+  it("switches to the Voices tab and keeps the Live panel mounted", async () => {
+    vi.mocked(api.health).mockResolvedValue({ status: "ok" });
+    render(<App />);
+    await advance(0);
+    act(() => screen.getByRole("tab", { name: "Voices" }).click());
+    expect(screen.getByText("voices panel active")).toBeVisible();
+    expect(screen.getByRole("button", { name: "live panel", hidden: true })).not.toBeVisible();
+    act(() => screen.getByRole("tab", { name: "Live" }).click());
+    expect(screen.getByRole("button", { name: "live panel" })).toBeVisible();
   });
 });
