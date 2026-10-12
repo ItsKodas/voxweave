@@ -19,7 +19,12 @@ export function MinutesBar({ minutes }: { minutes: number }) {
   );
 }
 
-export function VoiceStudio({ voice, active, onChanged }: { voice: LibraryVoice; active: boolean; onChanged: () => void }) {
+export function VoiceStudio({ voice, active, devicesVersion = 0, onChanged }: {
+  voice: LibraryVoice;
+  active: boolean;
+  devicesVersion?: number;
+  onChanged: () => void;
+}) {
   const [version, setVersion] = useState(0);
   const changed = useCallback(() => {
     setVersion((v) => v + 1);
@@ -31,7 +36,7 @@ export function VoiceStudio({ voice, active, onChanged }: { voice: LibraryVoice;
       <h2>{voice.name}</h2>
       <MinutesBar minutes={voice.minutes} />
       <h3>Record</h3>
-      <RecordSession voiceId={voice.id} active={active} onSaved={changed} />
+      <RecordSession voiceId={voice.id} active={active} devicesVersion={devicesVersion} onSaved={changed} />
       <h3>Import</h3>
       <ImportDrop voiceId={voice.id} active={active} onImported={changed} />
       <h3>Clips</h3>

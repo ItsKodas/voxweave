@@ -66,15 +66,28 @@ describe("ImportDrop", () => {
     const onImported = vi.fn();
     const { rerender } = render(<ImportDrop voiceId="v-1" active onImported={() => onImported()} />);
     await vi.waitFor(() => expect(drop.handler).not.toBeNull());
-    await dropFiles(["C:\a.mp3", "C:\notes.mp3"]);
+    await dropFiles(["C:\\a.mp3", "C:\\notes.mp3"]);
     status.current = imp({ finished: true, total_files: 2, done_files: 2, clips_added: 6, skipped: 1, errors: ["Could not read notes.mp3: invalid data"] });
     rerender(<ImportDrop voiceId="v-1" active onImported={() => onImported()} />);
     expect(await screen.findByText(/Added 6 clips/)).toBeInTheDocument();
     expect(screen.getByText(/1 skipped as too quiet/)).toBeInTheDocument();
+    expect(screen.getByText(/Added 6 clips/)).toHaveTextContent(
+      "Added 6 clips. 1 skipped as too quiet. Quiet recordings can be made louder in an audio editor and imported again.",
+    );
     expect(screen.getByText("Could not read notes.mp3: invalid data")).toBeInTheDocument();
     rerender(<ImportDrop voiceId="v-1" active onImported={() => onImported()} />);
     rerender(<ImportDrop voiceId="v-1" active onImported={() => onImported()} />);
     expect(onImported).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives no hint about quiet recordings when nothing was skipped", async () => {
+    const { rerender } = render(<ImportDrop voiceId="v-1" active onImported={() => {}} />);
+    await vi.waitFor(() => expect(drop.handler).not.toBeNull());
+    await dropFiles(["C:\\a.mp3"]);
+    status.current = imp({ finished: true, total_files: 1, done_files: 1, clips_added: 6, skipped: 0 });
+    rerender(<ImportDrop voiceId="v-1" active onImported={() => {}} />);
+    expect(await screen.findByText(/Added 6 clips/)).toHaveTextContent(/^Added 6 clips\.$/);
+    expect(screen.queryByText(/audio editor/)).not.toBeInTheDocument();
   });
 
   it("ignores a drop while an import is running and says so", async () => {
@@ -132,7 +145,7 @@ describe("ImportDrop", () => {
     expect(screen.queryByText(/clips so far/)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Cancel import" })).not.toBeInTheDocument();
     await vi.waitFor(() => expect(drop.handler).not.toBeNull());
-    await dropFiles(["C:\a.mp3"]);
+    await dropFiles(["C:\\a.mp3"]);
     expect(studioApi.importFiles).not.toHaveBeenCalled();
     expect(screen.getAllByText(/another voice is running/)).toHaveLength(1);
     status.current = imp({ finished: true, total_files: 3, done_files: 3, clips_added: 5, voice_id: "v-2", job: 4 });
@@ -160,14 +173,14 @@ describe("ImportDrop", () => {
     const ui = () => <ImportDrop voiceId="v-1" active onImported={() => onImported()} />;
     const { rerender } = render(ui());
     await vi.waitFor(() => expect(drop.handler).not.toBeNull());
-    await dropFiles(["C:\a.mp3"]);
+    await dropFiles(["C:\\a.mp3"]);
     status.current = imp({ finished: true, total_files: 1, done_files: 1, clips_added: 3, job: 1 });
     rerender(ui());
     expect(await screen.findByText(/Added 3 clips/)).toBeInTheDocument();
     expect(onImported).toHaveBeenCalledTimes(1);
 
     vi.mocked(studioApi.importFiles).mockResolvedValue(imp({ active: true, total_files: 1, job: 2 }) as never);
-    await dropFiles(["C:\b.mp3"]);  // the poll still returns job 1's finished status
+    await dropFiles(["C:\\b.mp3"]);  // the poll still returns job 1's finished status
     rerender(ui());
     rerender(ui());
     expect(studioApi.importFiles).toHaveBeenCalledTimes(2);
@@ -186,7 +199,7 @@ describe("ImportDrop", () => {
     await vi.waitFor(() => expect(drop.handler).not.toBeNull());
     const stale = drop.handler!;
     rerender(<ImportDrop voiceId="v-1" active={false} onImported={() => {}} />);
-    await act(async () => { stale(["C:\a.mp3"]); });
+    await act(async () => { stale(["C:\\a.mp3"]); });
     expect(studioApi.importFiles).not.toHaveBeenCalled();
   });
 

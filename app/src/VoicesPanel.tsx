@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { LibraryVoice, studioApi } from "./studioApi";
 import { VoiceStudio } from "./VoiceStudio";
 
-export function VoicesPanel({ active }: { active: boolean }) {
+export function VoicesPanel({ active, devicesVersion = 0 }: { active: boolean; devicesVersion?: number }) {
   const [voices, setVoices] = useState<LibraryVoice[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [name, setName] = useState("");
@@ -94,7 +94,7 @@ export function VoicesPanel({ active }: { active: boolean }) {
           ))}
         </ul>
       )}
-      {current && <VoiceStudio key={current.id} voice={current} active={active} onChanged={() => load()} />}
+      {current && <VoiceStudio key={current.id} voice={current} active={active} devicesVersion={devicesVersion} onChanged={() => load()} />}
     </section>
   );
 }

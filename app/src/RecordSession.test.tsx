@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RecordSession } from "./RecordSession";
@@ -86,6 +86,145 @@ describe("RecordSession", () => {
     rerender(<RecordSession voiceId="v-1" active onSaved={() => {}} />);
     expect(screen.getByLabelText("Input level")).toHaveValue(0.6);
     expect(screen.getByText(/3\.2 s/)).toBeInTheDocument();
+  });
+
+  it("warns that long takes are rejected once the take passes 15 seconds, and not before", async () => {
+    const warning = "Takes over 20 seconds are rejected. Finish the sentence and press Stop.";
+    const ui = () => <RecordSession voiceId="v-1" active onSaved={() => {}} />;
+    const { rerender } = render(ui());
+    await ready();
+    expect(screen.queryByText(warning)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Record" }));
+    await screen.findByRole("button", { name: "Stop" });
+    status.current = { recording: true, level: 0.3, seconds: 15.0, full: false };
+    rerender(ui());
+    expect(screen.queryByText(warning)).not.toBeInTheDocument();
+    status.current = { recording: true, level: 0.3, seconds: 15.2, full: false };
+    rerender(ui());
+    expect(screen.getByText(warning)).toBeInTheDocument();
+    status.current = { recording: true, level: 0.3, seconds: 30, full: true };
+    rerender(ui());
+    expect(screen.getByText(warning)).toBeInTheDocument();
+    expect(screen.getByText(/maximum length/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await ready();
+    expect(screen.queryByText(warning)).not.toBeInTheDocument();
+  });
+
+  it("reloads the microphone list after Refresh devices and keeps the chosen microphone", async () => {
+    const ui = (v: number) => <RecordSession voiceId="v-1" active devicesVersion={v} onSaved={() => {}} />;
+    const { rerender } = render(ui(0));
+    await ready();
+    const select = screen.getByLabelText("Microphone") as HTMLSelectElement;
+    await userEvent.selectOptions(select, "1");
+    expect(api.devices).toHaveBeenCalledTimes(1);
+    vi.mocked(api.devices).mockResolvedValue({
+      devices: [
+        { index: 1, name: "Webcam Mic", max_input: 1, max_output: 0 },
+        { index: 4, name: "Headset Mic", max_input: 1, max_output: 0 },
+        { index: 6, name: "USB Mic", max_input: 1, max_output: 0 },
+      ],
+      virtual_mic: null, default_input: 4, default_output: null,
+    });
+    rerender(ui(1));
+    expect(await screen.findByRole("option", { name: "USB Mic" })).toBeInTheDocument();
+    expect(api.devices).toHaveBeenCalledTimes(2);
+    expect(select.querySelectorAll("option")).toHaveLength(3);
+    expect(select.value).toBe("1"); // still the Webcam Mic, not back to the default
+    expect(studioApi.prompt).toHaveBeenCalledTimes(1); // the sentence is not reloaded
+    rerender(ui(1));
+    expect(api.devices).toHaveBeenCalledTimes(2);
+  });
+
+  it("follows the chosen microphone to its new number, and falls back to the default when it is gone", async () => {
+    const ui = (v: number) => <RecordSession voiceId="v-1" active devicesVersion={v} onSaved={() => {}} />;
+    const { rerender } = render(ui(0));
+    await ready();
+    const select = screen.getByLabelText("Microphone") as HTMLSelectElement;
+    await userEvent.selectOptions(select, "1");
+    // After a refresh the system may number devices differently: number 1 is now another microphone.
+    vi.mocked(api.devices).mockResolvedValue({
+      devices: [
+        { index: 1, name: "USB Mic", max_input: 1, max_output: 0 },
+        { index: 2, name: "Webcam Mic", max_input: 1, max_output: 0 },
+        { index: 4, name: "Headset Mic", max_input: 1, max_output: 0 },
+      ],
+      virtual_mic: null, default_input: 4, default_output: null,
+    });
+    rerender(ui(1));
+    await screen.findByRole("option", { name: "USB Mic" });
+    expect(select.value).toBe("2");
+    vi.mocked(api.devices).mockResolvedValue({
+      devices: [
+        { index: 1, name: "USB Mic", max_input: 1, max_output: 0 },
+        { index: 4, name: "Headset Mic", max_input: 1, max_output: 0 },
+      ],
+      virtual_mic: null, default_input: 4, default_output: null,
+    });
+    rerender(ui(2));
+    await vi.waitFor(() => expect(select.querySelectorAll("option")).toHaveLength(2));
+    expect(select.value).toBe("4");
+    await userEvent.click(screen.getByRole("button", { name: "Record" }));
+    expect(studioApi.recordStart).toHaveBeenCalledWith("v-1", 4, 0);
+  });
+
+  it("shows a microphone that was plugged in after the screen said none was found", async () => {
+    vi.mocked(api.devices).mockResolvedValue({ devices: [], virtual_mic: null, default_input: null, default_output: null });
+    const ui = (v: number) => <RecordSession voiceId="v-1" active devicesVersion={v} onSaved={() => {}} />;
+    const { rerender } = render(ui(0));
+    expect(await ready()).toBeDisabled();
+    vi.mocked(api.devices).mockResolvedValue({
+      devices: [{ index: 3, name: "New Mic", max_input: 1, max_output: 0 }],
+      virtual_mic: null, default_input: null, default_output: null,
+    });
+    rerender(ui(1));
+    await vi.waitFor(() => expect(screen.getByRole("button", { name: "Record" })).toBeEnabled());
+    expect(screen.queryByText(/no microphone was found/i)).not.toBeInTheDocument();
+    expect((screen.getByLabelText("Microphone") as HTMLSelectElement).value).toBe("3");
+  });
+
+  it("never reloads the microphone list during a take, and catches up when the take ends", async () => {
+    const ui = (v: number) => <RecordSession voiceId="v-1" active devicesVersion={v} onSaved={() => {}} />;
+    const { rerender } = render(ui(0));
+    await userEvent.click(await ready());
+    await screen.findByRole("button", { name: "Stop" });
+    rerender(ui(1));
+    await act(async () => {});
+    expect(api.devices).toHaveBeenCalledTimes(1);
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await ready();
+    await vi.waitFor(() => expect(api.devices).toHaveBeenCalledTimes(2));
+  });
+
+  it("ignores a microphone list that arrives after a take has started", async () => {
+    type Devices = Awaited<ReturnType<typeof api.devices>>;
+    const ui = (v: number) => <RecordSession voiceId="v-1" active devicesVersion={v} onSaved={() => {}} />;
+    const { rerender } = render(ui(0));
+    await ready();
+    let arrive: (list: Devices) => void = () => {};
+    vi.mocked(api.devices).mockReturnValueOnce(new Promise((r) => { arrive = r; }));
+    rerender(ui(1));
+    await userEvent.click(screen.getByRole("button", { name: "Record" }));
+    await screen.findByRole("button", { name: "Stop" });
+    await act(async () => {
+      arrive({ devices: [{ index: 9, name: "Other Mic", max_input: 1, max_output: 0 }], virtual_mic: null, default_input: 9, default_output: null });
+    });
+    const select = screen.getByLabelText("Microphone") as HTMLSelectElement;
+    expect(select.value).toBe("4");
+    expect(select.querySelectorAll("option")).toHaveLength(2);
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await ready();
+    await vi.waitFor(() => expect(api.devices).toHaveBeenCalledTimes(3)); // asked again once the take is over
+  });
+
+  it("shows the error when the microphone list cannot be reloaded, and keeps the old list", async () => {
+    const ui = (v: number) => <RecordSession voiceId="v-1" active devicesVersion={v} onSaved={() => {}} />;
+    const { rerender } = render(ui(0));
+    await ready();
+    vi.mocked(api.devices).mockRejectedValueOnce(new Error("Backend unreachable"));
+    rerender(ui(1));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Backend unreachable");
+    expect((screen.getByLabelText("Microphone") as HTMLSelectElement).querySelectorAll("option")).toHaveLength(2);
   });
 
   it("keeps the same sentence and shows why when a take is rejected", async () => {

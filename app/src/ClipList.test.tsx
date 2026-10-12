@@ -18,6 +18,7 @@ beforeEach(() => {
   vi.mocked(studioApi.deleteClip).mockResolvedValue({ deleted: true });
   vi.mocked(studioApi.clipAudioUrl).mockImplementation(async (_id, index) => `blob:x/${index}`);
   URL.revokeObjectURL = vi.fn();
+  vi.spyOn(window, "confirm").mockReturnValue(true);
 });
 
 const rows = async () => within(await screen.findByRole("list", { name: "Clips" })).getAllByRole("listitem");
@@ -78,6 +79,62 @@ describe("ClipList", () => {
     expect(studioApi.deleteClip).toHaveBeenCalledWith("v-1", 2);
     await vi.waitFor(async () => expect(await rows()).toHaveLength(1));
     expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks before deleting and deletes nothing when the answer is no", async () => {
+    vi.mocked(window.confirm).mockReturnValue(false);
+    const onChanged = vi.fn();
+    render(<ClipList voiceId="v-1" version={0} onChanged={onChanged} />);
+    await userEvent.click(within((await rows())[0]).getByRole("button", { name: "Delete clip 2" }));
+    expect(window.confirm).toHaveBeenCalledTimes(1);
+    const question = vi.mocked(window.confirm).mock.calls[0][0] as string;
+    expect(question).toMatch(/clip 2/i);
+    expect(question).toMatch(/moved to the data\/trash folder, not erased/);
+    expect(studioApi.deleteClip).not.toHaveBeenCalled();
+    expect(await rows()).toHaveLength(2);
+    expect(onChanged).not.toHaveBeenCalled();
+  });
+
+  it("deletes the clip once the question is answered yes", async () => {
+    render(<ClipList voiceId="v-1" version={0} onChanged={() => {}} />);
+    await userEvent.click(within((await rows())[1]).getByRole("button", { name: "Delete clip 1" }));
+    expect(window.confirm).toHaveBeenCalledTimes(1);
+    expect(studioApi.deleteClip).toHaveBeenCalledWith("v-1", 1);
+    await vi.waitFor(async () => expect(await rows()).toHaveLength(1));
+  });
+
+  it("does not save an emptied transcript: it puts the text back and says why", async () => {
+    render(<ClipList voiceId="v-1" version={0} onChanged={() => {}} />);
+    const field = within((await rows())[0]).getByLabelText("Transcript of clip 2");
+    await userEvent.clear(field);
+    await userEvent.type(field, "   ");
+    await userEvent.tab();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "A transcript cannot be empty. Delete the clip if it is not usable.",
+    );
+    expect(field).toHaveValue("Second won.");
+    expect(studioApi.editClip).not.toHaveBeenCalled();
+  });
+
+  it("clears the empty-transcript message after the next successful save", async () => {
+    render(<ClipList voiceId="v-1" version={0} onChanged={() => {}} />);
+    const field = within((await rows())[0]).getByLabelText("Transcript of clip 2");
+    await userEvent.clear(field);
+    await userEvent.tab();
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    await userEvent.type(field, " Now.");
+    await userEvent.tab();
+    expect(studioApi.editClip).toHaveBeenCalledWith("v-1", 2, "Second won. Now.");
+    await vi.waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+  });
+
+  it("leaves a clip whose transcript was already empty alone when nothing is typed", async () => {
+    vi.mocked(studioApi.clips).mockResolvedValue([{ ...C2, text: "" }]);
+    render(<ClipList voiceId="v-1" version={0} onChanged={() => {}} />);
+    await userEvent.click(within((await rows())[0]).getByLabelText("Transcript of clip 2"));
+    await userEvent.tab();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(studioApi.editClip).not.toHaveBeenCalled();
   });
 
   it("reloads when the version changes", async () => {

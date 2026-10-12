@@ -7,8 +7,11 @@ vi.mock("./studioApi", () => ({
   studioApi: { voices: vi.fn(), createVoice: vi.fn(), deleteVoice: vi.fn() },
 }));
 vi.mock("./VoiceStudio", () => ({
-  VoiceStudio: ({ voice, onChanged }: { voice: { name: string }; onChanged: () => void }) => (
-    <button onClick={onChanged}>studio for {voice.name}</button>
+  VoiceStudio: ({ voice, onChanged, devicesVersion }: { voice: { name: string }; onChanged: () => void; devicesVersion?: number }) => (
+    <>
+      <button onClick={onChanged}>studio for {voice.name}</button>
+      <p>studio devices {devicesVersion}</p>
+    </>
   ),
 }));
 import { studioApi } from "./studioApi";
@@ -101,6 +104,13 @@ describe("VoicesPanel", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("backend unreachable");
     await userEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findByRole("list", { name: "Voices" })).toBeInTheDocument();
+  });
+
+  it("hands the device list version to the open voice", async () => {
+    const { rerender } = render(<VoicesPanel active devicesVersion={1} />);
+    expect(await screen.findByText("studio devices 1")).toBeInTheDocument();
+    rerender(<VoicesPanel active devicesVersion={2} />);
+    expect(screen.getByText("studio devices 2")).toBeInTheDocument();
   });
 
   it("does not load until the tab is first shown", async () => {

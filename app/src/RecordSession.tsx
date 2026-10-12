@@ -1,9 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, Device } from "./api";
+import { api, Device, DeviceList } from "./api";
 import { Clip, Prompt, studioApi } from "./studioApi";
 import { useStudioStatus } from "./useStudioStatus";
 
-export function RecordSession({ voiceId, active, onSaved }: { voiceId: string; active: boolean; onSaved: () => void }) {
+/** Takes with more than 20 s of speech are rejected, so the warning comes while there is time to finish. */
+const LONG_TAKE_SECONDS = 15;
+const LONG_TAKE_WARNING = "Takes over 20 seconds are rejected. Finish the sentence and press Stop.";
+
+/** `devicesVersion` changes whenever Refresh devices on the Live tab has reloaded the device lists. */
+export function RecordSession({ voiceId, active, devicesVersion = 0, onSaved }: {
+  voiceId: string;
+  active: boolean;
+  devicesVersion?: number;
+  onSaved: () => void;
+}) {
   const [inputs, setInputs] = useState<Device[]>([]);
   const [input, setInput] = useState<number | null>(null);
   const [prompt, setPrompt] = useState<Prompt | null>(null);
@@ -17,6 +27,10 @@ export function RecordSession({ voiceId, active, onSaved }: { voiceId: string; a
   const activeRef = useRef(active);
   activeRef.current = active;
   const mountedRef = useRef(true);
+  const inputsRef = useRef(inputs);
+  inputsRef.current = inputs;
+  const inputRef = useRef(input);
+  inputRef.current = input;
   const status = useStudioStatus(active && recording);
 
   const fail = (e: unknown) => setError((e as Error).message);
@@ -43,15 +57,23 @@ export function RecordSession({ voiceId, active, onSaved }: { voiceId: string; a
     };
   }, []);
 
+  // Shows the input devices of a fresh list. With `keep`, the chosen microphone stays chosen if it is still there.
+  // It is found by name, because the system may number devices differently after a refresh.
+  const showDevices = (list: DeviceList, keep: boolean) => {
+    const ins = list.devices.filter((d) => d.max_input > 0);
+    const chosen = keep ? inputsRef.current.find((d) => d.index === inputRef.current) : undefined;
+    const same = chosen && (ins.find((d) => d.index === chosen.index && d.name === chosen.name) ?? ins.find((d) => d.name === chosen.name));
+    setInputs(ins);
+    setInput(same ? same.index : ins.some((d) => d.index === list.default_input) ? list.default_input : (ins[0]?.index ?? null));
+  };
+
   useEffect(() => {
     let gone = false;
     (async () => {
       try {
         const list = await api.devices();
         if (gone) return;
-        const ins = list.devices.filter((d) => d.max_input > 0);
-        setInputs(ins);
-        setInput(ins.some((d) => d.index === list.default_input) ? list.default_input : (ins[0]?.index ?? null));
+        showDevices(list, false);
         await loadPrompt();
       } catch (e) {
         if (!gone) fail(e);
@@ -62,6 +84,32 @@ export function RecordSession({ voiceId, active, onSaved }: { voiceId: string; a
       if (recordingRef.current) studioApi.recordCancel().catch(() => undefined);
     };
   }, [loadPrompt]);
+
+  // Refresh devices on the Live tab reloads the microphone list here too. Never during a take: the list is
+  // fetched, or fetched again, once the take is over.
+  const shownVersion = useRef<number | null>(devicesVersion);
+  useEffect(() => {
+    if (recording || shownVersion.current === devicesVersion) return;
+    shownVersion.current = devicesVersion;
+    let gone = false;
+    let settled = false;
+    api
+      .devices()
+      .then((list) => {
+        if (gone || recordingRef.current) return;
+        settled = true;
+        showDevices(list, true);
+      })
+      .catch((e) => {
+        if (gone) return;
+        settled = true;
+        fail(e);
+      });
+    return () => {
+      gone = true;
+      if (!settled) shownVersion.current = null; // overtaken by a take or a newer refresh: ask again next time
+    };
+  }, [devicesVersion, recording]);
 
   // Leaving the tab must not leave the microphone running. If the cancel fails the take may still be running,
   // so the controls stay and the cancel is tried again when the tab is active again.
@@ -168,6 +216,7 @@ export function RecordSession({ voiceId, active, onSaved }: { voiceId: string; a
             <progress aria-label="Input level" max={1} value={Math.min(1, status?.level ?? 0)} />
           </div>
           <p>{(status?.seconds ?? 0).toFixed(1)} s{status?.full ? ". The take is at its maximum length." : ""}</p>
+          {(status?.seconds ?? 0) > LONG_TAKE_SECONDS && <p className="hint">{LONG_TAKE_WARNING}</p>}
           <div className="actions">
             <button onClick={stop} disabled={busy}>Stop</button>
             <button className="secondary" onClick={cancel} disabled={busy}>Cancel</button>

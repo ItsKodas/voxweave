@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Clip, studioApi } from "./studioApi";
 
+const EMPTY_TRANSCRIPT = "A transcript cannot be empty. Delete the clip if it is not usable.";
+
 function ClipRow({ voiceId, clip, onPlay, onDeleted, onError }: {
   voiceId: string;
   clip: Clip;
@@ -13,6 +15,12 @@ function ClipRow({ voiceId, clip, onPlay, onDeleted, onError }: {
 
   const save = async () => {
     if (text.trim() === saved) return;
+    if (text.trim() === "") {
+      // An emptied box is almost always a slip, and a clip without words teaches the voice nothing.
+      setText(saved);
+      onError(EMPTY_TRANSCRIPT);
+      return;
+    }
     try {
       const next = await studioApi.editClip(voiceId, clip.index, text.trim());
       setSaved(next.text);
@@ -25,6 +33,10 @@ function ClipRow({ voiceId, clip, onPlay, onDeleted, onError }: {
   };
 
   const remove = async () => {
+    const ok = window.confirm(
+      `Delete clip ${clip.index} (${clip.seconds.toFixed(1)} s)? Its files are moved to the data/trash folder, not erased.`,
+    );
+    if (!ok) return;
     try {
       await studioApi.deleteClip(voiceId, clip.index);
       onDeleted(clip.index);

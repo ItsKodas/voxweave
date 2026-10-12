@@ -4,7 +4,12 @@ import { describe, expect, it, vi } from "vitest";
 import { MinutesBar, VoiceStudio } from "./VoiceStudio";
 
 vi.mock("./RecordSession", () => ({
-  RecordSession: ({ onSaved }: { onSaved: () => void }) => <button onClick={onSaved}>record saved</button>,
+  RecordSession: ({ onSaved, devicesVersion }: { onSaved: () => void; devicesVersion?: number }) => (
+    <>
+      <button onClick={onSaved}>record saved</button>
+      <p>record devices {devicesVersion}</p>
+    </>
+  ),
 }));
 vi.mock("./ImportDrop", () => ({
   ImportDrop: ({ onImported }: { onImported: () => void }) => <button onClick={onImported}>import done</button>,
@@ -45,5 +50,12 @@ describe("VoiceStudio", () => {
     expect(screen.getByRole("button", { name: "clips v2" })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "clips v2" }));
     expect(onChanged).toHaveBeenCalledTimes(3);
+  });
+
+  it("hands the device list version to the recording screen", () => {
+    const { rerender } = render(<VoiceStudio voice={VOICE} active devicesVersion={2} onChanged={() => {}} />);
+    expect(screen.getByText("record devices 2")).toBeInTheDocument();
+    rerender(<VoiceStudio voice={VOICE} active devicesVersion={3} onChanged={() => {}} />);
+    expect(screen.getByText("record devices 3")).toBeInTheDocument();
   });
 });

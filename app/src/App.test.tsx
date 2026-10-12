@@ -14,7 +14,12 @@ vi.mock("./LivePanel", () => ({
   ),
 }));
 vi.mock("./VoicesPanel", () => ({
-  VoicesPanel: ({ active }: { active: boolean }) => <p>voices panel {active ? "active" : "idle"}</p>,
+  VoicesPanel: ({ active, devicesVersion }: { active: boolean; devicesVersion?: number }) => (
+    <>
+      <p>voices panel {active ? "active" : "idle"}</p>
+      <p>voices devices {devicesVersion}</p>
+    </>
+  ),
 }));
 import { api } from "./api";
 
@@ -77,6 +82,15 @@ describe("App", () => {
     expect(screen.getByText("setup check 0")).toBeInTheDocument();
     act(() => screen.getByRole("button", { name: "live panel" }).click());
     expect(screen.getByText("setup check 1")).toBeInTheDocument();
+  });
+
+  it("tells the Voices tab when the Live tab refreshed the devices", async () => {
+    vi.mocked(api.health).mockResolvedValue({ status: "ok" });
+    render(<App />);
+    await advance(0);
+    expect(screen.getByText("voices devices 0")).toBeInTheDocument();
+    act(() => screen.getByRole("button", { name: "live panel" }).click());
+    expect(screen.getByText("voices devices 1")).toBeInTheDocument();
   });
 
   it("starts on the Live tab with the Voices panel idle", async () => {

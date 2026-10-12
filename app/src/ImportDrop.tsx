@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { onFilesDropped } from "./dropEvents";
-import { studioApi } from "./studioApi";
+import { ImportStatus, studioApi } from "./studioApi";
 import { useStudioStatus } from "./useStudioStatus";
 
 const WAIT_HERE = "Wait for the current import to finish before dropping more files.";
 const WAIT_OTHER = "An import into another voice is running. Wait for it to finish before importing here.";
+const QUIET_HINT = "Quiet recordings can be made louder in an audio editor and imported again.";
 
 export function ImportDrop({ voiceId, active, onImported }: { voiceId: string; active: boolean; onImported: () => void }) {
   const [error, setError] = useState<string | null>(null);
@@ -12,9 +13,13 @@ export function ImportDrop({ voiceId, active, onImported }: { voiceId: string; a
   // The number of this voice's import job that this component follows. The backend keeps one status for the
   // whole app, so a job is "mine" only when it carries my voice id and the number I started or picked up.
   const [tracked, setTracked] = useState<number | null>(null);
+  // Polling runs only while an import is running. When my job finishes, its last status is kept here so the
+  // result stays on screen with no further requests; the next drop clears it and starts polling again.
   const [watching, setWatching] = useState(false);
+  const [result, setResult] = useState<ImportStatus | null>(null);
   const status = useStudioStatus(active && watching);
-  const job = status?.import ?? null;
+  const polled = status?.import ?? null;
+  const job = polled ?? result;
   const jobRef = useRef(job);
   jobRef.current = job;
   const trackedRef = useRef(tracked);
@@ -42,6 +47,7 @@ export function ImportDrop({ voiceId, active, onImported }: { voiceId: string; a
       setError(null);
       setNotice(null);
       setTracked(null); // the previous result is no longer shown, and a stale finished status is not this job's
+      setResult(null);
       studioApi
         .importFiles(voiceId, paths)
         .then((res) => {
@@ -88,6 +94,14 @@ export function ImportDrop({ voiceId, active, onImported }: { voiceId: string; a
     if (job !== null && job.active && job.voice_id === voiceId && tracked !== job.job) setTracked(job.job);
   }, [job, voiceId, tracked]);
 
+  // Nothing is running any more: stop polling, keeping my finished job's status as the result.
+  useEffect(() => {
+    if (polled === null || polled.active) return;
+    if (tracked !== null && polled.job < tracked) return; // an older job's status; mine has not been seen yet
+    if (polled.finished && polled.voice_id === voiceId && polled.job === tracked) setResult(polled);
+    setWatching(false);
+  }, [polled, tracked, voiceId]);
+
   useEffect(() => {
     if (mine && job.finished && reportedJob.current !== job.job) {
       reportedJob.current = job.job;
@@ -124,7 +138,7 @@ export function ImportDrop({ voiceId, active, onImported }: { voiceId: string; a
       {mine && job.finished && (
         <div>
           <p className="ok">
-            Added {job.clips_added} clips.{job.skipped > 0 ? ` ${job.skipped} skipped as too quiet.` : ""}
+            Added {job.clips_added} clips.{job.skipped > 0 ? ` ${job.skipped} skipped as too quiet. ${QUIET_HINT}` : ""}
           </p>
           {job.errors.length > 0 && (
             <ul className="errors">

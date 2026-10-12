@@ -73,7 +73,7 @@ function Main() {
         <LivePanel stats={stats} actionError={actionError} onDevicesRefreshed={() => setDevicesVersion((v) => v + 1)} />
       </div>
       <div role="tabpanel" hidden={tab !== "voices"}>
-        <VoicesPanel active={tab === "voices"} />
+        <VoicesPanel active={tab === "voices"} devicesVersion={devicesVersion} />
       </div>
     </>
   );
