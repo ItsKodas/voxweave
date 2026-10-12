@@ -20,6 +20,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "httpx>=0.27"]
+# faster-whisper itself is installed separately with --no-deps: it depends on the plain
+# onnxruntime package, which would overwrite onnxruntime-directml and disable GPU live mode.
+transcribe = ["ctranslate2>=4.0,<5", "huggingface-hub>=0.21", "tokenizers>=0.13,<1", "av>=11", "tqdm"]
 
 [tool.setuptools.packages.find]
 include = ["aivoice*"]
