@@ -21,10 +21,22 @@ def _exit_when_parent_dies(pid: int) -> None:
 def build_app():
     import onnxruntime as ort
 
+    from aivoice.importer import Importer
+    from aivoice.library import Library
+    from aivoice.recorder import Recorder
+    from aivoice.studio import Studio
+    from aivoice.transcribe import WhisperTranscriber
+
     data = config.data_dir()
-    manager = LiveManager(data, list_devices, default_engine_factory(data), SoundDeviceStreams(),
+    streams = SoundDeviceStreams()
+    manager = LiveManager(data, list_devices, default_engine_factory(data), streams,
                           refresh_devices=refresh_devices)
-    return create_app(manager, data, list_devices, ort.get_available_providers(), default_devices=default_devices)
+    library = Library(data)
+    # The model name is read when an import first needs it, so a bad setting cannot stop startup.
+    importer = Importer(library, WhisperTranscriber(lambda: config.whisper_model(data), data / "pretrained" / "whisper"))
+    studio = Studio(library, Recorder(streams), importer, list_devices)
+    return create_app(manager, data, list_devices, ort.get_available_providers(), default_devices=default_devices,
+                      studio=studio, library=library, importer=importer)
 
 
 def main() -> None:

@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from dataclasses import asdict
 from pathlib import Path
 from typing import Callable
@@ -49,8 +50,10 @@ class SettingsBody(BaseModel):
 
 def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list[Device]],
                providers: list[str], default_devices: Callable[[], dict] | None = None,
-               allowed_hosts: list[str] = ALLOWED_HOSTS) -> FastAPI:
+               allowed_hosts: list[str] = ALLOWED_HOSTS, studio=None, library=None, importer=None) -> FastAPI:
     app = FastAPI(title="AI Voice")
+    # Held while checking and then changing audio state, so recording and live mode cannot both win a race.
+    audio_state = threading.Lock()
 
     # Middleware added later runs earlier: Host check, then CORS, then the Origin check below.
     @app.middleware("http")
@@ -91,7 +94,10 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
 
     @app.post("/devices/refresh")
     def refresh_devices() -> dict:
-        manager.refresh_devices()
+        with audio_state:
+            if studio is not None and studio.recording:
+                raise ValueError("Stop recording before refreshing devices")
+            manager.refresh_devices()
         return device_payload()
 
     @app.get("/voices")
@@ -108,7 +114,10 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
 
     @app.post("/live/start")
     def start(body: StartBody) -> dict:
-        manager.start(StartConfig(**body.model_dump()))
+        with audio_state:
+            if studio is not None and studio.recording:
+                raise ValueError("Stop recording before starting live mode")
+            manager.start(StartConfig(**body.model_dump()))
         return manager.stats()
 
     @app.post("/live/stop")
@@ -144,5 +153,11 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
                 await asyncio.sleep(0.1)
         except (WebSocketDisconnect, RuntimeError):
             pass
+
+    if studio is not None:
+        from aivoice.api_library import library_router
+
+        app.include_router(library_router(studio, library, importer, lambda: bool(manager.stats()["running"]),
+                                          exclusive=audio_state))
 
     return app
