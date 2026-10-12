@@ -658,7 +658,7 @@ def test_voice_models_reflect_the_files_on_disk(tmp_path):
     add_model(tmp_path, trained.id)
     assert lib.get(trained.id).models == ["rvc"]
     assert lib.get(plain.id).models == []
-    assert [v.models for v in lib.list()] == [[], ["rvc"]] or [v.models for v in lib.list()] == [["rvc"], []]
+    assert {v.id: v.models for v in lib.list()} == {plain.id: [], trained.id: ["rvc"]}
 
 
 @pytest.mark.parametrize("meta, model", [(None, True), ("{nope", True), ('{"name": "x"}', True),
@@ -679,3 +679,32 @@ def test_summary_carries_models_but_voice_json_does_not(tmp_path):
     manifest = json.loads((tmp_path / "voices.json").read_text(encoding="utf-8"))
     assert manifest[0]["models"] == ["rvc"]
     assert "models" not in json.loads((tmp_path / "voices" / voice.id / "voice.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("rate, ok", [("0", False), ("-5", False), ("true", False), ('"40000"', False),
+                                      ("40000.0", True), ("40000.5", False), ("1e999", False),
+                                      ("7999", False), ("192001", False), ("48000", True)])
+def test_only_a_sane_sample_rate_counts(tmp_path, rate, ok):
+    lib = Library(tmp_path)
+    voice = lib.create("V")
+    add_model(tmp_path, voice.id, meta='{"name": "x", "sample_rate": %s}' % rate)
+    assert lib.get(voice.id).models == (["rvc"] if ok else [])
+
+
+@pytest.mark.parametrize("kind", ["inf", "nested", "directory"])
+def test_a_damaged_model_file_never_affects_the_library(tmp_path, kind):
+    lib = Library(tmp_path)
+    voice = lib.create("V")
+    add_model(tmp_path, voice.id, meta=None)
+    target = tmp_path / "voices" / voice.id / "models" / "rvc" / "voice.json"
+    if kind == "inf":
+        target.write_text('{"sample_rate": 1e999}')
+    elif kind == "nested":
+        target.write_text("[" * 200000 + "]" * 200000)
+    else:
+        target.mkdir()
+    assert [v.id for v in lib.list()] == [voice.id]
+    assert lib.get(voice.id).models == []
+    lib.add_clip(voice.id, audio(), "hello", "recorded")
+    assert lib.update_text(voice.id, 1, "changed").text == "changed"
+    assert lib.get(voice.id).models == []

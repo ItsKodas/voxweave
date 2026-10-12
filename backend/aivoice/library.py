@@ -47,7 +47,11 @@ class Voice:
     created: str
     clips: list[Clip] = field(default_factory=list)
     next_index: int = 1  # persisted so a deleted clip's number is never handed out again
-    models: list[str] = field(default_factory=list)  # derived from the files on disk, never stored in voice.json
+    rvc_sample_rate: int | None = None  # of the trained RVC model; derived from disk, never stored in voice.json
+
+    @property
+    def models(self) -> list[str]:
+        return ["rvc"] if self.rvc_sample_rate is not None else []
 
     @property
     def minutes(self) -> float:
@@ -102,14 +106,21 @@ def _damage(exc: Exception) -> str:
 
 
 def rvc_model_sample_rate(voice_folder: Path) -> int | None:
-    """The sample rate of the trained RVC model in a voice folder, or None when it has no usable model."""
+    """The sample rate of the trained RVC model in a voice folder, or None when it has no usable model.
+
+    Whatever is in the model folder (missing, huge, nested, a directory, nonsense), this never raises."""
     folder = voice_folder / "models" / "rvc"
     try:
         if not (folder / "model.onnx").is_file():
             return None
-        return int(json.loads((folder / "voice.json").read_text(encoding="utf-8"))["sample_rate"])
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        return None
+        rate = json.loads((folder / "voice.json").read_text(encoding="utf-8"))["sample_rate"]
+        if isinstance(rate, float) and rate.is_integer():
+            rate = int(rate)
+        if isinstance(rate, int) and not isinstance(rate, bool) and 8000 <= rate <= 192000:
+            return rate
+    except Exception:
+        pass
+    return None
 
 
 class Library:
@@ -132,9 +143,8 @@ class Library:
         raw = json.loads((folder / "voice.json").read_text(encoding="utf-8"))
         clips = [Clip(**c) for c in raw["clips"]]
         floor = max((c.index for c in clips), default=0) + 1
-        models = ["rvc"] if rvc_model_sample_rate(folder) is not None else []
         return Voice(voice_id, str(raw["name"]), str(raw["created"]), clips,
-                     max(int(raw.get("next_index", 1)), floor), models)
+                     max(int(raw.get("next_index", 1)), floor), rvc_model_sample_rate(folder))
 
     def _load(self, voice_id) -> Voice:
         try:

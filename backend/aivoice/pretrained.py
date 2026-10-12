@@ -2,7 +2,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from aivoice.library import Library, rvc_model_sample_rate
+from aivoice.library import Library
 
 VEC_FILE = "vec-768-layer-12.onnx"
 
@@ -29,13 +29,12 @@ def list_voices(data: Path) -> list[PretrainedVoice]:
     except Exception:  # one unreadable library must not take the exported voices down with it
         return voices
     for voice in library_voices:
-        folder = data / "voices" / voice.id / "models" / "rvc"
-        sample_rate = rvc_model_sample_rate(folder.parents[1])
-        if "rvc" not in voice.models or sample_rate is None or voice.id in taken:
+        if voice.rvc_sample_rate is None or voice.id in taken:
             continue
+        folder = data / "voices" / voice.id / "models" / "rvc"
         index = folder / "model.index"
         voices.append(PretrainedVoice(voice.id, voice.name, folder / "model.onnx",
-                                      index if index.is_file() else None, sample_rate))
+                                      index if index.is_file() else None, voice.rvc_sample_rate))
     return voices
 
 
