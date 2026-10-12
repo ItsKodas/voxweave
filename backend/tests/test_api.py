@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from aivoice.api import create_app
+from aivoice.api import ALLOWED_HOSTS, create_app
 from aivoice.manager import LiveManager
 from aivoice.presets import PRESETS
 from tests.test_live import FakeStreams, Identity
@@ -10,11 +10,17 @@ from tests.test_manager import DEVICES
 from tests.test_pretrained import add_voice
 
 
-def make_client(tmp_path, providers=("DmlExecutionProvider",)):
+DEFAULTS = {"default_input": 1, "default_output": 2}
+
+
+def make_client(tmp_path, providers=("DmlExecutionProvider",), refreshed=None):
     add_voice(tmp_path, "demo", index=True)
     streams = FakeStreams()
-    manager = LiveManager(tmp_path, lambda: DEVICES, lambda v: Identity(), streams)
-    return TestClient(create_app(manager, tmp_path, lambda: DEVICES, list(providers))), streams
+    refresh = (lambda: refreshed.append("refresh")) if refreshed is not None else None
+    manager = LiveManager(tmp_path, lambda: DEVICES, lambda v: Identity(), streams, refresh_devices=refresh)
+    app = create_app(manager, tmp_path, lambda: DEVICES, list(providers), default_devices=lambda: DEFAULTS,
+                     allowed_hosts=[*ALLOWED_HOSTS, "testserver"])
+    return TestClient(app), streams
 
 
 START = {"input_device": 1, "mic_device": 3, "voice": "demo"}
@@ -25,6 +31,35 @@ def test_devices(tmp_path):
     body = client.get("/devices").json()
     assert body["virtual_mic"] == 3
     assert body["devices"][0] == {"index": 1, "name": "Headset Mic", "max_input": 1, "max_output": 0}
+    assert body["default_input"] == 1 and body["default_output"] == 2
+
+
+def test_devices_without_a_defaults_source_reports_none(tmp_path):
+    manager = LiveManager(tmp_path, lambda: DEVICES, lambda v: Identity(), FakeStreams())
+    client = TestClient(create_app(manager, tmp_path, lambda: DEVICES, [], allowed_hosts=["testserver"]))
+    body = client.get("/devices").json()
+    assert body["default_input"] is None and body["default_output"] is None
+
+
+def test_refresh_devices_reinitialises_and_returns_the_device_payload(tmp_path):
+    refreshed = []
+    client, _ = make_client(tmp_path, refreshed=refreshed)
+    res = client.post("/devices/refresh")
+    assert res.status_code == 200
+    assert refreshed == ["refresh"]
+    assert res.json() == client.get("/devices").json()
+
+
+def test_refresh_devices_is_refused_while_live(tmp_path):
+    refreshed = []
+    client, _ = make_client(tmp_path, refreshed=refreshed)
+    client.post("/live/start", json=START)
+    res = client.post("/devices/refresh")
+    assert res.status_code == 400
+    assert res.json()["detail"] == "Stop live mode before refreshing devices"
+    assert refreshed == []
+    assert client.get("/live/stats").json()["running"] is True
+    client.post("/live/stop")
 
 
 def test_voices(tmp_path):
@@ -42,7 +77,7 @@ def test_presets(tmp_path):
 def test_setup_check(tmp_path):
     client, _ = make_client(tmp_path)
     body = client.get("/setup-check").json()
-    assert {c["id"] for c in body} == {"directml", "virtual_mic", "base_model", "voice"}
+    assert {c["id"] for c in body} == {"directml", "virtual_mic", "base_model", "voice", "settings"}
     assert next(c for c in body if c["id"] == "base_model")["ok"] is False
 
 
@@ -131,3 +166,89 @@ def test_websocket_accepts_allowed_origin(tmp_path):
     client, _ = make_client(tmp_path)
     with client.websocket_connect("/ws", headers={"Origin": "http://tauri.localhost"}) as ws:
         assert ws.receive_json()["running"] is False
+
+
+def test_monitor_only_start_needs_no_virtual_mic(tmp_path):
+    client, streams = make_client(tmp_path)
+    res = client.post("/live/start", json={"input_device": 1, "mic_device": None, "voice": "demo", "monitor_device": 2})
+    assert res.status_code == 200 and res.json()["running"] is True
+    assert [(s.kind, s.device) for s in streams.streams] == [("in", 1), ("out", 2)]
+    client.post("/live/stop")
+
+
+@pytest.mark.parametrize("body", [
+    {"input_device": 1, "mic_device": None, "voice": "demo"},
+    {"input_device": 1, "voice": "demo"},
+])
+def test_start_with_neither_output_is_400(tmp_path, body):
+    client, streams = make_client(tmp_path)
+    res = client.post("/live/start", json=body)
+    assert res.status_code == 400
+    assert res.json()["detail"] == "Choose a virtual mic or a listen device"
+    assert streams.streams == []
+
+
+def test_production_hosts_are_loopback_only():
+    assert ALLOWED_HOSTS == ["127.0.0.1", "localhost"]
+
+
+def test_wrong_host_is_rejected(tmp_path):
+    client, streams = make_client(tmp_path)
+    assert client.get("/health", headers={"Host": "evil.example"}).status_code == 400
+    res = client.post("/live/start", json=START, headers={"Host": "evil.example:8000"})
+    assert res.status_code == 400
+    assert streams.streams == []
+
+
+def test_loopback_hosts_are_accepted_with_any_port(tmp_path):
+    client, _ = make_client(tmp_path)
+    assert client.get("/health", headers={"Host": "127.0.0.1:51234"}).status_code == 200
+    assert client.get("/health", headers={"Host": "localhost:51234"}).status_code == 200
+
+
+def test_default_app_rejects_hosts_other_than_loopback(tmp_path):
+    manager = LiveManager(tmp_path, lambda: DEVICES, lambda v: Identity(), FakeStreams())
+    client = TestClient(create_app(manager, tmp_path, lambda: DEVICES, []))
+    assert client.get("/health").status_code == 400  # the test client's host is "testserver"
+    assert client.get("/health", headers={"Host": "127.0.0.1:1"}).status_code == 200
+
+
+def test_websocket_with_wrong_host_is_rejected(tmp_path):
+    client, _ = make_client(tmp_path)
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect("/ws", headers={"Host": "evil.example"}):
+            pass
+
+
+def test_foreign_origin_cannot_stop_live_mode(tmp_path):
+    client, streams = make_client(tmp_path)
+    client.post("/live/start", json=START)
+    res = client.post("/live/stop", headers={"Origin": "https://evil.example"})
+    assert res.status_code == 403
+    assert client.get("/live/stats").json()["running"] is True
+    assert all(s.active for s in streams.streams)
+    client.post("/live/stop")
+
+
+@pytest.mark.parametrize("origin", ["https://evil.example", "null", "http://localhost:9999"])
+def test_foreign_origin_cannot_start_or_change_anything(tmp_path, origin):
+    client, streams = make_client(tmp_path)
+    headers = {"Origin": origin}
+    assert client.post("/live/start", json=START, headers=headers).status_code == 403
+    assert client.post("/live/mode", json={"mode": "muted"}, headers=headers).status_code == 403
+    assert client.patch("/live/settings", json={"pitch_shift": 1}, headers=headers).status_code == 403
+    assert client.post("/devices/refresh", headers=headers).status_code == 403
+    assert streams.streams == []
+
+
+def test_allowed_origin_and_no_origin_can_stop(tmp_path):
+    client, _ = make_client(tmp_path)
+    assert client.post("/live/stop", headers={"Origin": "http://tauri.localhost"}).status_code == 200
+    assert client.post("/live/stop").status_code == 200
+
+
+def test_foreign_origin_can_still_read(tmp_path):
+    client, _ = make_client(tmp_path)
+    res = client.get("/health", headers={"Origin": "https://evil.example"})
+    assert res.status_code == 200
+    assert "access-control-allow-origin" not in res.headers

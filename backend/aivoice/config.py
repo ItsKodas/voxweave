@@ -22,3 +22,14 @@ def load_settings(data: Path) -> dict:
     except (OSError, ValueError):
         pass
     return settings
+
+
+def dml_device_id(data: Path) -> int:
+    """The DirectML device chosen in settings.json. Raises ValueError when it is not an integer."""
+    raw = load_settings(data)["dml_device_id"]
+    if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+        raise ValueError("dml_device_id in settings.json must be an integer")
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError("dml_device_id in settings.json must be an integer") from None

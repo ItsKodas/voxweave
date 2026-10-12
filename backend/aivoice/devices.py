@@ -26,14 +26,39 @@ def _sd(sd):
     return sd
 
 
+def _wasapi(sd) -> tuple[int | None, dict | None]:
+    return next(((i, api) for i, api in enumerate(sd.query_hostapis()) if "WASAPI" in api["name"]), (None, None))
+
+
 def list_devices(sd=None) -> list[Device]:
     sd = _sd(sd)
-    wasapi = next((i for i, api in enumerate(sd.query_hostapis()) if "WASAPI" in api["name"]), None)
+    wasapi, _ = _wasapi(sd)
     return [
         Device(d["index"], d["name"], d["max_input_channels"], d["max_output_channels"])
         for d in sd.query_devices()
         if d["hostapi"] == wasapi
     ]
+
+
+def default_devices(sd=None) -> dict[str, int | None]:
+    """The Windows default recording and playback devices (WASAPI indices), None when there is none."""
+    _, api = _wasapi(_sd(sd))
+
+    def pick(key: str) -> int | None:
+        index = api.get(key, -1) if api else -1
+        return index if index >= 0 else None
+
+    return {"default_input": pick("default_input_device"), "default_output": pick("default_output_device")}
+
+
+def refresh_devices(sd=None) -> None:
+    """Re-initialises PortAudio, which only enumerates devices when it starts.
+
+    This invalidates every open stream, so it must only be called while no session is running.
+    """
+    sd = _sd(sd)
+    sd._terminate()
+    sd._initialize()
 
 
 def find_virtual_mic(devices: list[Device]) -> Device | None:

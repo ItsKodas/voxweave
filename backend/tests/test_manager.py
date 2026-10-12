@@ -3,7 +3,8 @@ import pytest
 
 from aivoice.devices import Device
 from aivoice.manager import LiveManager, StartConfig, default_engine_factory
-from tests.test_live import FakeStreams, Identity
+from aivoice.pretrained import list_voices
+from tests.test_live import FakeStreams, Identity, wait_until
 from tests.test_pretrained import add_voice
 
 DEVICES = [
@@ -60,6 +61,8 @@ def test_monitor_adds_second_output(setup):
         (dict(mic_device=1), "not an output"),
         (dict(monitor_device=1), "not an output"),
         (dict(monitor_device=3), "must be different"),
+        (dict(mic_device=None), "Choose a virtual mic or a listen device"),
+        (dict(mic_device=None, monitor_device=1), "not an output"),
         (dict(input_device=99), "no longer available"),
         (dict(voice="ghost"), "Unknown voice"),
         (dict(preset="nope"), "Unknown preset"),
@@ -165,12 +168,76 @@ def test_engine_is_warmed_up_before_streams_open(tmp_path):
     assert np.all(np.array(order[1:3]) == "open")
 
 
-def test_default_engine_factory_rejects_non_integer_device_id(tmp_path):
-    (tmp_path / "settings.json").write_text('{"dml_device_id": "gpu"}')
+@pytest.mark.parametrize("raw", ['"gpu"', "true", "1.5", "[0]", "null"])
+def test_default_engine_factory_rejects_bad_device_id_only_when_an_engine_is_built(tmp_path, raw):
+    add_voice(tmp_path, "demo")
+    (tmp_path / "settings.json").write_text('{"dml_device_id": %s}' % raw)
+    build = default_engine_factory(tmp_path)  # must not raise: the backend has to come up
     with pytest.raises(ValueError, match="dml_device_id in settings.json must be an integer"):
-        default_engine_factory(tmp_path)
+        build(list_voices(tmp_path)[0])
+
+
+def test_bad_device_id_is_a_clear_start_error_and_opens_nothing(tmp_path):
+    add_voice(tmp_path, "demo")
+    (tmp_path / "settings.json").write_text('{"dml_device_id": "gpu"}')
+    streams = FakeStreams()
+    manager = LiveManager(tmp_path, lambda: DEVICES, default_engine_factory(tmp_path), streams)
+    with pytest.raises(ValueError, match="dml_device_id in settings.json must be an integer"):
+        manager.start(cfg())
+    assert streams.streams == []
 
 
 def test_default_engine_factory_accepts_integer_device_id(tmp_path):
     (tmp_path / "settings.json").write_text('{"dml_device_id": 1}')
     assert callable(default_engine_factory(tmp_path))
+
+
+def test_monitor_only_start_opens_input_and_one_output(setup):
+    manager, streams, _ = setup
+    manager.start(cfg(mic_device=None, monitor_device=2))
+    assert [(s.kind, s.device) for s in streams.streams] == [("in", 1), ("out", 2)]
+    stats = manager.stats()
+    assert stats["running"] is True and stats["latency_ms"] > 0
+    manager.update(monitor_gain=0.5, monitor_enabled=False)
+    manager.set_mode("muted")
+    manager.stop()
+    assert all(s.closed for s in streams.streams)
+
+
+def test_refresh_devices_calls_the_refresher_when_idle(tmp_path):
+    calls = []
+    manager = LiveManager(tmp_path, lambda: DEVICES, lambda v: Identity(), FakeStreams(),
+                          refresh_devices=lambda: calls.append("refresh"))
+    manager.refresh_devices()
+    assert calls == ["refresh"]
+
+
+def test_refresh_devices_is_refused_while_running(tmp_path):
+    add_voice(tmp_path, "demo")
+    calls = []
+    streams = FakeStreams()
+    manager = LiveManager(tmp_path, lambda: DEVICES, lambda v: Identity(), streams,
+                          refresh_devices=lambda: calls.append("refresh"))
+    manager.start(cfg())
+    try:
+        with pytest.raises(ValueError, match="Stop live mode before refreshing devices"):
+            manager.refresh_devices()
+        assert calls == []
+        assert manager.stats()["running"] is True
+        assert all(s.active for s in streams.streams)
+    finally:
+        manager.stop()
+
+
+def test_refresh_devices_closes_a_failed_session_first_and_keeps_its_error(tmp_path):
+    add_voice(tmp_path, "demo")
+    order = []
+    streams = FakeStreams()
+    manager = LiveManager(tmp_path, lambda: DEVICES, lambda v: Identity(), streams,
+                          refresh_devices=lambda: order.append(all(s.closed for s in streams.streams)))
+    manager.start(cfg())
+    streams.streams[0].active = False  # unplugged: the worker notices and fails the session
+    assert wait_until(lambda: manager.stats()["running"] is False)
+    manager.refresh_devices()
+    assert order == [True]
+    assert "disconnected" in manager.stats()["error"]

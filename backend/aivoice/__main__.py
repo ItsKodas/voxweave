@@ -8,7 +8,7 @@ import uvicorn
 
 from aivoice import config
 from aivoice.api import create_app
-from aivoice.devices import SoundDeviceStreams, list_devices
+from aivoice.devices import SoundDeviceStreams, default_devices, list_devices, refresh_devices
 from aivoice.manager import LiveManager, default_engine_factory
 
 
@@ -22,8 +22,9 @@ def build_app():
     import onnxruntime as ort
 
     data = config.data_dir()
-    manager = LiveManager(data, list_devices, default_engine_factory(data), SoundDeviceStreams())
-    return create_app(manager, data, list_devices, ort.get_available_providers())
+    manager = LiveManager(data, list_devices, default_engine_factory(data), SoundDeviceStreams(),
+                          refresh_devices=refresh_devices)
+    return create_app(manager, data, list_devices, ort.get_available_providers(), default_devices=default_devices)
 
 
 def main() -> None:

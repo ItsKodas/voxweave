@@ -6,7 +6,7 @@ from typing import Callable
 
 import numpy as np
 
-from aivoice.config import SAMPLE_RATE, load_settings
+from aivoice.config import SAMPLE_RATE, dml_device_id
 from aivoice.devices import Device, get_device
 from aivoice.live import LiveSession
 from aivoice.presets import resolve
@@ -24,7 +24,7 @@ _IDLE = {
 @dataclass
 class StartConfig:
     input_device: int
-    mic_device: int
+    mic_device: int | None  # None is listen-only: no virtual mic output at all
     voice: str
     monitor_device: int | None = None
     monitor_gain: float = 1.0
@@ -46,15 +46,10 @@ def _check_gain(value: float) -> None:
 def default_engine_factory(data: Path) -> Callable[[PretrainedVoice], object]:
     from aivoice.engines.rvc import RvcEngine, make_session
 
-    raw = load_settings(data)["dml_device_id"]
-    if isinstance(raw, bool) or not isinstance(raw, (int, str)):
-        raise ValueError("dml_device_id in settings.json must be an integer")
-    try:
-        device_id = int(raw)
-    except ValueError:
-        raise ValueError("dml_device_id in settings.json must be an integer") from None
-
     def build(voice: PretrainedVoice):
+        # Read here, not at backend start: a bad settings.json must not stop the backend from
+        # coming up, it has to surface as a Start error and in the setup check.
+        device_id = dml_device_id(data)
         return RvcEngine(voice.model_path, vec_model_path(data), voice.sample_rate, voice.index_path,
                          session_factory=partial(make_session, device_id=device_id))
 
@@ -63,12 +58,13 @@ def default_engine_factory(data: Path) -> Callable[[PretrainedVoice], object]:
 
 class LiveManager:
     def __init__(self, data: Path, list_devices: Callable[[], list[Device]], engine_factory, stream_factory,
-                 sample_rate: int = SAMPLE_RATE):
+                 sample_rate: int = SAMPLE_RATE, refresh_devices: Callable[[], None] | None = None):
         self._data = data
         self._list_devices = list_devices
         self._engine_factory = engine_factory
         self._stream_factory = stream_factory
         self._sr = sample_rate
+        self._refresh_devices = refresh_devices
         self._lock = threading.Lock()
         self._session: LiveSession | None = None
         self._last_error: str | None = None
@@ -82,11 +78,15 @@ class LiveManager:
             source = get_device(devices, cfg.input_device)
             if source.max_input < 1:
                 raise ValueError(f"{source.name} is not an input device")
-            outputs = {"mic": cfg.mic_device}
+            outputs: dict[str, int] = {}
+            if cfg.mic_device is not None:
+                outputs["mic"] = cfg.mic_device
             if cfg.monitor_device is not None:
                 if cfg.monitor_device == cfg.mic_device:
                     raise ValueError("Monitor and virtual mic must be different devices")
                 outputs["monitor"] = cfg.monitor_device
+            if not outputs:
+                raise ValueError("Choose a virtual mic or a listen device")
             for index in outputs.values():
                 device = get_device(devices, index)
                 if device.max_output < 1:
@@ -105,7 +105,8 @@ class LiveManager:
                 raise ValueError(f"Could not load voice {voice.name}: {exc}") from exc
             processor.pitch_shift = cfg.pitch_shift
             router = Router(self._sr * 2)
-            router.add_output("mic")
+            if "mic" in outputs:
+                router.add_output("mic")
             if "monitor" in outputs:
                 router.add_output("monitor", cfg.monitor_gain)
             session = LiveSession(processor, router, self._sr, self._stream_factory, cfg.input_device, outputs)
@@ -124,6 +125,19 @@ class LiveManager:
         with self._lock:
             self._stop_locked()
             self._last_error = None
+
+    def refresh_devices(self) -> None:
+        """Re-enumerates audio devices. Refused while live: it tears down every open stream."""
+        with self._lock:
+            session = self._session
+            if session is not None:
+                if session.running:
+                    raise ValueError("Stop live mode before refreshing devices")
+                # A failed session: make sure its streams are closed, but keep its error on show.
+                self._last_error = session.error
+                self._stop_locked()
+            if self._refresh_devices is not None:
+                self._refresh_devices()
 
     def _require(self) -> LiveSession:
         if self._session is None or not self._session.running:

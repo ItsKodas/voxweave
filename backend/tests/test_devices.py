@@ -1,15 +1,28 @@
 import numpy as np
 import pytest
 
-from aivoice.devices import Device, DeviceError, SoundDeviceStreams, find_virtual_mic, get_device, list_devices
+from aivoice.devices import (Device, DeviceError, SoundDeviceStreams, default_devices, find_virtual_mic, get_device,
+                             list_devices, refresh_devices)
 
 
 class FakeSd:
-    def __init__(self):
+    def __init__(self, default_input=1, default_output=2):
         self.opened = []
+        self.calls = []
+        self.default_input, self.default_output = default_input, default_output
 
     def query_hostapis(self):
-        return ({"name": "MME"}, {"name": "Windows WASAPI"})
+        return (
+            {"name": "MME", "default_input_device": 0, "default_output_device": -1},
+            {"name": "Windows WASAPI", "default_input_device": self.default_input,
+             "default_output_device": self.default_output},
+        )
+
+    def _terminate(self):
+        self.calls.append("terminate")
+
+    def _initialize(self):
+        self.calls.append("initialize")
 
     def query_devices(self):
         return [
@@ -112,3 +125,26 @@ def test_output_callback_emits_silence_when_fill_raises():
 
 def test_output_callback_emits_silence_on_wrong_length():
     assert _run_output(lambda n: np.full(n + 1, 0.5, dtype=np.float32)).tolist() == [[0.0, 0.0]] * 3
+
+
+def test_default_devices_come_from_the_wasapi_host_api():
+    assert default_devices(FakeSd()) == {"default_input": 1, "default_output": 2}
+
+
+def test_default_devices_are_none_when_windows_has_no_default():
+    assert default_devices(FakeSd(default_input=-1, default_output=-1)) == {
+        "default_input": None, "default_output": None}
+
+
+def test_default_devices_are_none_without_wasapi():
+    class NoWasapi(FakeSd):
+        def query_hostapis(self):
+            return ({"name": "MME", "default_input_device": 0, "default_output_device": 0},)
+
+    assert default_devices(NoWasapi()) == {"default_input": None, "default_output": None}
+
+
+def test_refresh_devices_reinitialises_portaudio():
+    sd = FakeSd()
+    refresh_devices(sd)
+    assert sd.calls == ["terminate", "initialize"]
