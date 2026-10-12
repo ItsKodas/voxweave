@@ -34,28 +34,36 @@ class StreamProcessor:
         self._tail[:] = 0.0
         return np.zeros(self.chunk, dtype=np.float32)
 
+    def _record_timing(self, start: float) -> None:
+        self.infer_ms = (time.perf_counter() - start) * 1000.0
+        if self.infer_ms > self.params.chunk_ms:
+            self.slow_chunks += 1
+
     def process(self, block: np.ndarray) -> np.ndarray:
         if len(block) != self.chunk:
             raise ValueError(f"expected {self.chunk} samples, got {len(block)}")
-        self._input = np.concatenate([self._input[self.chunk :], block.astype(np.float32)])
+        incoming = np.zeros(self.chunk, dtype=np.float32) if self.mode == "muted" else block.astype(np.float32)
+        self._input = np.concatenate([self._input[self.chunk :], incoming])
         if self.mode == "muted":
             return self._silence()
+        start = time.perf_counter()
         try:
-            start = time.perf_counter()
             out = self.engine.convert(self._input, self.sample_rate, self.pitch_shift, self.params)
-            self.infer_ms = (time.perf_counter() - start) * 1000.0
+            with np.errstate(over="ignore"):
+                out = np.asarray(out, dtype=np.float32)
             if out.shape != self._input.shape or not np.all(np.isfinite(out)):
                 raise ValueError("engine returned invalid audio")
         except Exception as exc:  # noqa: BLE001 - any engine fault must fail closed
+            self._record_timing(start)
             self._failures += 1
+            self._silence()
             if self._failures >= self._max_failures:
                 raise EngineFailure(f"Voice conversion failed {self._failures} times in a row: {exc}") from exc
-            return self._silence()
+            return np.zeros(self.chunk, dtype=np.float32)
+        self._record_timing(start)
         self._failures = 0
-        if self.infer_ms > self.params.chunk_ms:
-            self.slow_chunks += 1
-        segment = out[-(self.chunk + self.crossfade) :].astype(np.float32)
+        segment = out[-(self.chunk + self.crossfade) :]
         head = segment[: self.crossfade] * self._fade_in + self._tail * self._fade_out
         emitted = np.concatenate([head, segment[self.crossfade : self.chunk]])
         self._tail = segment[self.chunk :].copy()
-        return emitted
+        return np.clip(emitted, -1.0, 1.0)
