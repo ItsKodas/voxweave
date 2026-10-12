@@ -1,51 +1,69 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { useEffect, useRef, useState } from "react";
+import { api } from "./api";
 import "./App.css";
+import { LivePanel } from "./LivePanel";
+import { SetupCheck } from "./SetupCheck";
+import { useStats } from "./useStats";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+function useBackendReady(): boolean {
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    let stop = false;
+    const poll = async () => {
+      while (!stop) {
+        try {
+          await api.health();
+          setReady(true);
+          return;
+        } catch {
+          await new Promise((r) => setTimeout(r, 300));
+        }
+      }
+    };
+    poll();
+    return () => {
+      stop = true;
+    };
+  }, []);
+  return ready;
+}
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
-  }
+function Main() {
+  const stats = useStats();
+  const latest = useRef(stats);
+  latest.current = stats;
+
+  useEffect(() => {
+    const toggle = listen("live-toggle", () => {
+      const s = latest.current;
+      if (s.running) api.mode(s.mode === "muted" ? "converted" : "muted").catch(() => undefined);
+    });
+    const mode = listen<string>("live-mode", (event) => {
+      if (event.payload === "off") api.stop().catch(() => undefined);
+      else if (latest.current.running) api.mode(event.payload as "converted" | "muted").catch(() => undefined);
+    });
+    return () => {
+      toggle.then((off) => off());
+      mode.then((off) => off());
+    };
+  }, []);
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+    <>
+      <SetupCheck />
+      <LivePanel stats={stats} />
+    </>
   );
 }
 
-export default App;
+export default function App() {
+  const ready = useBackendReady();
+  return (
+    <main>
+      <h1>AI Voice</h1>
+      {ready ? <Main /> : <p>Starting the voice engine…</p>}
+      <footer>Ctrl+Alt+V mutes and unmutes while live.</footer>
+    </main>
+  );
+}
