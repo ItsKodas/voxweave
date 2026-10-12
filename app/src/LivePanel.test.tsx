@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LivePanel } from "./LivePanel";
@@ -109,5 +109,73 @@ describe("LivePanel", () => {
     render(<LivePanel stats={IDLE} />);
     expect(await screen.findByText(/no voice models/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Start" })).toBeDisabled();
+  });
+
+  it("shows Unmute while muted and unmutes", async () => {
+    render(<LivePanel stats={{ ...IDLE, running: true, mode: "muted" }} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Unmute" }));
+    expect(api.mode).toHaveBeenCalledWith("converted");
+  });
+
+  it("does not store an override of 0 when a number field is cleared", async () => {
+    render(<LivePanel stats={IDLE} />);
+    const start = await ready();
+    await userEvent.click(screen.getByText("Advanced"));
+    await userEvent.clear(screen.getByLabelText("Chunk (ms)"));
+    await userEvent.click(start);
+    expect(vi.mocked(api.start).mock.calls[0][0].overrides).toBeNull();
+  });
+
+  it("shows an error when a pitch change fails while running", async () => {
+    vi.mocked(api.settings).mockRejectedValue(new Error("pitch failed"));
+    render(<LivePanel stats={{ ...IDLE, running: true, mode: "converted" }} />);
+    await screen.findByRole("button", { name: "Stop" });
+    fireEvent.change(screen.getByLabelText(/Pitch shift/), { target: { value: "3" } });
+    expect(await screen.findByRole("alert")).toHaveTextContent("pitch failed");
+  });
+
+  it("keeps the monitor checkbox unchanged and shows the error when disabling fails", async () => {
+    const { rerender } = render(<LivePanel stats={IDLE} />);
+    await ready();
+    await userEvent.click(screen.getByLabelText("Listen to output"));
+    rerender(<LivePanel stats={{ ...IDLE, running: true, mode: "converted" }} />);
+    vi.mocked(api.settings).mockRejectedValue(new Error("monitor failed"));
+    await userEvent.click(screen.getByLabelText("Listen to output"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("monitor failed");
+    expect(screen.getByLabelText("Listen to output")).toBeChecked();
+  });
+
+  it("unchecks the monitor only after the backend accepts", async () => {
+    const { rerender } = render(<LivePanel stats={IDLE} />);
+    await ready();
+    await userEvent.click(screen.getByLabelText("Listen to output"));
+    rerender(<LivePanel stats={{ ...IDLE, running: true, mode: "converted" }} />);
+    await userEvent.click(screen.getByLabelText("Listen to output"));
+    expect(api.settings).toHaveBeenCalledWith({ monitor_enabled: false });
+    await vi.waitFor(() => expect(screen.getByLabelText("Listen to output")).not.toBeChecked());
+  });
+
+  it("shows an error when a monitor volume change fails", async () => {
+    const { rerender } = render(<LivePanel stats={IDLE} />);
+    await ready();
+    await userEvent.click(screen.getByLabelText("Listen to output"));
+    rerender(<LivePanel stats={{ ...IDLE, running: true, mode: "converted" }} />);
+    vi.mocked(api.settings).mockRejectedValue(new Error("gain failed"));
+    fireEvent.change(screen.getByLabelText("Listen volume"), { target: { value: "1.5" } });
+    expect(await screen.findByRole("alert")).toHaveTextContent("gain failed");
+  });
+
+  it("shows the external action error prop in the alert", async () => {
+    render(<LivePanel stats={IDLE} actionError="Could not mute: boom" />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Could not mute: boom");
+  });
+
+  it("shows a load failure with a Retry button that reloads", async () => {
+    vi.mocked(api.devices).mockRejectedValueOnce(new Error("load failed"));
+    render(<LivePanel stats={IDLE} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("load failed");
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await ready()).toBeEnabled();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });

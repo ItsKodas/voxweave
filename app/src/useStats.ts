@@ -13,13 +13,29 @@ export function useStats(): Stats {
     let socket: WebSocket | null = null;
     let closed = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const retry = () => {
+      if (!closed) timer = setTimeout(connect, 1000);
+    };
     const connect = async () => {
-      socket = new WebSocket(await api.wsUrl());
-      socket.onmessage = (event) => setStats(JSON.parse(event.data));
-      socket.onclose = () => {
-        setStats((prev) => ({ ...IDLE, error: prev.error }));
-        if (!closed) timer = setTimeout(connect, 1000);
-      };
+      try {
+        const url = await api.wsUrl();
+        if (closed) return;
+        const ws = new WebSocket(url);
+        socket = ws;
+        ws.onmessage = (event) => {
+          try {
+            setStats(JSON.parse(event.data));
+          } catch {
+            // ignore a malformed frame
+          }
+        };
+        ws.onclose = () => {
+          setStats((prev) => ({ ...IDLE, error: prev.error }));
+          retry();
+        };
+      } catch {
+        retry();
+      }
     };
     connect();
     return () => {

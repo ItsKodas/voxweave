@@ -16,7 +16,7 @@ function Meter({ label, level }: { label: string; level: number }) {
   );
 }
 
-export function LivePanel({ stats }: { stats: Stats }) {
+export function LivePanel({ stats, actionError = null }: { stats: Stats; actionError?: string | null }) {
   const [devices, setDevices] = useState<Device[]>([]);
   const [voices, setVoices] = useState<Voice[]>([]);
   const [presets, setPresets] = useState<Record<string, Params>>({});
@@ -36,7 +36,11 @@ export function LivePanel({ stats }: { stats: Stats }) {
   const inputs = useMemo(() => devices.filter((d) => d.max_input > 0), [devices]);
   const outputs = useMemo(() => devices.filter((d) => d.max_output > 0), [devices]);
 
-  useEffect(() => {
+  const [loadFailed, setLoadFailed] = useState(false);
+
+  const load = () => {
+    setError(null);
+    setLoadFailed(false);
     Promise.all([api.devices(), api.voices(), api.presets()])
       .then(([d, v, p]) => {
         setDevices(d.devices);
@@ -50,8 +54,15 @@ export function LivePanel({ stats }: { stats: Stats }) {
         setVoice(v[0]?.id ?? "");
         setLoaded(true);
       })
-      .catch((e: Error) => setError(e.message));
-  }, []);
+      .catch((e: Error) => {
+        setError(e.message);
+        setLoadFailed(true);
+      });
+  };
+
+  useEffect(load, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const reportFailure = (e: unknown) => setError((e as Error).message);
 
   const run = async (action: () => Promise<unknown>) => {
     setBusy(true);
@@ -74,7 +85,7 @@ export function LivePanel({ stats }: { stats: Stats }) {
         monitor_device: monitorOn ? monitor : null,
         monitor_gain: monitorGain,
         preset,
-        overrides: Object.keys(overrides).length ? overrides : null,
+        overrides: changedOverrides(),
         pitch_shift: pitch,
       }),
     );
@@ -82,20 +93,35 @@ export function LivePanel({ stats }: { stats: Stats }) {
   const base = presets[preset];
   const value = <K extends keyof Params>(key: K): Params[K] | "" =>
     (overrides[key] ?? base?.[key] ?? "") as Params[K] | "";
-  const override = <K extends keyof Params>(key: K, v: Params[K]) =>
+  /** Number fields show the typed override, with the preset value as placeholder. */
+  const typed = (key: keyof Params) => overrides[key] ?? "";
+  const placeholder = (key: keyof Params) => (base ? String(base[key]) : "");
+  const override = <K extends keyof Params>(key: K, v: Params[K] | "") =>
     setOverrides((prev) => {
       const next = { ...prev };
-      if (base && base[key] === v) delete next[key];
-      else next[key] = v;
+      if (v === "") delete next[key];
+      else next[key] = v as Params[K];
       return next;
     });
+  const numberChange =
+    (key: "chunk_ms" | "crossfade_ms" | "context_ms" | "index_rate") =>
+    (e: React.ChangeEvent<HTMLInputElement>) =>
+      override(key, e.target.value === "" ? "" : Number(e.target.value));
+  /** Only values that differ from the chosen preset are sent as overrides. */
+  const changedOverrides = (): Partial<Params> | null => {
+    const diff = Object.fromEntries(
+      Object.entries(overrides).filter(([k, v]) => !base || base[k as keyof Params] !== v),
+    ) as Partial<Params>;
+    return Object.keys(diff).length ? diff : null;
+  };
 
   const canStart = !busy && input !== null && mic !== null && voice !== "";
-  const shownError = error ?? stats.error;
+  const shownError = error ?? actionError ?? stats.error;
 
   return (
     <section className="live">
       {shownError && <p role="alert" className="error">{shownError}</p>}
+      {loadFailed && <button onClick={load}>Retry</button>}
       {loaded && voices.length === 0 && <p className="hint">No voice models installed. See the README to add one.</p>}
 
       <label>
@@ -116,8 +142,13 @@ export function LivePanel({ stats }: { stats: Stats }) {
           checked={monitorOn}
           disabled={stats.running && !monitorOn}
           onChange={(e) => {
-            setMonitorOn(e.target.checked);
-            if (stats.running) run(() => api.settings({ monitor_enabled: e.target.checked }));
+            const enabled = e.target.checked;
+            if (!stats.running) setMonitorOn(enabled);
+            else
+              run(async () => {
+                await api.settings({ monitor_enabled: enabled });
+                setMonitorOn(enabled);
+              });
           }}
         />
         Listen to output
@@ -137,7 +168,7 @@ export function LivePanel({ stats }: { stats: Stats }) {
               onChange={(e) => {
                 const gain = Number(e.target.value);
                 setMonitorGain(gain);
-                if (stats.running) api.settings({ monitor_gain: gain }).catch(() => undefined);
+                if (stats.running) api.settings({ monitor_gain: gain }).catch(reportFailure);
               }}
             />
           </label>
@@ -169,7 +200,7 @@ export function LivePanel({ stats }: { stats: Stats }) {
           onChange={(e) => {
             const semitones = Number(e.target.value);
             setPitch(semitones);
-            if (stats.running) api.settings({ pitch_shift: semitones }).catch(() => undefined);
+            if (stats.running) api.settings({ pitch_shift: semitones }).catch(reportFailure);
           }}
         />
       </label>
@@ -178,18 +209,18 @@ export function LivePanel({ stats }: { stats: Stats }) {
         <summary>Advanced</summary>
         <label>
           Chunk (ms)
-          <input type="number" value={value("chunk_ms")} disabled={stats.running}
-            onChange={(e) => override("chunk_ms", Number(e.target.value))} />
+          <input type="number" value={typed("chunk_ms")} placeholder={placeholder("chunk_ms")} disabled={stats.running}
+            onChange={numberChange("chunk_ms")} />
         </label>
         <label>
           Crossfade (ms)
-          <input type="number" value={value("crossfade_ms")} disabled={stats.running}
-            onChange={(e) => override("crossfade_ms", Number(e.target.value))} />
+          <input type="number" value={typed("crossfade_ms")} placeholder={placeholder("crossfade_ms")} disabled={stats.running}
+            onChange={numberChange("crossfade_ms")} />
         </label>
         <label>
           Context (ms)
-          <input type="number" value={value("context_ms")} disabled={stats.running}
-            onChange={(e) => override("context_ms", Number(e.target.value))} />
+          <input type="number" value={typed("context_ms")} placeholder={placeholder("context_ms")} disabled={stats.running}
+            onChange={numberChange("context_ms")} />
         </label>
         <label>
           Pitch detector
@@ -201,8 +232,8 @@ export function LivePanel({ stats }: { stats: Stats }) {
         </label>
         <label>
           Index blend
-          <input type="number" min={0} max={1} step={0.05} value={value("index_rate")} disabled={stats.running}
-            onChange={(e) => override("index_rate", Number(e.target.value))} />
+          <input type="number" min={0} max={1} step={0.05} value={typed("index_rate")} placeholder={placeholder("index_rate")} disabled={stats.running}
+            onChange={numberChange("index_rate")} />
         </label>
       </details>
 

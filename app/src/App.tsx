@@ -1,9 +1,9 @@
-import { listen } from "@tauri-apps/api/event";
 import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import "./App.css";
 import { LivePanel } from "./LivePanel";
 import { SetupCheck } from "./SetupCheck";
+import { useLiveShortcuts } from "./useLiveShortcuts";
 import { useStats } from "./useStats";
 
 function useBackendReady(): boolean {
@@ -33,26 +33,14 @@ function Main() {
   const stats = useStats();
   const latest = useRef(stats);
   latest.current = stats;
+  const [actionError, setActionError] = useState<string | null>(null);
 
-  useEffect(() => {
-    const toggle = listen("live-toggle", () => {
-      const s = latest.current;
-      if (s.running) api.mode(s.mode === "muted" ? "converted" : "muted").catch(() => undefined);
-    });
-    const mode = listen<string>("live-mode", (event) => {
-      if (event.payload === "off") api.stop().catch(() => undefined);
-      else if (latest.current.running) api.mode(event.payload as "converted" | "muted").catch(() => undefined);
-    });
-    return () => {
-      toggle.then((off) => off());
-      mode.then((off) => off());
-    };
-  }, []);
+  useLiveShortcuts(latest, setActionError);
 
   return (
     <>
       <SetupCheck />
-      <LivePanel stats={stats} />
+      <LivePanel stats={stats} actionError={actionError} />
     </>
   );
 }
