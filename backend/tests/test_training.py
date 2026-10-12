@@ -1,7 +1,10 @@
+import importlib.util
 import json
+import logging
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -17,6 +20,8 @@ FAIL = {"ok": False, "checks": [
     {"id": "ffmpeg", "ok": False, "message": "ffmpeg not found on PATH"},
 ]}
 CLIPS_CHANGED = "The clips changed since this training run started. Start a new training run."
+STOPPED = "The training process stopped unexpectedly. See training/worker.log and training/worker.out.log."
+WORKER = Path(__file__).resolve().parents[2] / "trainer" / "worker.py"
 
 
 class FakeHandle:
@@ -25,15 +30,56 @@ class FakeHandle:
         self.code = None
         self.kills = 0
         self.kill_error = None
+        self.on_kill = None
 
     def poll(self):
         return self.code
 
     def kill_tree(self):
         self.kills += 1
+        if self.on_kill is not None:
+            self.on_kill()
         if self.kill_error is not None:
             raise self.kill_error
         self.code = 1
+
+
+class FakeProc:
+    def __init__(self, pid, killable=True):
+        self.pid = pid
+        self.alive = True
+        self.killable = killable
+
+
+class FakeTools:
+    """Stands in for the real process inspection: no test ever looks at, or kills, a real process."""
+
+    def __init__(self):
+        self.trees = {}  # pid -> the processes a snapshot of that pid's tree returns
+        self.calls = []
+        self.taskkill_code = 0
+
+    def tree(self, pid):
+        self.calls.append(("tree", pid))
+        return list(self.trees.get(pid, []))
+
+    def taskkill(self, pid):
+        self.calls.append(("taskkill", pid))
+        if self.taskkill_code == 0:
+            for proc in self.trees.get(pid, []):
+                proc.alive = not proc.killable
+        return self.taskkill_code
+
+    def kill(self, proc):
+        self.calls.append(("kill", proc.pid))
+        if proc.killable:
+            proc.alive = False
+
+    def survivors(self, procs, timeout):
+        return [p for p in procs if p.alive]
+
+    def count(self, what):
+        return sum(1 for call in self.calls if call[0] == what)
 
 
 class Rig:
@@ -51,6 +97,7 @@ class Rig:
         self.alive = set()
         self.workers = {}  # pid -> experiment it is really a worker for
         self.killed = []
+        self.tools = FakeTools()
         self.clock = 1000.0
         self.manager = None
 
@@ -70,7 +117,8 @@ class Rig:
         self.manager = TrainingManager(
             self.data, self.library, self.trainer, launch=self.launch, verify=self.verify,
             pid_alive=lambda pid: pid in self.alive, now=lambda: self.clock,
-            is_worker=lambda pid, experiment: self.workers.get(pid) == experiment, kill_pid=self.killed.append)
+            is_worker=lambda pid, experiment: self.workers.get(pid) == experiment, kill_pid=self.killed.append,
+            processes=self.tools)
         return self.manager
 
     def voice(self, name="Narrator", minutes=6.0):
@@ -195,10 +243,12 @@ def test_start_launches_the_worker_and_writes_the_job_record(rig):
         "--parent-pid", str(os.getpid()), "--name=Dad's voice",
     ]
     assert all(isinstance(a, str) for a in argv)
-    assert log_path == voice_dir / "training" / "worker.log"
+    # The worker's own stdout and stderr: never worker.log, which only the worker itself writes.
+    assert log_path == voice_dir / "training" / "worker.out.log"
+    assert not any("worker.log" in a for a in argv)
     assert rig.record(voice) == {
         "voice_id": voice, "experiment": f"voice-{voice}", "epochs": 120, "batch_size": 16, "state": "running",
-        "started": 1000.0, "finished": None, "worker_pid": 4000, "error": None}
+        "started": 1000.0, "finished": None, "worker_pid": 4000, "error": None, "resumable": None}
     assert status["state"] == "running" and status["voice_id"] == voice
     assert status["epochs"] == 120 and status["percent"] == 0.0 and status["started"] == 1000.0
     assert rig.manager.running is True
@@ -223,17 +273,65 @@ def test_a_worker_that_cannot_be_started_is_a_readable_error_and_keeps_the_last_
     assert rig.manager.running is False
 
 
+def full_disk(path, obj):
+    raise OSError(28, "No space left on device")
+
+
 def test_a_record_that_cannot_be_saved_stops_the_worker_it_just_started(rig, monkeypatch):
     voice = rig.voice()
-
-    def full_disk(path, obj):
-        raise OSError(28, "No space left on device")
-
-    monkeypatch.setattr(training, "_atomic_json", full_disk)
+    monkeypatch.setattr(training, "atomic_json", full_disk)
     with pytest.raises(TrainingError, match="No space left"):
         rig.manager.start(voice)
     assert rig.handles[0].kills == 1
     assert rig.manager.running is False
+    s = rig.manager.status(voice)
+    assert (s["state"], s["error"]) == ("failed", "Could not save the training record: No space left on device")
+
+
+def test_a_worker_whose_record_and_kill_both_fail_stays_owned_until_it_is_stopped(rig, monkeypatch):
+    voice, other = rig.voice("a"), rig.voice("b")
+    monkeypatch.setattr(training, "atomic_json", full_disk)
+    real_launch = rig.launch
+
+    def launch(argv, log_path):
+        handle = real_launch(argv, log_path)
+        handle.kill_error = RuntimeError("access denied")
+        return handle
+
+    rig.manager._launch = launch
+    with pytest.raises(TrainingError, match="Could not save the training record: No space left"):
+        rig.manager.start(voice)
+    assert rig.handles[0].kills == 1
+    assert rig.manager.running is True and rig.manager.status()["state"] == "cancelling"
+    with pytest.raises(TrainingError, match="already running"):
+        rig.manager.start(other)
+    with pytest.raises(TrainingError, match="training"):
+        rig.manager.forget(voice)
+
+    rig.handles[0].kill_error = None
+    assert rig.manager.status()["state"] == "cancelling" and rig.handles[0].kills == 1  # not before 5 seconds
+    rig.clock += 5
+    s = rig.manager.status()
+    assert (s["state"], s["error"]) == ("failed", "Could not save the training record: No space left on device")
+    assert rig.handles[0].kills == 2 and rig.manager.running is False
+
+
+def test_any_failure_after_the_launch_stops_the_worker(rig):
+    voice = rig.voice()
+
+    class BadHandle(FakeHandle):
+        @property
+        def pid(self):
+            raise RuntimeError("no pid")
+
+        @pid.setter
+        def pid(self, value):
+            pass
+
+    rig.manager._launch = lambda argv, log_path: rig.handles.append(BadHandle(1)) or rig.handles[-1]
+    with pytest.raises(TrainingError, match="Could not start training: no pid"):
+        rig.manager.start(voice)
+    assert rig.handles[0].kills == 1 and rig.manager.running is False
 
 
 # 3. Progress
@@ -359,7 +457,7 @@ def test_an_exit_without_a_final_line_is_an_unexpected_stop(rig):
     rig.handles[0].code = -1073741819
     s = rig.manager.status()
     assert s["state"] == "failed"
-    assert s["error"] == "The training process stopped unexpectedly. See training/worker.log."
+    assert s["error"] == STOPPED
     assert s["percent"] == 12.0
 
 
@@ -457,7 +555,187 @@ def test_a_kill_that_fails_is_retried_and_the_job_stays_cancelling(rig):
     rig.handles[0].kill_error = RuntimeError("access denied")
     assert rig.manager.status()["state"] == "cancelling" and rig.manager.running is True
     rig.handles[0].kill_error = None
-    assert rig.manager.status()["state"] == "cancelled" and rig.handles[0].kills == 3  # status, running, status
+    rig.clock += 4
+    assert rig.manager.status()["state"] == "cancelling" and rig.handles[0].kills == 1  # one try every 5 seconds
+    rig.clock += 1
+    assert rig.manager.status()["state"] == "cancelled" and rig.handles[0].kills == 2
+
+
+def test_status_returns_while_a_slow_kill_is_in_progress(rig):
+    voice = rig.voice()
+    rig.manager.start(voice)
+    rig.manager.cancel()
+    rig.clock += 90
+    started, release = threading.Event(), threading.Event()
+
+    def slow_kill():
+        started.set()
+        assert release.wait(30)
+
+    rig.handles[0].on_kill = slow_kill
+    killer = threading.Thread(target=rig.manager.status)
+    killer.start()
+    try:
+        assert started.wait(30)
+        seen = []
+        other = threading.Thread(target=lambda: seen.append((rig.manager.status()["state"], rig.manager.running)))
+        other.start()
+        other.join(30)
+        assert seen == [("cancelling", True)]  # returned at once, and did not start a second kill
+        assert rig.handles[0].kills == 1
+    finally:
+        release.set()
+        killer.join(30)
+    assert rig.manager.status()["state"] == "cancelled" and rig.handles[0].kills == 1
+
+
+def test_status_from_many_threads_while_a_job_runs_and_is_cancelled(rig):
+    voice = rig.voice()
+    stop, errors, m = threading.Event(), [], rig.manager
+
+    def hammer():
+        try:
+            while not stop.is_set():
+                assert m.status()["state"] in ("idle", "running", "cancelling", "cancelled")
+                assert m.status(voice)["voice_id"] == voice
+                m.running
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=hammer) for _ in range(4)]
+    for t in threads:
+        t.start()
+    try:
+        m.start(voice)
+        for n in range(1, 40):
+            rig.progress(voice, line(percent=float(n), epoch=n, epochs=200))
+            m.status()
+        m.cancel()
+        rig.finish(voice, 2, cancelled=True, percent=40.0)
+        final = m.status()
+    finally:
+        stop.set()
+        for t in threads:
+            t.join(30)
+    assert errors == []
+    assert (final["state"], final["percent"]) == ("cancelled", 40.0)
+    assert rig.record(voice)["state"] == "cancelled" and m.running is False and len(rig.launches) == 1
+
+
+# The worker's processes are really gone before a job is called stopped
+
+
+def test_the_workers_tree_is_remembered_but_only_looked_at_every_ten_seconds(rig):
+    voice = rig.voice()
+    rig.manager.start(voice)
+    rig.tools.trees[4000] = [FakeProc(4000), FakeProc(4001)]
+    for _ in range(5):
+        rig.manager.status()
+    assert rig.tools.count("tree") == 1
+    rig.clock += 9
+    rig.manager.status()
+    assert rig.tools.count("tree") == 1
+    rig.clock += 1
+    rig.manager.status()
+    assert rig.tools.count("tree") == 2
+
+
+def test_a_worker_that_dies_without_a_word_does_not_leave_its_trainer_running(rig, caplog):
+    voice = rig.voice()
+    rig.manager.start(voice)
+    shim, trainer, loader = FakeProc(4000), FakeProc(4001), FakeProc(4002)
+    rig.tools.trees[4000] = [shim, trainer, loader]
+    rig.manager.status()
+    rig.tools.trees[4000] = []  # the worker is gone, so its tree can no longer be listed
+    shim.alive = loader.alive = False
+    rig.handles[0].code = -1
+    with caplog.at_level(logging.WARNING, logger="aivoice.training"):
+        s = rig.manager.status()
+    assert (s["state"], s["error"]) == ("failed", STOPPED)
+    assert trainer.alive is False and ("kill", 4001) in rig.tools.calls and ("kill", 4002) not in rig.tools.calls
+    assert rig.handles[0].kills == 0  # the worker itself had already exited
+    assert "4001" in caplog.text
+
+
+def test_a_leftover_trainer_that_cannot_be_stopped_keeps_the_job_open_and_is_retried(rig):
+    voice, other = rig.voice("a"), rig.voice("b")
+    rig.manager.start(voice)
+    trainer = FakeProc(4001, killable=False)
+    rig.tools.trees[4000] = [FakeProc(4000), trainer]
+    rig.manager.status()
+    rig.tools.trees[4000][0].alive = False
+    rig.handles[0].code = 1
+    assert rig.manager.status()["state"] == "running" and rig.manager.running is True
+    with pytest.raises(TrainingError, match="already running"):
+        rig.manager.start(other)
+    trainer.killable = True
+    assert rig.manager.status()["state"] == "running"  # the next try is 5 seconds later
+    rig.clock += 5
+    assert rig.manager.status()["state"] == "failed" and trainer.alive is False
+
+
+def test_a_cancel_kill_also_ends_processes_the_worker_no_longer_owns(rig):
+    voice = rig.voice()
+    rig.manager.start(voice)
+    orphan = FakeProc(4005)
+    rig.tools.trees[4000] = [FakeProc(4000), orphan]
+    rig.manager.cancel()
+    rig.clock += 90
+    rig.tools.trees[4000][0].alive = False  # the handle's own kill only reaches what is still attached
+    assert rig.manager.status()["state"] == "cancelled"
+    assert rig.handles[0].kills == 1 and orphan.alive is False
+
+
+def test_kill_tree_snapshots_first_and_succeeds_when_everything_is_gone():
+    tools = FakeTools()
+    tools.trees[50] = [FakeProc(50), FakeProc(51)]
+    training._kill_tree(50, tools)
+    assert tools.calls == [("tree", 50), ("taskkill", 50)]
+    assert not any(p.alive for p in tools.trees[50])
+
+
+def test_kill_tree_ends_processes_directly_when_taskkill_fails():
+    tools = FakeTools()
+    tools.taskkill_code = 1
+    tools.trees[50] = [FakeProc(50), FakeProc(51)]
+    training._kill_tree(50, tools)
+    assert tools.calls == [("tree", 50), ("taskkill", 50), ("kill", 50), ("kill", 51)]
+
+    def no_taskkill(pid):
+        raise FileNotFoundError("taskkill")
+
+    tools = FakeTools()
+    tools.taskkill = no_taskkill
+    tools.trees[50] = [FakeProc(50)]
+    training._kill_tree(50, tools)
+    assert tools.trees[50][0].alive is False
+
+
+def test_kill_tree_raises_when_a_child_survives_everything():
+    tools = FakeTools()
+    tools.trees[50] = [FakeProc(50), FakeProc(51, killable=False)]
+    with pytest.raises(training.KillFailed, match="51"):
+        training._kill_tree(50, tools)
+    assert ("kill", 51) in tools.calls
+
+
+def test_a_surviving_child_keeps_the_job_cancelling_until_a_later_kill_works(tmp_path, monkeypatch):
+    rig = Rig(tmp_path)
+    monkeypatch.setattr(training.subprocess, "Popen", FakePopen)
+    rig.launch = lambda argv, log_path: training._launch_worker(argv, log_path, rig.tools)
+    rig.build()
+    voice = rig.voice()
+    child = FakeProc(4243, killable=False)
+    rig.tools.trees[4242] = [FakeProc(4242), child]
+    rig.manager.start(voice)
+    rig.manager.cancel()
+    rig.clock += 90
+    assert rig.manager.status()["state"] == "cancelling" and rig.manager.running is True
+    assert rig.tools.count("taskkill") == 1
+    child.killable = True
+    rig.clock += 5
+    assert rig.manager.status()["state"] == "cancelled" and child.alive is False
+    assert rig.tools.count("taskkill") == 2
 
 
 # 6. Resume
@@ -525,19 +803,51 @@ def test_resume_is_refused_when_there_is_nothing_to_resume(rig):
     assert not rig.job_dir(never).exists()
 
 
-def test_a_run_whose_clips_changed_fails_with_the_workers_message_and_cannot_be_resumed_again(rig):
+def test_the_worker_says_whether_a_failed_run_can_be_resumed(rig):
     voice = rig.voice()
     rig.write_record(voice, state="interrupted")
     rig.checkpoint(voice)
     rig.build()
     rig.manager.start(voice, resume=True)
-    rig.finish(voice, 1, error=CLIPS_CHANGED)
+    rig.finish(voice, 1, error="Something only the worker understands", resumable=False)
     s = rig.manager.status()
-    assert (s["state"], s["error"], s["can_resume"]) == ("failed", CLIPS_CHANGED, False)
-    with pytest.raises(TrainingError, match="no interrupted training run"):
-        rig.manager.start(voice, resume=True)
-    rig.manager.start(voice)  # a fresh run is still allowed
-    assert "--resume" not in rig.launches[-1][0]
+    assert (s["state"], s["can_resume"]) == ("failed", False)
+    assert rig.record(voice)["resumable"] is False
+    rig.build()  # and it is remembered across a restart
+    assert rig.manager.status(voice)["can_resume"] is False
+
+    # It is a hint for the screen, not a lock: once the user has put the clips back, the resume is theirs to try.
+    rig.manager.start(voice, resume=True)
+    assert "--resume" in rig.launches[-1][0]
+    rig.finish(voice, 1, error=CLIPS_CHANGED, resumable=True)
+    assert rig.manager.status()["can_resume"] is True  # the worker's word beats the text of the error
+    assert rig.record(voice)["resumable"] is True
+
+
+@pytest.mark.parametrize("error", [CLIPS_CHANGED, "The saved training state could not be read"])
+def test_an_older_worker_that_gives_no_hint_is_judged_by_its_error(rig, error):
+    voice = rig.voice()
+    rig.write_record(voice, state="interrupted")
+    rig.checkpoint(voice)
+    rig.build()
+    rig.manager.start(voice, resume=True)
+    rig.finish(voice, 1, error=error, resumable="no")  # not a boolean: as good as absent
+    s = rig.manager.status()
+    assert (s["state"], s["error"], s["can_resume"]) == ("failed", error, False)
+    assert rig.record(voice)["resumable"] is None
+    rig.manager.start(voice, resume=True)  # still allowed
+    assert len(rig.launches) == 2
+
+
+def test_the_fallback_error_texts_are_the_workers_own():
+    if not WORKER.is_file():
+        pytest.skip("trainer/worker.py is not in this checkout, so its messages cannot be compared")
+    spec = importlib.util.spec_from_file_location("aivoice_training_worker_for_manager", WORKER)
+    worker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(worker)
+    constants = [v for k, v in vars(worker).items() if k.isupper() and isinstance(v, str)]
+    for text in training.NEVER_RESUMABLE:
+        assert any(c.startswith(text) for c in constants), text
 
 
 def test_a_failed_run_with_a_checkpoint_can_be_resumed(rig):
@@ -578,6 +888,36 @@ def test_a_worker_left_alive_by_a_dead_backend_is_killed_not_adopted(rig):
     assert rig.killed == [777]
     assert rig.record(voice)["state"] == "interrupted"
     assert rig.manager.running is False and rig.manager.status()["state"] == "interrupted"
+
+
+def test_a_recovery_kill_that_fails_is_logged_with_the_pid(rig, caplog):
+    voice = rig.voice()
+    rig.write_record(voice, state="running", finished=None, worker_pid=777)
+    rig.alive.add(777)
+    rig.workers[777] = f"voice-{voice}"
+
+    def kill(pid):
+        raise training.KillFailed("processes still running: 778")
+
+    rig.killed = type("Kills", (), {"append": staticmethod(kill)})()
+    with caplog.at_level(logging.WARNING, logger="aivoice.training"):
+        rig.build()
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "777" in r.getMessage()]
+    assert warnings and "778" in warnings[-1].getMessage()
+    assert rig.record(voice)["state"] == "interrupted"
+
+
+def test_the_default_recovery_kill_is_the_verified_tree_kill(rig):
+    voice = rig.voice()
+    rig.write_record(voice, state="running", finished=None, worker_pid=777)
+    rig.alive.add(777)
+    child = FakeProc(778)
+    rig.tools.trees[777] = [FakeProc(777), child]
+    rig.tools.taskkill_code = 1
+    TrainingManager(rig.data, rig.library, rig.trainer, launch=rig.launch, verify=rig.verify,
+                    pid_alive=lambda pid: pid in rig.alive, now=lambda: rig.clock,
+                    is_worker=lambda pid, experiment: True, processes=rig.tools)
+    assert rig.tools.calls[:2] == [("tree", 777), ("taskkill", 777)] and child.alive is False
 
 
 def test_a_live_pid_that_is_not_this_voices_worker_is_never_killed(rig):
@@ -718,6 +1058,23 @@ def test_status_is_not_blocked_while_the_environment_is_checked(rig):
     assert len(rig.launches) == 1
 
 
+@pytest.mark.parametrize("stop", ["cancel", "shutdown"])
+def test_a_start_cancelled_during_the_environment_check_never_launches(rig, stop):
+    voice = rig.voice()
+
+    def verify(fast):
+        getattr(rig.manager, stop)()
+        return PASS
+
+    rig.manager._verify = verify
+    with pytest.raises(TrainingError, match="Training was cancelled before it started"):
+        rig.manager.start(voice)
+    assert rig.launches == [] and rig.manager.running is False and not rig.job_dir(voice).exists()
+    rig.manager._verify = rig.verify
+    rig.manager.start(voice)  # the request does not linger
+    assert len(rig.launches) == 1
+
+
 # 10. Forget
 
 
@@ -748,6 +1105,30 @@ def test_forget_removes_the_experiment_and_small_model_but_not_while_training(ri
     rig.manager.forget(voice)  # nothing left: not an error
 
 
+def test_forget_deletes_outside_the_lock_and_holds_the_voice_meanwhile(rig, monkeypatch):
+    voice, other = rig.voice("a"), rig.voice("b")
+    rig.checkpoint(voice)
+    seen = []
+    real = training.shutil.rmtree
+
+    def slow_rmtree(path, *args, **kwargs):
+        t = threading.Thread(target=lambda: seen.append(rig.manager.status()["state"]))
+        t.start()
+        t.join(30)  # would never finish if the delete ran under the manager's lock
+        with pytest.raises(TrainingError, match="being removed"):
+            rig.manager.start(voice)
+        rig.manager.start(other)
+        real(path, *args, **kwargs)
+
+    monkeypatch.setattr(training.shutil, "rmtree", slow_rmtree)
+    rig.manager.forget(voice)
+    assert seen == ["idle"]
+    assert not rig.experiment_dir(voice).exists() and len(rig.launches) == 1
+    rig.finish(other, 0, ok=True)
+    rig.manager.status()
+    rig.manager.start(voice)  # and the hold is released
+
+
 @pytest.mark.parametrize("bad", ["..", "../..", "a/b", "", None, "Voice", "mute"])
 def test_forget_only_touches_experiment_folders_of_voice_ids(rig, bad):
     logs = rig.trainer / "rvc" / "logs"
@@ -776,31 +1157,27 @@ def test_shutdown_stops_the_worker_and_marks_the_job_interrupted(rig):
 # The real process helpers, without starting a real process
 
 
-def test_default_launch_is_windowless_detached_from_the_console_and_never_a_shell_string(tmp_path, monkeypatch):
+class FakePopen:
+    pid = 4242
     calls = []
 
-    class FakePopen:
-        pid = 4242
+    def __init__(self, argv, **kwargs):
+        FakePopen.calls.append((argv, kwargs))
 
-        def __init__(self, argv, **kwargs):
-            calls.append((argv, kwargs))
-            self.waits = 0
+    def poll(self):
+        return None
 
-        def poll(self):
-            return None
 
-        def wait(self, timeout=None):
-            self.waits += 1
-            return 1
-
-    ran = []
+def test_default_launch_is_windowless_detached_from_the_console_and_never_a_shell_string(tmp_path, monkeypatch):
+    monkeypatch.setattr(FakePopen, "calls", [])
     monkeypatch.setattr(training.subprocess, "Popen", FakePopen)
-    monkeypatch.setattr(training.subprocess, "run", lambda argv, **kw: ran.append((argv, kw)))
-    log_path = tmp_path / "worker.log"
+    tools = FakeTools()
+    tools.trees[4242] = [FakeProc(4242), FakeProc(4243)]
+    log_path = tmp_path / "worker.out.log"
     argv = ["C:\\AI Voice\\python.exe", "-P", "C:\\AI Voice\\worker.py", "--name=A B"]
-    handle = training._launch_worker(argv, log_path)
+    handle = training._launch_worker(argv, log_path, tools)
 
-    (popen_argv, kwargs), = calls
+    (popen_argv, kwargs), = FakePopen.calls
     assert popen_argv == argv and kwargs.get("shell", False) is False
     assert kwargs["creationflags"] == subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
     assert kwargs["stdin"] == subprocess.DEVNULL and kwargs["stderr"] == subprocess.STDOUT
@@ -808,9 +1185,30 @@ def test_default_launch_is_windowless_detached_from_the_console_and_never_a_shel
     assert handle.pid == 4242 and handle.poll() is None
 
     handle.kill_tree()
-    (kill_argv, kill_kwargs), = ran
-    assert kill_argv == ["taskkill", "/PID", "4242", "/T", "/F"]
-    assert kill_kwargs["creationflags"] == subprocess.CREATE_NO_WINDOW and kill_kwargs.get("shell", False) is False
+    assert tools.calls == [("tree", 4242), ("taskkill", 4242)]
+    assert not any(p.alive for p in tools.trees[4242])
+
+
+def test_the_real_taskkill_is_a_windowless_argument_list_and_reports_its_exit_code(monkeypatch):
+    ran = []
+
+    def fake_run(argv, **kwargs):
+        ran.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 128)
+
+    monkeypatch.setattr(training.subprocess, "run", fake_run)
+    assert training.ProcessTools().taskkill(4242) == 128
+    (argv, kwargs), = ran
+    assert argv == ["taskkill", "/PID", "4242", "/T", "/F"]
+    assert kwargs["creationflags"] == subprocess.CREATE_NO_WINDOW and kwargs.get("shell", False) is False
+
+
+def test_the_real_process_snapshot_on_this_process():
+    tools = training.ProcessTools()
+    tree = tools.tree(os.getpid())
+    assert tree[0].pid == os.getpid()
+    assert [p.pid for p in tools.survivors(tree[:1], 0)] == [os.getpid()]
+    assert tools.tree(-1) == [] and tools.survivors([], 0) == []
 
 
 def test_default_verify_runs_the_script_with_the_backends_python(tmp_path, monkeypatch):

@@ -79,6 +79,9 @@ def _atomic_json(path: Path, obj) -> None:
     replace_file(tmp, path)
 
 
+atomic_json = _atomic_json  # the public name, for other modules
+
+
 def _atomic_text(path: Path, text: str) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")
