@@ -121,3 +121,32 @@ Everything below was exercised only with fake devices, generated audio and a fak
 - Real Whisper transcription quality: how accurate `small.en` is on real recordings and on music or noisy files, the first-use download of about 500 MB, and import speed on this CPU. Whisper returns text such as "You" for near-silence, so quiet pieces are filtered by level, not by empty text.
 - Recording and live mode refusing each other on real hardware, and Refresh devices being refused during a take.
 - Added by the final fix wave, also tested only with fakes: the delete confirmation in the real webview (`window.confirm` inside Tauri); clip files landing in `data/trash/<voice-id>/clips/` on a real disk; the real Whisper package loading an already downloaded model with `local_files_only=True` and making no network request (the tests use a stand-in for the package, never the real one); the "Refused" lines reaching `data/backend.log`; the microphone list following Refresh devices with real devices.
+
+## Stage 2: complete list of decisions made during the build
+
+Copied from the build ledger when the stage was merged. Each line ends with what it costs if wrong.
+
+- Ruling: proceed without human plan review — the user instructed hands-free execution through all stages — if wrong: the plan can be amended and work redone on the branch before merge.
+- Ruling: transcripts default to English (small.en) — the user writes in English and the bundled prompts are English — if wrong: set whisper_model to a multilingual model; prompts would need a second language file.
+- Ruling: tasks are batched as 2+3, 4+5, 6+7 (small pure modules with complete code), each batch one implementer and one review — if wrong: a defect in one delays its pair.
+- Ruling: new Python packages (faster-whisper, ctranslate2, huggingface-hub, tokenizers, av, tqdm) and the ~480 MB Whisper model download are covered by the approved spec ("Whisper runs locally") and the hands-free instruction — if wrong: packages can be uninstalled and data/pretrained/whisper deleted.
+- Ruling: that sentence stays — past simple followed by present perfect is correct, natural English, and the original finding was a Minor — if wrong: one prompt line reads slightly oddly.
+- Ruling: Task 8 fix (backend only) and Task 10 (app/src only) run at the same time with separate implementers, each staging only its own directory — the two touch disjoint files and waiting costs wall-clock for no safety gain — if wrong: a git index.lock collision, which each is told to retry.
+- Ruling: clip audio is fetched by the frontend with fetch() and played from a blob URL instead of pointing <audio src> at the backend — fetch always sends Origin, so the new /library origin check works regardless of what Referer the webview sends for media requests — carried into Task 11 — if wrong: slightly more memory per played clip.
+- Ruling: the import status gains a `voice_id` field in the backend so the UI can tell whose job it is — simplest correct attribution; the router already tracks it — if wrong: one extra field in a status payload.
+- Ruling: Task 12's README is reviewed as part of the final whole-branch review instead of a separate task review — it is docs-only and will be revised again after the fix rounds — if wrong: a README inaccuracy survives one extra review hop.
+- Ruling: Task 11 fix round 1 also carries three earlier FIX AT FINAL items (failed-cancel UI state, voices lock in record_stop, same-site /library tightening) so the final review sees them fixed — if wrong: that fix round is larger and its re-review must cover more.
+- Ruling: deleted clips and takes replaced by a redo are moved to data/trash/<voice-id>/clips/ rather than erased, with a confirmation in the UI — recordings are irreplaceable and the README promises nothing is erased — if wrong: the trash folder grows until the user empties it.
+- Ruling: quiet imported audio is not auto-normalised; the result message tells the user how to fix it — changing a user's audio silently is riskier than a hint — if wrong: quiet recordings need an extra manual step.
+
+## Stage 2: left open after the final re-review
+
+- If every one of 999 candidate trash names for a clip is taken in the same second, the clip's files stay in the voice folder with a warning (nothing is overwritten).
+- Deleting a voice when the data/trash folder cannot be created returns an unreadable error.
+- A trashed recorded take restored by re-importing its .orig.wav comes back as an imported clip and no longer counts as that sentence being recorded.
+- A take that cannot be saved (for example a full disk) is reported clearly but its audio, held only in memory, is lost. Remedy if wanted: keep the last unsaved take in memory and offer Try saving again.
+- Nothing in stage 2 has been exercised by a human. See the stage 2 first-run checklist in the README; the first item (the Voices tab loads at all) checks the request-origin rule against the real webview.
+
+## Stage 3 planning note
+
+- The WSL2 Ubuntu distro on this PC is broken (its ext4.vhdx is missing). AMD now ships official PyTorch on Windows wheels with ROCm that list the RX 7900 XTX, so stage 3 evaluates native Windows training first.
