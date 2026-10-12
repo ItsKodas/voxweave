@@ -66,33 +66,58 @@ Recorded at the end of the stage 2 build. Source: the build ledger. Every ruling
 - Ruling: clip audio is fetched by the frontend with fetch() and played from a blob URL instead of pointing <audio src> at the backend — fetch always sends Origin, so the new /library origin check works regardless of what Referer the webview sends for media requests — carried into Task 11 — if wrong: slightly more memory per played clip.
 - Ruling: the import status gains a `voice_id` field in the backend so the UI can tell whose job it is — simplest correct attribution; the router already tracks it — if wrong: one extra field in a status payload.
 
+### Fixed during the build
+
+These were deferred or found open earlier in the build and are fixed in the code. Each names the commit.
+
+- Same-site requests to `/library`: a page on another localhost port could play clips by sending neither Origin nor Referer. Any request that carries Sec-Fetch-Site (other than "none") must now name the app in Origin or Referer. Fixed in bdbe5c6.
+- A voice delete could race the save inside `record_stop`. `record_stop` now takes the voices lock after the audio lock. Fixed in bdbe5c6.
+- The import status had no `voice_id`, so the import screen could adopt another voice's running import, and a second import in one mount could report the previous job's result (the two Important findings of the Task 11 review). The status now carries `voice_id` and a job number (bdbe5c6) and the screen follows only its own voice's job (97ed907).
+- A failed Cancel (or the cancel sent when the tab goes inactive) left the screen idle while the backend might still be recording. The recording controls now stay until a cancel is known to have succeeded, and the cancel is retried when the tab is active again. Fixed in 97ed907.
+- No test for a take over 20 seconds, and no test driving the locks with racing threads: both exist since 98807fa (`test_a_take_over_20_seconds_is_rejected_as_too_long`, `test_device_changes_wait_for_a_closing_microphone_stream`) and bdbe5c6 (`test_a_voice_delete_waits_for_a_take_that_is_being_saved`).
+
+Fixed in the final fix wave (the commits after 97ed907 on this branch; see `git log`):
+
+- Deleting a clip was one click and erased its files. It now asks first, and the files are moved to `data/trash/<voice-id>/clips/`; a redo moves the replaced take there too.
+- A disk failure while saving showed "Request failed (500)". Creating a voice, saving a clip, saving a transcript and deleting a clip now report a readable reason as a 400.
+- Creating a voice looped forever (holding the library lock) when `data/voices` could not be created because a file was in its way. Found while writing the disk-failure tests; it is now a readable error.
+- Whisper contacted Hugging Face on the first import of every backend process. A model that is on disk is now loaded with `local_files_only=True`, and hub telemetry is turned off.
+- The import screen polled the status five times a second for as long as the voice stayed selected. It now stops when nothing is running.
+- A damaged voice folder was skipped silently; it is now named in the log with the reason.
+- The WAV rename was not retried on Windows file-in-use errors; it shares the retry helper with the JSON writes now.
+- Reading a long file made a second full copy of the audio in memory.
+- No warning before a take got too long; the microphone list on the Voices tab did not follow Refresh devices; an emptied transcript was saved; a quiet import gave no hint; refused `/library` requests left no trace in the log.
+
 ### Deferred minor findings
 
-Copied from the ledger. Where the code at the end of the build shows an item was fixed since, it is marked.
+Copied from the ledger, with the items fixed since removed (see above). These are still open.
 
 - Task 1: minor (deferred): huggingface-hub has no upper bound (resolved 2.2.0); notes do not list transitive packages; Whisper returns "You" for near-silence (do not rely on empty transcripts)
-- Tasks 2+3: minor (deferred): duration cap not checked on resampler flush; peak memory for hour-long files; split_on_silence with tiny max_seconds or large pad_ms
+- Tasks 2+3: minor (deferred): duration cap not checked on resampler flush; peak memory for hour-long files (one avoidable copy was removed in the final fix wave; the decoded blocks and the joined array still exist side by side while they are joined); split_on_silence with tiny max_seconds or large pad_ms
 - Tasks 4+5: minor (deferred): `created` uses local time without an offset, so listing order can be wrong in the repeated daylight-saving hour
-- Task 8: minor (deferred): no test drives the lock with racing threads; no Task 8 test for a >20 s take
 - Task 9: minor (deferred): VoicesPanel load has no stale-response guard; error banner persists until next successful load; tabs lack aria-controls; confirm spy not restored in finally
-- Task 8: minor (deferred, FIX AT FINAL): a page on another localhost port is same-site and can still play clips; tighten /library so any browser request (Sec-Fetch-Site present) must carry an allowed Origin or Referer, now that the frontend fetches audio with fetch() [partly addressed: the /library check refuses a cross-site request that names no allowed Origin or Referer, but a same-site request (another port on the same host) with neither header is still allowed]
-- Task 8: minor (deferred, FIX AT FINAL): delete of a voice can race the save inside record_stop; take the voices lock in record_stop after the audio lock [still open: record_stop in api_library.py takes the audio lock only]
-- Task 8: minor (deferred): real webview headers unverified by a human; stop holds the audio lock through the disk save
-- Task 10: minor (deferred, FIX AT FINAL): a failed Cancel (or tab-inactive cancel) leaves the UI idle while the backend may still be recording, with no Stop/Cancel button to retry [still open: RecordSession.tsx clears its recording state before the cancel request is known to succeed]
+- Task 8: minor (deferred): real webview headers unverified by a human (a refused request is now logged with its headers, which makes this checkable on the first run); stop holds the audio lock through the disk save
 - Task 10: minor (deferred): tab going inactive during an in-flight Stop fires a concurrent cancel; in-flight-start test does not assert recordStop was not called
 
 ### Open at the end of the build
 
-- The Task 11 review found two Important issues (the mount probe in ImportDrop.tsx adopts a running import that belongs to another voice, and a second import in the same mount can report the previous job's result). The ruling above adds a `voice_id` field to the import status as the fix. At the time of writing the import status in `backend/aivoice/importer.py` has no `voice_id`, so check the ledger before relying on the Voices tab with two voices and an import running.
+- A take that cannot be written to disk is lost. `Studio.stop_recording` holds the take only in memory; when the save fails the user now gets a readable reason and the earlier take of that sentence is kept, but the new take cannot be retried or saved elsewhere. Keeping the audio for a retry is a design change, not done here.
+- A deleted clip can only be restored by hand (drop its `.orig.wav` from `data/trash/<voice-id>/clips/` onto the window to import it again). There is no undo in the app, and the app never empties the trash, so it grows until the user clears it.
+- A clip file that cannot be moved to the trash (in use, or the trash folder unusable) is left in the voice's `clips` folder as a stray: logged, never listed or served, and not cleaned up later.
+- The backend still accepts an empty transcript over the API; only the Clips list refuses to save one. An import can still produce a clip whose transcript is empty if Whisper returns nothing.
+- The quiet-import hint is a fixed sentence in the import screen; `backend/aivoice/importer.py` only counts skipped pieces, as before, and was not changed.
+- The local-only Whisper load falls back to the downloading load on any error, so a damaged copy of the model on disk leads to a network request (to repair it) rather than an error message. If the machine is offline at that point the import fails with the library's network error.
+- The log line for a skipped voice folder is written once per folder and reason per backend run, not on every listing.
 - The stage 1 items under "Still open after the final review" still apply.
 
 ### Not verified by a human
 
 Everything below was exercised only with fake devices, generated audio and a fake transcriber. The suites passing says nothing about these.
 
-- The whole "Stage 2 first run checklist" in `README.md` (11 steps).
+- The whole "Stage 2 first run checklist" in `README.md` (13 steps).
 - Real microphone recording: device selection, the level meter, the four rejection messages with a real voice and a real room, and that leaving the tab stops the microphone.
 - Drag and drop in the real Tauri window: that dropped file paths reach the Voices tab, and that nothing happens on the Live tab.
 - Clip playback in the real webview: clips are fetched with `fetch()` and played from a blob URL, and the `/library` origin check was written against the headers the webview is expected to send, not ones observed. If the real webview sends different Origin or Referer values, playback and every Voices call would fail with a 403.
 - Real Whisper transcription quality: how accurate `small.en` is on real recordings and on music or noisy files, the first-use download of about 500 MB, and import speed on this CPU. Whisper returns text such as "You" for near-silence, so quiet pieces are filtered by level, not by empty text.
 - Recording and live mode refusing each other on real hardware, and Refresh devices being refused during a take.
+- Added by the final fix wave, also tested only with fakes: the delete confirmation in the real webview (`window.confirm` inside Tauri); clip files landing in `data/trash/<voice-id>/clips/` on a real disk; the real Whisper package loading an already downloaded model with `local_files_only=True` and making no network request (the tests use a stand-in for the package, never the real one); the "Refused" lines reaching `data/backend.log`; the microphone list following Refresh devices with real devices.

@@ -130,33 +130,35 @@ Open the **Voices** tab. A dataset is a set of short clips of one voice, each wi
 
 ### Guided recording
 
-Under **Record**, choose the **Microphone** (the Windows default is preselected). The app shows one of 200 English sentences at a time.
+Under **Record**, choose the **Microphone** (the Windows default is preselected). The list follows **Refresh devices** on the Live tab: after plugging in a microphone, press it there and the microphone appears here too, with your chosen microphone still selected if it is still connected. The list never changes during a take. The app shows one of 200 English sentences at a time.
 
 - **Record** starts a take; read the sentence aloud. A level meter and the length of the take are shown.
 - **Stop** ends the take and checks it. If it is good the app says "Saved", plays it back so you can hear it, and offers **Next sentence** and **Redo**.
 - **Cancel** throws the take away without saving anything.
 - **Skip** moves to the next sentence you have not recorded yet, without recording this one.
-- **Redo** records the same sentence again. The new take replaces the earlier one, and only once the new take has been saved.
+- **Redo** records the same sentence again. The new take replaces the earlier one, and only once the new take has been saved. The earlier take is not erased: its files are moved to `data/trash/<voice-id>/clips/`.
 - **Next sentence** moves on to the next sentence that has no clip yet. When every sentence has one, the tab says so; import more audio or redo clips from the list.
 
 Silence at the start and end of a take is trimmed off before it is checked. A take is rejected, with nothing written to disk, for one of four reasons:
 
 1. **Too quiet:** nothing was heard, or the loudest moment was very low. Check the microphone and speak closer to it.
 2. **Too short:** less than 1 second of speech. Read the whole sentence before pressing Stop.
-3. **Too long:** more than 20 seconds of speech. Keep each take under 20 seconds. (The recorder itself stops collecting audio at 30 seconds and the screen shows "The take is at its maximum length"; press Stop to finish.)
+3. **Too long:** more than 20 seconds of speech. Keep each take under 20 seconds. Once a take passes 15 seconds the screen warns "Takes over 20 seconds are rejected. Finish the sentence and press Stop." (The recorder itself stops collecting audio at 30 seconds and the screen shows "The take is at its maximum length"; press Stop to finish.)
 4. **Distorted:** the signal hit its limit repeatedly (clipping). Move back from the microphone or lower its level.
 
 Switching to another tab during a take cancels it, so the microphone is never left running.
+
+If a take cannot be written to disk (the disk is full, or the folder is read-only or in use), the app says so with the reason, for example "Could not save the clip: No space left on device". Nothing is added to the voice, an earlier take of the same sentence is kept, and that take is gone: free some space and record the sentence again. The same kind of message appears if creating a voice, saving a transcript or deleting a clip fails.
 
 ### Importing existing audio
 
 Drop audio files anywhere on the app window while the Voices tab is open and a voice is selected. Accepted types: `.wav .flac .mp3 .ogg .opus .m4a .aac .wma`. You can drop up to 200 files at once, and a single file can be up to 60 minutes long.
 
-Each file is cut at pauses into clips of at most 15 seconds (continuous speech with no pauses is cut at its quietest points; pieces under 1 second are dropped), then transcribed in English on this computer. Pieces that are too quiet are skipped and counted rather than transcribed. A progress line shows the file being worked on, and **Cancel import** stops the job. When it finishes you see how many clips were added, and every file that failed is listed by name with the reason (not an audio file, not found, a folder, no speech found, and so on); the other files still import. Only one import runs at a time, and if the voice is deleted during an import the job stops with a message.
+Each file is cut at pauses into clips of at most 15 seconds (continuous speech with no pauses is cut at its quietest points; pieces under 1 second are dropped), then transcribed in English on this computer. Pieces that are too quiet are skipped and counted rather than transcribed. A progress line shows the file being worked on, and **Cancel import** stops the job. When it finishes you see how many clips were added and how many pieces were skipped as too quiet. If any were skipped, the line adds "Quiet recordings can be made louder in an audio editor and imported again." (the app never changes the loudness of your audio itself). Every file that failed is listed by name with the reason (not an audio file, not found, a folder, no speech found, and so on); the other files still import. Only one import runs at a time, and if the voice is deleted during an import the job stops with a message.
 
-**The first import downloads the speech model, about 500 MB, once.** There is no separate progress bar for it: the first file simply takes longer. It is stored in `data/pretrained/whisper/`.
+**The first import downloads the speech model, about 500 MB, once.** There is no separate progress bar for it: the first file simply takes longer. It is stored in `data/pretrained/whisper/`. Once it is there, the model is loaded from disk only: later imports, and later starts of the app, make no network request.
 
-**Check and correct the transcripts.** Automatic transcripts contain mistakes, and a wrong transcript teaches a wrong voice. In the **Clips** list each clip has its transcript in a box: edit the text and click away to save it (at most 500 characters). **Play** plays the clip (the app fetches the audio and plays it from memory) and **Delete** removes the clip. Clips are listed newest first, tagged "recorded" or with the name of the file they came from. Clip numbers are never reused, even after a deletion.
+**Check and correct the transcripts.** Automatic transcripts contain mistakes, and a wrong transcript teaches a wrong voice. In the **Clips** list each clip has its transcript in a box: edit the text and click away to save it (at most 500 characters). An emptied box is not saved: the old text comes back with "A transcript cannot be empty. Delete the clip if it is not usable." **Play** plays the clip (the app fetches the audio and plays it from memory). **Delete** asks first and then takes the clip out of the voice and moves its three files to `data/trash/<voice-id>/clips/`; nothing is erased by the app. There is no undo button, but the audio is still there: to get a clip back, drop its `.orig.wav` from the trash onto the window to import it again. Clips are listed newest first, tagged "recorded" or with the name of the file they came from. Clip numbers are never reused, even after a deletion.
 
 ### Where the data lives
 
@@ -167,10 +169,13 @@ data/voices/<id>/clips/0001.orig.wav   the clip at 48 kHz, mono, 16-bit
 data/voices/<id>/clips/0001.wav        the same clip at 16 kHz, for training
 data/voices/<id>/clips/0001.txt        the transcript (a copy; voice.json wins)
 data/trash/<id>-<timestamp>/           deleted voices
+data/trash/<id>/clips/                 deleted clips and replaced takes of a voice (same three files per clip)
 data/pretrained/whisper/               the downloaded speech model
 ```
 
-A voice folder that is damaged (for example a corrupt `voice.json`) is left alone and simply not listed; the other voices are unaffected.
+A voice folder that is damaged (for example a corrupt `voice.json`) is left alone and not listed; the other voices are unaffected. `data/backend.log` names the skipped folder and the reason (never the file's contents).
+
+The app never empties `data/trash/`. If a file in the trash already has the name a deleted clip would get, the clip is stored under a name with a timestamp added, so nothing in the trash is overwritten. Delete things from the trash yourself when you are sure you do not need them.
 
 ### Settings
 
@@ -184,11 +189,11 @@ A voice folder that is damaged (for example a corrupt `voice.json`) is left alon
 
 - Recording and live mode cannot run at the same time. Starting a recording while live mode runs is refused ("Stop live mode before recording") and so is the reverse ("Stop recording before starting live mode").
 - **Refresh devices** on the Live tab is refused while recording ("Stop recording before refreshing devices").
-- The backend answers requests under `/library` (which serves your recordings) only for the app itself; requests from other websites get a 403.
+- The backend answers requests under `/library` (which serves your recordings) only for the app itself; requests from other websites get a 403. Each refused request is written to `data/backend.log` as one line starting with "Refused", with its path and the Origin, Referer and Sec-Fetch-Site headers it carried. If every action on the Voices tab fails with "Origin not allowed", that line shows what the app's window actually sent.
 
 ### Privacy
 
-Recordings and imported audio stay on this computer. The only network use is the one-time download of the speech model from Hugging Face.
+Recordings and imported audio stay on this computer. The only network use is the one-time download of the speech model from Hugging Face, on the first import (and once more if you change `whisper_model` to a model you do not have yet). After that the model is loaded from disk without contacting Hugging Face, and the download library's usage reporting is switched off.
 
 ## Safety behaviour
 
@@ -220,17 +225,19 @@ A human needs to do this once; it has not been done yet. Start with `cd app && n
 
 A human needs to do this once; it has not been done yet. Start with `cd app && npm run tauri dev`, and open the **Voices** tab.
 
-1. Create a voice. It appears in the list with 0.0 min, 0 clips.
-2. Record a sentence and hear it played back. The minutes bar moves.
-3. Trigger each rejection: press **Record** and stay silent (too quiet); speak very quietly (too quiet); shout into the microphone (distorted); press **Stop** at once (too quiet or too short). Each gives a clear message and no clip appears.
-4. Try **Skip** and **Redo**: Skip shows a different sentence; Redo replaces the earlier take of the same sentence instead of adding a second clip.
-5. Record several sentences and watch the minutes bar grow.
-6. Drop a real speech file (a few minutes of talking) on the window. The first time the model downloads; then clips appear, at most 15 seconds each, with sensible English transcripts.
-7. Drop a file that is not audio (a renamed text file). It is reported as failed with its name, and nothing breaks.
-8. Edit a transcript, click away, and confirm the matching `data/voices/<id>/clips/NNNN.txt` file changed.
-9. Play a clip from the list; delete a clip and confirm its three files are gone and its number is not reused by the next clip.
-10. Delete a voice and find its folder in `data/trash/`.
-11. Start live mode and try to record: it is refused. Stop live mode, start a recording and try to start live mode: refused too.
+1. Open the **Voices** tab and confirm the voice list loads; if every action fails with a 403, see `data/backend.log` for the refused headers.
+2. Create a voice. It appears in the list with 0.0 min, 0 clips.
+3. Record a sentence and hear it played back. The minutes bar moves.
+4. Trigger each rejection: press **Record** and stay silent (too quiet); speak very quietly (too quiet); shout into the microphone (distorted); press **Stop** at once (too quiet or too short). Each gives a clear message and no clip appears. Let one take run past 15 seconds and see the warning about takes over 20 seconds.
+5. Try **Skip** and **Redo**: Skip shows a different sentence; Redo replaces the earlier take of the same sentence instead of adding a second clip, and the earlier take's three files are in `data/trash/<voice-id>/clips/`.
+6. Record several sentences and watch the minutes bar grow.
+7. Drop a real speech file (a few minutes of talking) on the window. The first time the model downloads; then clips appear, at most 15 seconds each, with sensible English transcripts. Restart the app, disconnect from the network and import again: it still works.
+8. Drop a file that is not audio (a renamed text file). It is reported as failed with its name, and nothing breaks.
+9. Edit a transcript, click away, and confirm the matching `data/voices/<id>/clips/NNNN.txt` file changed.
+10. Play a clip from the list. Delete a clip: the app asks first; answer no and it stays. Delete it again and answer yes: find its three files in `data/trash/<voice-id>/clips/`, and confirm its number is not reused by the next clip.
+11. Delete a voice and find its folder in `data/trash/`.
+12. Start live mode and try to record: it is refused. Stop live mode, start a recording and try to start live mode: refused too.
+13. Plug in (or unplug) a microphone, press **Refresh devices** on the Live tab, and confirm the **Microphone** list on the Voices tab changed to match.
 
 ## Tests
 
