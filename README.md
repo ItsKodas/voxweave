@@ -6,14 +6,50 @@ A personal Windows app for real-time voice conversion.
 
 Design: `docs/superpowers/specs/2026-10-13-ai-voice-design.md`
 
-## Requirements
+## Install
+
+For using Voxweave without building it. Nothing has to be installed first: no Git, Node, Rust, Python or command line.
+
+**You need:** Windows 10 or 11 (64-bit), a graphics card that supports DirectX 12 (any make), about 2 GB of free disk space, and an internet connection the first time the app starts.
+
+1. Download `Voxweave_<version>_x64-setup.exe` from the [latest release](../../releases/latest).
+2. Run it. It installs for your Windows account only and does not ask for administrator rights. **The installer is not signed**, so Windows SmartScreen may show "Windows protected your PC": choose **More info**, then **Run anyway**. Your browser may warn about the download as well. Each release lists the SHA-256 of its installer if you want to check the file. On a PC without Microsoft's WebView2 runtime (some Windows 10 installations) the installer downloads it first.
+3. Start Voxweave. The first start shows **First-time setup** with a progress bar and the current step. It downloads Python (22 MB), the voice engine's packages (124 MB) and the base speech model (378 MB), about 525 MB in total, which take about 0.9 GB on disk. This needs an internet connection once. If it stops, the screen shows why and a **Retry** button; Retry continues where it stopped. When it has finished, the normal app appears, and later starts go straight to it.
+4. Use the app as described under Running, from "Choose your **Microphone**" on. For other apps to hear the converted voice you need a virtual microphone ([VoiceMeeter](https://vb-audio.com/Voicemeeter/) or VB-CABLE); without one you can still listen to the converted voice yourself.
+
+**What works in the installed app:** live mode, the Voices tab (guided recording and importing audio; the first import downloads a speech recognition model of a few hundred MB, see Building a voice dataset), **My voice** calibration, and voice packs.
+
+**What does not work in the installed app yet: training and text to speech.** Both need the source checkout (Building from source, below) on a PC with an AMD GPU, and the app says so on the Train panel and on the Speak tab instead of offering them. So the installed app cannot make a voice model by itself. A voice is trained on such a PC, exported there as a voice pack, and brought here by dropping its `.voxweave` file on the Voices tab (see "Moving a trained voice to another computer" under Speaking text). Until there is a voice, Start on the Live tab stays disabled.
+
+**Where things are.** Everything the installed app writes is in `%LOCALAPPDATA%\Voxweave` (paste that into the address bar of Explorer):
+
+| Folder | Contents |
+|---|---|
+| `data\` | your voices, recordings and settings, and `backend.log`; the same layout as `data/` in the rest of this README |
+| `runtime\` | the Python environment, the download cache and `setup.log`; it can be deleted, the next start builds it again |
+
+Unless you choose another folder in the installer, the program itself is in the same folder (`Voxweave.exe`, `uninstall.exe`, `backend\`, `setup\`, `bin\`). The app window's own browser data is kept by Windows in `%LOCALAPPDATA%\gg.horizons.aivoice`.
+
+**Updating.** Run the installer of a newer release over the old one. The first start after an update runs the setup again; it only downloads what changed.
+
+**If the app says the voice engine failed to start,** press **Repair the installation** in that message: it runs the setup again, which replaces what is missing or damaged and keeps your voices. **If the setup fails with a message about a missing DLL,** install Microsoft's [Visual C++ Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe) and press Retry.
+
+**Uninstalling.** Use "Installed apps" in Windows Settings, or `uninstall.exe` in the program folder. This removes the program and its shortcuts. It leaves `%LOCALAPPDATA%\Voxweave\data` (your voices and recordings) and `%LOCALAPPDATA%\Voxweave\runtime` (about 0.9 GB that can be downloaded again) where they are; nothing of yours is deleted automatically. To remove everything, delete the folder `%LOCALAPPDATA%\Voxweave` yourself after uninstalling. The uninstaller's "Delete the application data" box only removes the window's browser data in `%LOCALAPPDATA%\gg.horizons.aivoice`, not your voices.
+
+**What has been tested, and what has not.** On the development PC: the installer was built (12 MB) and its contents were unpacked and compared with the sources, without running it. The first-run setup was run for real into an empty folder (41 seconds on a fast connection; 3 seconds when run again with everything in place), and the voice engine was started from the environment it built and answered. The setup, the shell's installed mode, the setup screen and the installed app's messages are covered by automated tests. **Not tested at all: running the installer.** Nobody has installed it, seen the installed app start, watched the First-time setup screen in the real window, updated, or uninstalled, on any PC. It has not been tried on a PC without developer tools, on Windows 10, or on a graphics card other than the development PC's AMD card. The release workflow on GitHub has never run. Treat the first release as a test.
+
+## Building from source
+
+Everything from here on is about running Voxweave from its source code. For now that is also the only way to train voices and to use text to speech.
+
+### Requirements
 
 - Windows 11 with a DirectX 12 GPU
 - [uv](https://docs.astral.sh/uv/), Node 20+, Rust
 - [Git for Windows](https://git-scm.com/) (the commands below are written for its Git Bash shell)
 - [VoiceMeeter](https://vb-audio.com/Voicemeeter/) (provides the virtual microphone; without it the app still works in listen-only mode, see Running)
 
-## Setup
+### Setup
 
 Run from the repo root, in **Git Bash**. All commands in this README are Git Bash commands unless a block says PowerShell; `mkdir -p`, `curl -L -o` and the forward-slash paths do not work as written in PowerShell or cmd.
 
@@ -43,7 +79,7 @@ cd app && npm install
 
 `vec-768-layer-12.onnx` is the ContentVec base speech model every voice needs.
 
-### Choosing the GPU
+#### Choosing the GPU
 
 By default the backend uses DirectML device 0. If the machine has two GPUs (for example a discrete card plus an integrated one) and device 0 is the slow one, create `data/settings.json`:
 
@@ -86,7 +122,7 @@ The result is written to `data/pretrained/rvc/my-voice/`. Restart the app to see
 cd app && npm run tauri dev
 ```
 
-This is the only way to run the app for now. The location of the backend is fixed to this checkout when the app is compiled, so a built installer would not work on another machine or after the folder is moved.
+This runs the app from the source checkout: the location of the backend is fixed to this checkout when the app is compiled. To use the app on another PC, build the installer (see Building the installer and releasing) or download one (see Install).
 
 `npm run tauri dev` keeps running after you close the window, because closing only hides the app to the tray. To stop it, choose **Quit** in the tray menu or press Ctrl+C in the console.
 
@@ -102,7 +138,7 @@ The app starts the Python backend itself. If something required is missing, a "S
 
 **Listen-only mode (no VoiceMeeter).** When no virtual mic is found, **Virtual mic** is set to **None (listen only)**; the app never picks your speakers for it. Tick **Listen to output**, choose headphones and press Start to hear the converted voice yourself. Other apps hear nothing until VoiceMeeter is installed and running (then press Refresh devices). Use headphones, not speakers, or the microphone will pick the output up again. You can also choose None yourself to try a voice without sending it anywhere.
 
-**Backend log.** Everything the backend prints (startup errors, Python tracebacks, request log) is appended to `data/backend.log`. Look there first when the app reports that the voice engine failed to start or stopped unexpectedly. The file is started afresh once it grows past about 5 MB.
+**Backend log.** Everything the backend prints (startup errors, Python tracebacks, request log) is appended to `data/backend.log` (in the installed app: `%LOCALAPPDATA%\Voxweave\data\backend.log`). Look there first when the app reports that the voice engine failed to start or stopped unexpectedly. The file is started afresh once it grows past about 5 MB.
 
 Presets (all use the fast pitch detector at the moment):
 
@@ -193,7 +229,7 @@ The app never empties `data/trash/`. If a file in the trash already has the name
 
 ### Privacy
 
-Recordings and imported audio stay on this computer. The only network use is the one-time download of the speech model from Hugging Face, on the first import (and once more if you change `whisper_model` to a model you do not have yet), and the downloads of `bash trainer/setup.sh` (see Training setup) and `bash tts/setup.sh` (see Text to speech setup). After that the model is loaded from disk without contacting Hugging Face, and the download library's usage reporting is switched off. Training and text to speech themselves make no network requests.
+Recordings and imported audio stay on this computer. The installed app downloads Python, its packages and the base speech model once, at its first start (see Install), from GitHub, the Python Package Index and Hugging Face. Apart from that, the only network use is the one-time download of the speech model from Hugging Face, on the first import (and once more if you change `whisper_model` to a model you do not have yet), and the downloads of `bash trainer/setup.sh` (see Training setup) and `bash tts/setup.sh` (see Text to speech setup). After that the model is loaded from disk without contacting Hugging Face, and the download library's usage reporting is switched off. Training and text to speech themselves make no network requests.
 
 ## Training setup
 
@@ -486,6 +522,33 @@ A human needs to do this once; it has not been done yet. **Nobody has listened t
 13. Numbers: speak "It costs 1,200 dollars. Call 555 0142 before noon. In 1987 it was 3.5 percent." The first is said as "one thousand two hundred", the phone number digit by digit with a short pause in the middle, and the year and the decimal as before.
 14. A clip that is too quiet: give a new voice one clip recorded very quietly (if the recorder accepts it) or imported from a quiet file. On the Speak tab the voice is greyed out with "Clip 1 is too quiet to copy. Record a louder clip of 5 to 10 seconds."; after recording a normal clip it can be chosen.
 
+## Building the installer and releasing
+
+```bash
+cd app && npm ci && npm run installer
+```
+
+This needs Node, Rust and an internet connection, and takes about three minutes. It writes `app/src-tauri/target/release/bundle/nsis/Voxweave_<version>_x64-setup.exe`, a per-user NSIS installer for 64-bit Windows, and prints its size and SHA-256. `scripts/build-installer.ps1` does the work:
+
+- `scripts/fetch-uv.ps1` downloads the pinned release of [uv](https://github.com/astral-sh/uv) and refuses it unless its SHA-256 is the one committed in that script. `uv.exe` is bundled, never committed.
+- `scripts/stage-installer.ps1` collects what the installer bundles besides the app into `installer/staged/` (not in git): the backend source `backend/aivoice`, `backend/pyproject.toml`, the first-run setup `installer/bootstrap.py`, its pinned package list `installer/requirements.lock`, and `uv.exe`.
+- `tauri build` runs with `app/src-tauri/tauri.installer.conf.json`, which adds those files as bundle resources. They are in a separate config because Tauri copies resources next to development binaries too, and fails when one is missing; the main config, which `npm run tauri dev` uses, has none.
+
+**How the installed app differs from the checkout.** A release build that finds the backend source next to itself is the installed app (`app/src-tauri/src/setup.rs`); everything else, including every `npm run tauri dev`, is the source checkout and behaves as before. The installed app keeps everything under `%LOCALAPPDATA%\Voxweave` and at its first start runs `uv run --no-project --python 3.12 setup\bootstrap.py`, which builds `runtime\backend\.venv` from the lock with `uv pip sync --require-hashes`, checks that `onnxruntime-directml` is present and the plain `onnxruntime` is absent, downloads the base model with a SHA-256 check, and writes `runtime\setup.json` last. The setup runs again when the app version changes or when the environment or the model is missing. The backend then runs as `runtime\backend\.venv\Scripts\python.exe -m aivoice` with `PYTHONPATH` at the bundled source, `AIVOICE_DATA` at `data\` and `AIVOICE_INSTALLED=1`. To try an installed build against another folder than the real one, set `VOXWEAVE_ROOT` before starting it.
+
+**The package lock.** `installer/requirements.lock` pins the exact version and hashes of every package the installed app gets: the backend's dependencies, the `transcribe` extra and `faster-whisper`, compiled with `--no-emit-package onnxruntime` so that the plain `onnxruntime` is never installed (see Setup). No test packages. It was compiled with the versions of the development environment the backend suite passes in. `scripts/compile-lock.ps1` regenerates it (PowerShell); without `-Constraints` it takes the newest versions, which then need the backend suite run against them.
+
+**The version** has one place of truth, `"version"` in `app/package.json`. `node scripts/version.mjs set 1.2.3` writes it and its copies (`package-lock.json`, `Cargo.toml`, `Cargo.lock`, `backend/pyproject.toml`); `node scripts/version.mjs check` fails if they differ. `tauri.conf.json` reads it from `package.json`.
+
+**Releasing.** Set the version, commit, tag and push:
+
+```bash
+node scripts/version.mjs set 1.2.3
+git commit -am "release: 1.2.3" && git tag v1.2.3 && git push --follow-tags
+```
+
+`.github/workflows/release.yml` then checks that the tag matches the version, runs the frontend, Rust and setup tests, builds the installer from a clean state on `windows-latest`, and publishes a GitHub Release for the tag with the installer attached and its SHA-256 in the notes. `.github/workflows/ci.yml` runs the same tests on every push and pull request. The backend's Python suite is not run on GitHub: it has only ever been run on the development PC, and whether it passes on a runner without a GPU or audio device is unknown. **Neither workflow has run yet.** The installer is not code signed.
+
 ## Tests
 
 ```bash
@@ -498,6 +561,13 @@ cd app && npm test && npx tsc --noEmit && npm run build
 
 ```bash
 cd app/src-tauri && cargo test
+```
+
+The first-run setup of the installed app has its own tests, which need nothing but a Python (they use a fake uv and a fake download server), and the version copies are checked by a script:
+
+```bash
+python -m unittest discover -s installer/tests
+node scripts/version.mjs check
 ```
 
 `backend/tests/test_rvc_real.py` runs the real DirectML path and needs the GPU, the base model and a voice in `data/pretrained/rvc/`; it also shows that the speech packages did not remove DirectML.
@@ -521,7 +591,11 @@ The first drives the worker process directly (12 tests). The second drives the a
 ## Known limitations
 
 - The accurate pitch detector (harvest) is slower than real time at every preset's window size on the development machine, not only the larger ones, so all three presets use the fast one (dio). Harvest is still selectable under Advanced but will not keep up live with any preset.
-- The app only runs from this checkout with `npm run tauri dev`; there is no installer, because the backend path is fixed at compile time.
+- **The installer has never been run.** It was built and its contents checked, and the first-run setup was run for real into an empty folder, but nobody has installed the app, seen the installed app start, updated or uninstalled it, on any PC; see "What has been tested" under Install.
+- The installed app has no training and no text to speech; both need the source checkout on a PC with an AMD GPU. Its voices come from voice packs.
+- The installer is not code signed, so Windows SmartScreen warns about it.
+- The installed app's Python packages need Microsoft's Visual C++ runtime. Most PCs have it; whether the setup's check and message for a PC without it are enough has not been tried.
+- Starting the installed app twice starts two voice engines, as starting the source checkout twice does; nothing prevents it.
 - **Refresh devices**, the default-device preselection and listen-only mode are covered by automated tests with fake devices but have not been tried on real hardware yet.
 - Preset values are untuned starting points; they have not been adjusted by ear.
 - The tray menu, the Ctrl+Alt+V hotkey and the checklist above have not been verified by a human yet.
