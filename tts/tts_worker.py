@@ -4,7 +4,7 @@ Start:   tts/.venv/Scripts/python.exe -u tts/tts_worker.py --model-dir tts/model
 
 stdin, one JSON object per line:
   {"cmd":"set_reference","wav":PATH,"text":STR}       a 3 to 12 second clip (16-bit WAV) and its transcript
-  {"cmd":"synthesize","id":STR,"pieces":[STR,...],"out_dir":PATH,"nfe":8|16|32,
+  {"cmd":"synthesize","id":STR,"pieces":[STR,...],"out_dir":PATH,"nfe":8|10|16|32,
    "speed":1.0,"seed":INT|null,"max_chars":INT}       speed, seed and max_chars are optional
   {"cmd":"cancel","id":STR}
   {"cmd":"shutdown"}                                  closing stdin does the same
@@ -62,7 +62,7 @@ CACHE_DIR = TTS_DIR / ".cache"  # the folder tts/setup.sh creates
 
 MIN_REFERENCE_SECONDS, MAX_REFERENCE_SECONDS = 3.0, 12.0
 MAX_CALL_SECONDS = 30.0  # reference plus generated audio in one model call; beyond it the output turns to babble
-STEP_COUNTS = (8, 16, 32)
+STEP_COUNTS = (8, 10, 16, 32)  # the backend's presets use 10, 16 and 32 (aivoice.tts.STEPS)
 MIN_SPEED, MAX_SPEED = 0.5, 2.0
 SHORT_PIECE_BYTES, SHORT_PIECE_SPEED = 10, 0.3  # the package's own rule for very short text
 MIN_PIECE_SECONDS = 0.1
@@ -240,7 +240,7 @@ def _job_from(request):
         raise BadRequest("synthesize needs out_dir: the folder the pieces are written to")
     nfe = request.get("nfe")
     if not _whole_number(nfe) or nfe not in STEP_COUNTS:
-        raise BadRequest("synthesize needs nfe: 8, 16 or 32")
+        raise BadRequest("synthesize needs nfe: 8, 10, 16 or 32")
     speed = request.get("speed", 1.0)
     # Compared before anything else is done with it: JSON allows whole numbers too large to be a float.
     if (isinstance(speed, bool) or not isinstance(speed, (int, float))

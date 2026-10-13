@@ -58,7 +58,10 @@ from aivoice.training import (KILL_RETRY, TREE_REFRESH, KillFailed, ProcessTools
 log = logging.getLogger(__name__)
 
 SAMPLE_RATE = 48000
-STEPS = {"fast": 8, "balanced": 16, "best": 32}  # sampling steps; "best" adds the voice's RVC model
+# Sampling steps; "best" adds the voice's RVC model. Fast is 10, not 8: measured with random seeds, a quarter of
+# the sentences had a wrong word at 8 steps, and at 10 no more than at 16 (stage 4 first-real-run notes). The
+# worker has its own list of the counts it accepts (tts/tts_worker.py, STEP_COUNTS).
+STEPS = {"fast": 10, "balanced": 16, "best": 32}
 SPEED = 1.0
 START_TIMEOUT = 120.0  # seconds a new worker has to load its model
 PIECE_TIMEOUT = 60.0  # seconds the worker has for the next piece, or for loading a reference clip

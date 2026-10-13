@@ -497,6 +497,25 @@ def test_a_malformed_synthesize_is_refused_and_nothing_starts(session, tmp_path,
     assert names(s.run_job(tmp_path, id="next")) == ["started", "audio", "done"]  # and the worker is not left busy
 
 
+def test_every_step_count_a_preset_uses_is_accepted(worker, session, tmp_path):
+    """The backend's presets and the worker's list are kept in two environments; a preset the worker refuses
+    would fail every request made with it."""
+    from aivoice import tts as backend
+    assert set(backend.STEPS.values()) <= set(worker.STEP_COUNTS)
+    s = session()
+    s.reference(tmp_path)
+    for index, steps in enumerate(sorted(set(backend.STEPS.values()))):
+        assert names(s.run_job(tmp_path, id=f"job{index}", nfe=steps)) == ["started", "audio", "done"]
+    assert [call[1] for call in s.engine.calls] == [10, 16, 32]
+
+
+def test_the_refusal_of_a_step_count_names_the_ones_offered(session, tmp_path):
+    s = session()
+    s.reference(tmp_path)
+    s.synthesize(tmp_path, nfe=12)
+    assert s.error("bad_request")["message"] == "synthesize needs nfe: 8, 10, 16 or 32"
+
+
 def test_a_piece_longer_than_the_callers_limit_is_refused_whole(session, tmp_path):
     """The package would chunk it at a comma; the worker refuses instead, before anything is synthesised."""
     s = session()

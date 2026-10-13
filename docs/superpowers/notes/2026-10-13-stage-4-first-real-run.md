@@ -131,7 +131,7 @@ as the listener).
 
 **Result: the manager, the worker protocol, stop, reuse, unload and the Best preset all worked on the first run
 with no change. One real fault was found and fixed, in how the start of each piece is trimmed. One thing was
-found that is not fixed: the Fast preset gets words wrong in about three sentences out of ten.**
+found that was not fixed in this run: the Fast preset, then 8 steps, got words wrong in about three sentences out of ten.** It was settled afterwards by measurement: Fast is now 10 steps (last section of this file).
 
 ## Commands
 
@@ -323,3 +323,119 @@ Different:
 No worker process is running (checked by command line: no `python.exe` with `tts_worker.py`). Written outside
 pytest's temporary folders: the kernel cache and the other caches under `tts/.cache` (742 KB in all), as the app
 itself would. The real `data/` was not written.
+
+---
+
+# Stage 4: Fast preset measurement (8, 10, 12 and 16 steps)
+
+Date: 2026-10-13, after the run above found that Fast at 8 steps got a word wrong in about three sentences out
+of ten. **Decision: Fast is now 10 sampling steps.** Balanced (16) and Best (32 plus RVC) are unchanged. The
+figures for Fast at 8 steps in the sections above are kept as measured; they no longer describe the preset.
+
+## Method
+
+The same as before: the real manager and worker, the package's sample clip as the reference, a new random seed
+for every request, the pieces as the player receives them (after trimming), and the backend's Whisper (small.en,
+CPU) as the listener. A piece counts as wrong if any word of its sentence is missing from what Whisper wrote or
+any extra word is there; "three or more missing" counts the pieces that lost at least three words. Nobody
+listened.
+
+- Main set, per step count: the three lighthouse sentences 40 times and the ten 6 times, 180 pieces. 10 and 12
+  steps were measured twice (360 pieces each) because their first results were too close to tell apart.
+- Shape sets, six sentences each, 8 rounds (48 pieces) per step count: very short pieces (8 to 15 characters),
+  medium ones (51 to 60), long ones near the limit of 132 (119 to 127), and sentences with numbers.
+- 8 and 16 steps ran on the product's worker. The worker accepted only 8, 16 and 32 steps, so 10 and 12 ran on a
+  scratch copy of `tts/tts_worker.py` that differed in that one line. The scripts and the 1848 recorded pieces
+  were kept outside the repository (the session's scratch folder) and are not kept.
+- "First piece" is from `speak()` to the first piece reaching the player with the worker loaded; "per piece" is
+  the time between pieces. Medians; sentences of about 90 characters, about 8 s of speech each.
+
+## Result: main set
+
+| Steps | Pieces | Any wrong word | Three or more missing | Words missing | First piece | Per piece |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 8 | 180 | 45 (25.0 %) | 12 (6.7 %) | 3.8 % | 0.43 s | 0.39 to 0.41 s |
+| 10 | 360 | 10 (2.8 %) | 0 | 0.2 % | 0.52 to 0.54 s | 0.49 to 0.54 s |
+| 12 | 360 | 14 (3.9 %) | 0 | 0.3 % | 0.62 to 0.65 s | 0.58 to 0.65 s |
+| 16 | 180 | 3 (1.7 %) | 0 | 0.1 % | 0.81 s | 0.76 to 0.82 s |
+
+The two batches at 10 steps gave 3 and 7 wrong pieces of 180; at 12 steps 9 and 5. So 10 and 12 cannot be told
+apart at this sample size, and both are close to 16. Four of the ten wrong pieces at 10 steps, and two of the
+three at 16, are the recogniser writing "aged" for "ached"; leaving out such spelling-only differences the
+counts are 43, 6, 12 and 1. The remaining errors at 10 and 12 steps are single words ("boats" heard as "boat",
+"he could" missing, once two words garbled); one piece at 12 steps began with three words of the reference
+clip's transcript ("others call me").
+
+At 8 steps the errors depend heavily on the sentence: "On clear nights he could count the lights of seven
+fishing boats far out on the water." was wrong in 24 of 46 tries, the other two lighthouse sentences in 7 and 9
+of 46. At 10 steps the same sentences were wrong in 1, 0 and 0 of 46 (first batch).
+
+## Result: sentence shapes
+
+"Any wrong" here is inflated by spelling the recogniser writes differently from the text ("grey" and "gray",
+"harbour" and "harbor", "25 dollars and 99 cents" and "$25.99"), which is the same at every step count; the
+second figure leaves out the spelling pairs that could be recognised as such. Compare along a row, not between
+rows.
+
+| Shape | 8 steps | 10 steps | 12 steps | 16 steps |
+| --- | ---: | ---: | ---: | ---: |
+| very short (8 to 15 characters): any wrong / without spelling | 1 / 1 of 48 | 0 / 0 | 1 / 1 | 0 / 0 |
+| medium (51 to 60) | 14 / 8 | 8 / 2 | 8 / 1 | 8 / 1 |
+| long, near the limit (119 to 127) | 28 / 17 | 19 / 3 | 23 / 8 | 20 / 4 |
+| long: three or more words missing | 5 (10.4 %) | 0 | 0 | 0 |
+| numbers: any wrong / without spelling | 32 / 25 | 32 / 24 | 35 / 27 | 31 / 23 |
+| numbers: three or more words missing | 11 | 8 | 9 | 8 |
+
+- **Very short pieces are not the problem**: "Hi there.", "Thank you." and the like came out right at every step
+  count (one miss in 48 at 8 and at 12 steps), and none failed as silent.
+- **At 8 steps the errors grow with the length of the piece**: about one long piece in three had a real error
+  and one in ten lost three words or more, against none losing three at 10 steps and above. A shorter piece
+  limit would have reduced the damage at 8 steps, but two more steps remove it without touching the splitter,
+  and medium pieces also went wrong at 8 steps (8 of 48), so the limit alone would not have been enough.
+- **Numbers are a separate problem that steps do not change.** Much of the count is the recogniser writing
+  digits its own way, but some is real at every step count: "1,200" was never heard as twelve hundred in any of its 32 tries (it came out as "the first 200" or "the fund's
+  200": the model does not read a thousands separator), and "555 0142" was garbled in about half of its tries. Years ("1987", "2004"), "3.5", "40" and "70 percent" were read correctly. The remedy would
+  be on the text side (writing numbers out before they reach the model). That is reported, not changed here:
+  `tts_text.py` was left alone.
+
+## Decision
+
+The rule given for this decision: Fast becomes the smallest step count whose any-wrong rate is at most about
+twice Balanced's and whose three-or-more-missing rate is at most 2 percent. Balanced's rate is 1.7 percent, so
+the bar is about 3.4 percent.
+
+- 8 steps: 25.0 percent and 6.7 percent. Fails both.
+- **10 steps: 2.8 percent and 0. Passes both, and is the smallest that does.**
+- 12 steps: 3.9 percent and 0, no better than 10.
+
+Fast at 10 steps costs 0.1 s more per sentence than at 8 (0.5 s against 0.4 s) and is still a third faster than
+Balanced (0.8 s). The margin is not large: 10 of 360 against a bar of about 12, with one batch (7 of 180, 3.9
+percent) above it and one (3 of 180) below; and all of it rests on one reference clip and one recogniser.
+
+## What changed
+
+- `backend/aivoice/tts.py`: `STEPS["fast"]` is 10.
+- `tts/tts_worker.py`: 10 is accepted (`STEP_COUNTS = (8, 10, 16, 32)`; 8 stays accepted, the worker's own real
+  test uses it), and the refusal names the four counts.
+- Tests: the manager's preset test expects 10, 16 and 32; a new worker test checks that every step count the
+  backend's presets use is accepted by the worker (the two lists live in two environments, and a preset the
+  worker refuses would fail every request made with it), and another checks the wording of the refusal.
+- The Speak tab shows no step counts, so nothing changed there.
+
+## Timings with Fast at 10 steps
+
+The end-to-end test, three runs, both real test files in one session (22 passed in 71 to 76 s):
+
+| | Measured |
+| --- | ---: |
+| first piece, worker loaded, Fast (10 steps) | 0.53 to 0.55 s |
+| each following piece, Fast | 0.49 to 0.56 s |
+| three sentences (about 24 s of speech), Fast, whole request | 1.58 to 1.60 s |
+| first request after start, `speak()` to first piece, Fast | 12.0 to 12.3 s |
+| first piece of the request after a stop, Fast | 0.54 s |
+| first piece, Balanced (unchanged) | 0.84 s |
+| three sentences, Balanced | 2.49 to 2.51 s |
+| first piece, Best (unchanged) | 4.7 to 5.2 s |
+
+By length of piece, Fast at 10 steps, median time per piece: very short 0.27 to 0.30 s, medium (about 4.4 s of
+speech) 0.41 to 0.43 s, about 90 characters (8 s) 0.5 s, long (11.6 s) 0.66 to 0.72 s.

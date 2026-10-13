@@ -238,6 +238,7 @@ Each line ends with what it costs if wrong.
 
 - One speech model, F5-TTS, serves all three presets, and "Best" is F5-TTS followed by the voice's own trained RVC model. GPT-SoVITS, which the design named for Best, was not built and nothing fine-tunes a text-to-speech model on a voice. Why: the spike found several blockers for GPT-SoVITS on this GPU's PyTorch build and weeks of uncertain work, while F5-TTS plus RVC needed no new training code. If wrong: Best is less faithful to the voice than a fine-tuned model would be; one can be added later without disturbing this design.
 - Balanced uses 16 sampling steps, not 32. Why: measured as accurate as 32 and twice as fast. If wrong: one constant.
+- Fast uses 10 sampling steps, not the 8 it was planned and first built with. Why: measured with random seeds and a speech recogniser, 25 percent of sentences had a wrong word at 8 steps and 6.7 percent lost three words or more; at 10 steps 2.8 percent and none (Balanced: 1.7 percent and none), for 0.1 second more per sentence. The rule applied: the smallest step count with at most about twice Balanced's rate of sentences with a wrong word and at most 2 percent losing three or more. If wrong: one constant in `tts.py` (the worker accepts 8, 10, 16 and 32); the margin is small (10 of 360 against a bar of about 12) and rests on one reference clip.
 - Text to speech cannot run alongside live mode, recording or training: one activity at a time. Why: sharing the GPU would make live audio stutter, and one rule for everything is simple. If wrong: a user cannot have typed text spoken while live mode is on without stopping it first.
 - The F5-TTS weights' CC-BY-NC-4.0 licence (non-commercial) is accepted for this personal app and stated in the README and in the setup script's output. If wrong: the owner must not use the output commercially, or must swap the model.
 - The first five tasks were built in parallel by separate implementers on separate files. Why: time. If wrong: a git lock collision, retried.
@@ -258,9 +259,11 @@ Scheduled for the final fix wave:
 
 Still open, not scheduled:
 
-- **Fast gets words wrong in about 3 of 10 sentences** (55 of 180 pieces, 18 of them missing three words or more; Balanced 1 of 90), measured with the model's own sample clip and a speech recogniser. Nothing detects a wrongly spoken sentence. Whether Fast should stay, get more steps, or carry a warning on screen is a decision for the owner after listening.
+- Nothing detects a wrongly spoken sentence. After Fast was raised from 8 to 10 steps the measured rate of sentences with a wrong word is 2.8 percent at Fast and 1.7 percent at Balanced, with the model's own sample clip and a speech recogniser as the judge; a real voice's clip may give other figures.
+- **Numbers are read wrongly at every step count**: "1,200" was never read as twelve hundred (32 of 32 tries, 8 to 16 steps) and a phone number was garbled about half the time; years, "3.5" and "40" were fine. The remedy is on the text side (write numbers out before they reach the model, in `tts_text.py`); it was reported, not changed.
+- At 8 steps errors grew with the length of the piece (one long piece in ten lost three words or more); at 10 steps and above none did, so the piece limit was left as it is.
 - The model's pieces run to the very end of their allotted time; a last word was never lost in the checked pieces, but there is no margin.
-- About 4 percent of Fast pieces keep their full length because no pause could be found at their start (mostly the garbled ones).
+- At 8 steps about 4 percent of Fast pieces kept their full length because no pause could be found at their start (mostly the garbled ones); this was not counted again at 10 steps.
 - Best loads the voice's RVC model again for every request (about 2 seconds before the first sound) and drops it afterwards.
 - `is_silent` looks at the peak only, so a single click counts as speech; a sentence cut hard at an over-long word can start a piece with punctuation.
 - There is no speed control for speech (fixed at 1.0; the design does not ask for one).

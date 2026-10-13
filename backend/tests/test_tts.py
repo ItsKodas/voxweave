@@ -597,7 +597,8 @@ def test_the_text_is_split_for_the_reference_and_sent_with_the_presets_steps(rig
         rig.speak(voice, preset=preset)
         assert rig.finish()["error"] is None
     jobs = rig.workers[0].named("synthesize")
-    assert [j["nfe"] for j in jobs] == [8, 16, 32]
+    # Fast is 10 steps, not 8: at 8 a quarter of the sentences came out with a wrong word (stage 4 notes)
+    assert [j["nfe"] for j in jobs] == [10, 16, 32]
     limit = tts.tts_audio.max_chars_for(TRANSCRIPT, 8.0)
     for job in jobs:
         assert job["pieces"] == PIECES and job["max_chars"] == limit and 0.5 <= job["speed"] <= 2.0
