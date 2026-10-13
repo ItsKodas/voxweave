@@ -206,3 +206,24 @@ Everything below was exercised only with synthetic audio (about 60 seconds of sp
 - `bash trainer/setup.sh` on a machine that is not this one (clean caches, other drivers, an older Adrenalin than 26.8.1; 26.2.2 is AMD's stated minimum and has not been tried), and the real download sizes there.
 - Other GPUs, and training with `ffmpeg` and `ffprobe` installed differently from this PC's.
 - The real GPU tests last passed 4 in 17 min 2 s on this machine, while another experiment shared the GPU (the first three took 5 min 32 s on a free GPU); they are skipped in the normal suite. The fourth drives the real training manager, but still without the app's window or the Tauri shell.
+
+## Stage 3: complete list of decisions made during the build
+
+Copied from the build ledger when the stage was merged. Each line ends with what it costs if wrong.
+
+- Ruling: train natively on Windows with AMD's ROCm PyTorch instead of WSL2 — the spike proved it works and the WSL2 distro on this PC is broken — if wrong: the worker's stage commands would need a WSL wrapper; the backend and UI are unaffected.
+- Ruling: stage 3 trains RVC only; GPT-SoVITS fine-tuning moves to stage 4 — its engine is unproven on this GPU and belongs with TTS — if wrong: stage 4 is larger.
+- Ruling: carry two patches against RVC commit 81eed5e (dilated-convolution speed fix, preprocess tail fix) — 3.4x training speed and no silently dropped audio — if wrong: revert the patches; training still works but slower.
+- Ruling: the plan gives interfaces, behaviour and tests for the worker instead of complete listings — its code must match a real external pipeline the spike already scripted — if wrong: implementers need more review rounds.
+- Ruling: no real recordings exist, so the end-to-end proof uses synthetic speech-like audio — the pipeline is proven, voice quality is not — if wrong: the first real training run by the owner reveals problems the synthetic run could not.
+- Ruling: training is tied to the app's lifetime (the worker exits when the backend exits; the job becomes interrupted and resumable) — an unseen process holding the GPU after Quit would be worse — if wrong: users must keep the app open during long training.
+- Ruling: accept the worker's deviation that a resume with no checkpoint ever saved trains from epoch 1 — nothing that existed is lost, and a saved-then-missing checkpoint still fails — provided the checkpoint mark is set at the first saved epoch, not the first backup — if wrong: an early-cancelled run resumes from scratch without saying so.
+- Ruling: Resume is offered for any stopped run whose prepared stages exist, not only after the first checkpoint — the worker already supports it and it saves the user minutes of preparation — if wrong: a resume before any checkpoint retrains from epoch 1, which the UI now says.
+- Ruling: a replaced trained model goes to data/trash instead of being erased — keeps the app's "nothing is erased" promise uniform — if wrong: about 110 MB per retrain accumulates in the trash.
+
+## Stage 3: left open after the final re-review
+
+- If the backend disappears after Cancel was pressed, the worker can hold the GPU for its long cancel wait (up to 15 minutes) instead of 60 seconds; the next backend start still stops it.
+- A training panel that checked the environment while live mode was running keeps saying it can be checked once live mode stops, until Check again is pressed or another voice is selected.
+- The training start route still runs the fast environment check, and one servicing call, while holding the audio and voices locks.
+- Nothing in stage 3 has been exercised by a human, and only synthetic speech-like audio has been trained. See the stage 3 first-run checklist in the README.
