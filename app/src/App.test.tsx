@@ -75,7 +75,7 @@ const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAs
 const DATA = "C:\\Users\\me\\AppData\\Local\\Voxweave\\data";
 const setupState = (over: Partial<SetupState> = {}): SetupState => ({
   mode: "installed", status: "running", step: "model", percent: 70, message: "Downloading the base speech model",
-  error: null, root: "C:\\Users\\me\\AppData\\Local\\Voxweave", data_dir: DATA,
+  error: null, first_time: true, can_retry: true, root: "C:\\Users\\me\\AppData\\Local\\Voxweave", data_dir: DATA,
   setup_log: "C:\\Users\\me\\AppData\\Local\\Voxweave\\runtime\\setup.log", ...over,
 });
 const SOURCE_CHECKOUT = setupState({ mode: "dev", status: "ready", step: "", percent: 100, message: "", root: "", data_dir: "", setup_log: "" });
@@ -404,6 +404,19 @@ describe("App in the installed app", () => {
     expect(setupApi.start).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.getByText("Downloading Python")).toBeInTheDocument();
+  });
+
+  it("shows an app with a file missing as unable to start, and never asks the engine", async () => {
+    vi.mocked(setupApi.state).mockResolvedValue(setupState({
+      status: "failed", first_time: false, can_retry: false, error: "A file of the app is missing. Install Voxweave again.",
+    }));
+    vi.mocked(api.health).mockRejectedValue(new Error("refused"));
+    render(<App />);
+    await advance(20_000);
+    expect(screen.getByRole("alert")).toHaveTextContent("A file of the app is missing. Install Voxweave again.");
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+    expect(screen.queryByText(/voice engine failed to start/i)).not.toBeInTheDocument();
   });
 
   it("goes straight to the app when the setup was done on an earlier start", async () => {

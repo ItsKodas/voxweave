@@ -11,6 +11,10 @@ export type SetupState = {
   percent: number;
   message: string;
   error: string | null;
+  /** No setup has finished here before: this one downloads everything. False for the check after an update or a repair. */
+  first_time: boolean;
+  /** False when the app itself is incomplete (a file is missing): starting the setup again cannot help. */
+  can_retry: boolean;
   /** Where the installed app keeps everything it writes; empty in the source checkout. */
   root: string;
   data_dir: string;

@@ -12,7 +12,7 @@ import { installedApp, rememberMode, setupApi } from "./setupApi";
 
 const state = (over: Partial<SetupState> = {}): SetupState => ({
   mode: "installed", status: "running", step: "packages", percent: 37,
-  message: "Downloading and installing the voice engine's packages", error: null,
+  message: "Downloading and installing the voice engine's packages", error: null, first_time: true, can_retry: true,
   root: "C:\\Users\\me\\AppData\\Local\\Voxweave", data_dir: "C:\\Users\\me\\AppData\\Local\\Voxweave\\data",
   setup_log: "C:\\Users\\me\\AppData\\Local\\Voxweave\\runtime\\setup.log", ...over,
 });
@@ -51,6 +51,33 @@ describe("FirstRun", () => {
     expect(screen.queryByText("Downloading and installing the voice engine's packages")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not announce a first-time download when a setup has finished here before", () => {
+    render(<FirstRun setup={state({ first_time: false, percent: 60, message: "Checking the installed packages" })} onRetry={vi.fn()} />);
+    expect(screen.getByRole("heading", { name: "Checking the installation" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "First-time setup" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/about 525 MB/)).not.toBeInTheDocument();
+    expect(screen.getByText(/downloads only what is missing or has changed/)).toBeInTheDocument();
+    expect(screen.getByText("Checking the installed packages")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "Setup progress" })).toHaveAttribute("value", "60");
+  });
+
+  it("shows why an incomplete app cannot run, without a Retry that could not help", () => {
+    render(
+      <FirstRun
+        setup={state({ status: "failed", first_time: false, can_retry: false, percent: 0, root: "", data_dir: "", setup_log: "",
+          error: "A file of the app is missing. Install Voxweave again." })}
+        onRetry={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("heading", { name: "Voxweave cannot start" })).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("A file of the app is missing. Install Voxweave again.");
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Everything is stored in/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/The details are in/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/about 525 MB/)).not.toBeInTheDocument();
   });
 
   it("keeps the bar where the setup stopped, since a retry continues from there", () => {

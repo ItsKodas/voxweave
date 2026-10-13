@@ -22,8 +22,6 @@ use serde::{Deserialize, Serialize};
 
 /// The folder under the user's local application data that holds everything the installed app writes.
 pub const ROOT_FOLDER: &str = "Voxweave";
-/// Overrides the writable root, for trying an installed build without touching the real one.
-pub const ROOT_OVERRIDE: &str = "VOXWEAVE_ROOT";
 pub const PYTHON_VERSION: &str = "3.12";
 const BASE_MODEL: &str = "vec-768-layer-12.onnx";
 
@@ -35,9 +33,13 @@ pub fn plain(path: &Path) -> PathBuf {
     }
 }
 
-/// Whether the installer's files are next to the program.
-pub fn has_bundled_backend(resources: &Path) -> bool {
-    resources.join("backend").join("aivoice").join("__main__.py").is_file()
+/// The files the installer puts next to the program, relative to it. All of them must be there.
+pub const BUNDLED_FILES: [&str; 4] =
+    [r"backend\aivoice\__main__.py", r"setup\bootstrap.py", r"setup\requirements.lock", r"bin\uv.exe"];
+
+/// The first of the installer's files that is not next to the program, if any.
+pub fn missing_bundled_file(resources: &Path) -> Option<PathBuf> {
+    BUNDLED_FILES.iter().map(|file| resources.join(file)).find(|path| !path.is_file())
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -46,28 +48,51 @@ pub struct Installed {
     pub resources: PathBuf,
 }
 
-/// Installed mode is chosen when this is a release build made by `tauri build` and the backend source is
-/// bundled next to the program; anything else is the source checkout of `npm run tauri dev`.
-///
-/// The build check is needed because Tauri copies bundle resources next to development binaries as well.
-pub fn detect(
-    dev_build: bool,
-    resources: Option<&Path>,
-    local_data: Option<&Path>,
-    root_override: Option<OsString>,
-) -> Option<Installed> {
+/// What kind of app this is. Decided once, when it starts.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Mode {
+    /// A development build (`npm run tauri dev`, `cargo test`): the source checkout, as it always was.
+    Dev,
+    /// The app the installer put on this computer, with all its files.
+    Installed(Installed),
+    /// A release build that cannot run: the message is shown and no backend is ever started. A release
+    /// build never falls back to the source checkout's backend, whose path exists only on the PC it was
+    /// built on; on any other PC that path is one somebody else could put a program at.
+    Broken(String),
+}
+
+pub const MISSING_FILE: &str = "A file of the app is missing. Install Voxweave again.";
+pub const NOT_AN_INSTALLER_BUILD: &str = "This copy of Voxweave was not built as an installer, so it has no voice \
+    engine of its own. Build it with \"npm run installer\", or run it from the source checkout with \"npm run tauri dev\".";
+pub const NO_LOCAL_APP_DATA: &str = "Windows did not say where this account's application data is kept \
+    (LOCALAPPDATA), so Voxweave has nowhere to keep its files.";
+
+/// `installer_build` is compiled in by `npm run installer` (scripts/build-installer.ps1 sets VOXWEAVE_INSTALLER).
+/// Files lying next to the program do not decide the mode by themselves: Tauri copies bundle resources next
+/// to every binary it builds and never removes them, so an earlier installer build leaves them behind for a
+/// later plain build.
+pub fn detect(dev_build: bool, installer_build: bool, resources: Option<&Path>, local_data: Option<&Path>) -> Mode {
     if dev_build {
-        return None;
+        return Mode::Dev;
     }
-    let resources = plain(resources?);
-    if !has_bundled_backend(&resources) {
-        return None;
+    if !installer_build {
+        return Mode::Broken(NOT_AN_INSTALLER_BUILD.into());
     }
-    let root = match root_override.filter(|value| !value.is_empty()) {
-        Some(value) => PathBuf::from(value),
-        None => local_data?.join(ROOT_FOLDER),
-    };
-    Some(Installed { root: plain(&root), resources })
+    let Some(resources) = resources.map(plain) else { return Mode::Broken(MISSING_FILE.into()) };
+    if missing_bundled_file(&resources).is_some() {
+        return Mode::Broken(MISSING_FILE.into());
+    }
+    match local_data.map(plain) {
+        Some(local) if local.is_absolute() => Mode::Installed(Installed { root: local.join(ROOT_FOLDER), resources }),
+        _ => Mode::Broken(NO_LOCAL_APP_DATA.into()),
+    }
+}
+
+/// A Windows tool by its full path under `%SystemRoot%\System32`. Never started by bare name: Windows looks
+/// in the program's own folder first, and the installed app's folder can be written to by its user's programs.
+pub fn system_tool(name: &str, system_root: Option<OsString>) -> PathBuf {
+    let root = system_root.map(PathBuf::from).filter(|path| path.is_absolute()).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    root.join("System32").join(name)
 }
 
 /// The part of `runtime\setup.json` the shell reads.
@@ -157,6 +182,8 @@ impl Installed {
             ("UV_PYTHON_INSTALL_BIN", "0".into()),
             ("UV_NO_CONFIG", "1".into()),
             ("UV_NO_PROGRESS", "1".into()),
+            ("PYTHONNOUSERSITE", "1".into()),
+            ("PYTHONSAFEPATH", "1".into()),
         ]
     }
 
@@ -170,6 +197,9 @@ impl Installed {
             ("AIVOICE_DATA", self.data().into()),
             ("AIVOICE_INSTALLED", "1".into()),
             ("PYTHONDONTWRITEBYTECODE", "1".into()),
+            // Nothing from the user's own site-packages, and nothing from the folder the engine is started in.
+            ("PYTHONNOUSERSITE", "1".into()),
+            ("PYTHONSAFEPATH", "1".into()),
             ("HF_HOME", self.runtime().join("huggingface").into()),
         ]
     }
@@ -227,13 +257,18 @@ pub struct SetupState {
     pub percent: u8,
     pub message: String,
     pub error: Option<String>,
+    /// No setup has ever finished here: this one downloads everything. False for the quick check after an
+    /// update or a repair, which downloads only what is missing or changed.
+    pub first_time: bool,
+    /// Whether starting the setup again can help. False when the app itself is incomplete.
+    pub can_retry: bool,
     /// Where the app keeps everything it writes; empty in dev mode.
     pub root: String,
     pub data_dir: String,
     pub setup_log: String,
 }
 
-pub const PYTHON_STEP_MESSAGE: &str = "Downloading Python";
+pub const PYTHON_STEP_MESSAGE: &str = "Preparing Python";
 
 impl SetupState {
     pub fn dev() -> Self {
@@ -244,10 +279,17 @@ impl SetupState {
             percent: 100,
             message: String::new(),
             error: None,
+            first_time: false,
+            can_retry: false,
             root: String::new(),
             data_dir: String::new(),
             setup_log: String::new(),
         }
+    }
+
+    /// A release build that cannot run: the reason, and nothing to retry.
+    pub fn broken(reason: &str) -> Self {
+        SetupState { mode: "installed", status: "failed", percent: 0, error: Some(reason.into()), ..SetupState::dev() }
     }
 
     pub fn installed(layout: &Installed, ready: bool) -> Self {
@@ -258,6 +300,8 @@ impl SetupState {
             percent: if ready { 100 } else { 0 },
             message: if ready { String::new() } else { PYTHON_STEP_MESSAGE.into() },
             error: None,
+            first_time: !layout.record().is_file(),
+            can_retry: true,
             root: layout.root.display().to_string(),
             data_dir: layout.data().display().to_string(),
             setup_log: layout.setup_log().display().to_string(),
@@ -265,7 +309,8 @@ impl SetupState {
     }
 
     /// A setup has been started (again): back to the first step, the old error gone.
-    pub fn restart(&mut self) {
+    pub fn restart(&mut self, first_time: bool) {
+        self.first_time = first_time;
         self.status = "running";
         self.step = "python".into();
         self.percent = 0;
@@ -320,8 +365,11 @@ mod tests {
 
     fn bundle(dir: &Path) -> PathBuf {
         let resources = dir.join("program");
-        std::fs::create_dir_all(resources.join("backend").join("aivoice")).unwrap();
-        std::fs::write(resources.join("backend").join("aivoice").join("__main__.py"), b"").unwrap();
+        for file in BUNDLED_FILES {
+            let path = resources.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"").unwrap();
+        }
         resources
     }
 
@@ -329,43 +377,84 @@ mod tests {
         Installed { root: PathBuf::from(r"C:\Users\x\AppData\Local\Voxweave"), resources: PathBuf::from(r"C:\Program\Voxweave") }
     }
 
+    const LOCAL: &str = r"C:\Users\x\AppData\Local";
+
     #[test]
-    fn a_release_build_with_the_bundled_backend_is_installed_under_local_app_data() {
+    fn an_installer_build_with_all_its_files_is_installed_under_local_app_data() {
         let dir = scratch("installed");
         let resources = bundle(&dir);
-        let found = detect(false, Some(&resources), Some(Path::new(r"C:\Users\x\AppData\Local")), None).unwrap();
+        let Mode::Installed(found) = detect(false, true, Some(&resources), Some(Path::new(LOCAL))) else { panic!("not installed") };
         assert_eq!(found.root, PathBuf::from(r"C:\Users\x\AppData\Local\Voxweave"));
         assert_eq!(found.resources, resources);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn a_development_build_is_never_installed_even_with_resources_beside_it() {
+    fn a_development_build_is_the_source_checkout_whatever_lies_beside_it() {
         let dir = scratch("dev");
         let resources = bundle(&dir);
-        assert_eq!(detect(true, Some(&resources), Some(Path::new(r"C:\L")), None), None);
+        assert_eq!(detect(true, false, Some(&resources), Some(Path::new(LOCAL))), Mode::Dev);
+        assert_eq!(detect(true, true, Some(&resources), Some(Path::new(LOCAL))), Mode::Dev);
+        assert_eq!(detect(true, false, None, None), Mode::Dev);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn a_release_build_without_the_bundled_backend_is_the_source_checkout() {
-        let dir = scratch("bare");
-        assert_eq!(detect(false, Some(&dir), Some(Path::new(r"C:\L")), None), None);
-        assert_eq!(detect(false, None, Some(Path::new(r"C:\L")), None), None);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn the_root_can_be_overridden_and_an_empty_override_is_ignored() {
-        let dir = scratch("override");
+    fn a_release_build_never_becomes_the_source_checkout() {
+        let dir = scratch("never-dev");
         let resources = bundle(&dir);
-        let local = Path::new(r"C:\L");
-        let found = detect(false, Some(&resources), Some(local), Some(OsString::from(r"D:\try"))).unwrap();
-        assert_eq!(found.root, PathBuf::from(r"D:\try"));
-        let found = detect(false, Some(&resources), Some(local), Some(OsString::new())).unwrap();
-        assert_eq!(found.root, PathBuf::from(r"C:\L\Voxweave"));
-        assert_eq!(detect(false, Some(&resources), None, None), None);
+        let local = Some(Path::new(LOCAL));
+        for installer_build in [false, true] {
+            for resources in [None, Some(dir.as_path()), Some(resources.as_path())] {
+                for local in [None, local] {
+                    assert_ne!(detect(false, installer_build, resources, local), Mode::Dev);
+                }
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_installer_build_with_a_file_missing_says_so_and_is_not_installed() {
+        let dir = scratch("missing");
+        let local = Some(Path::new(LOCAL));
+        assert_eq!(detect(false, true, None, local), Mode::Broken(MISSING_FILE.into()));
+        assert_eq!(detect(false, true, Some(&dir), local), Mode::Broken(MISSING_FILE.into()));
+        for file in BUNDLED_FILES {
+            let resources = bundle(&dir);
+            std::fs::remove_file(resources.join(file)).unwrap();
+            assert_eq!(missing_bundled_file(&resources), Some(resources.join(file)));
+            assert_eq!(detect(false, true, Some(&resources), local), Mode::Broken(MISSING_FILE.into()), "{file}");
+        }
+        assert_eq!(MISSING_FILE, "A file of the app is missing. Install Voxweave again.");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn files_left_by_an_earlier_installer_build_do_not_make_a_plain_release_build_installed() {
+        let dir = scratch("stale");
+        let resources = bundle(&dir);
+        let found = detect(false, false, Some(&resources), Some(Path::new(LOCAL)));
+        assert_eq!(found, Mode::Broken(NOT_AN_INSTALLER_BUILD.into()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn without_a_usable_local_app_data_folder_nothing_is_started() {
+        let dir = scratch("nolocal");
+        let resources = bundle(&dir);
+        assert_eq!(detect(false, true, Some(&resources), None), Mode::Broken(NO_LOCAL_APP_DATA.into()));
+        // A relative value would put the root wherever the app happens to be started.
+        assert_eq!(detect(false, true, Some(&resources), Some(Path::new("AppData"))), Mode::Broken(NO_LOCAL_APP_DATA.into()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn system_tools_are_named_by_their_full_path() {
+        assert_eq!(system_tool("taskkill.exe", Some(OsString::from(r"D:\Win"))), PathBuf::from(r"D:\Win\System32\taskkill.exe"));
+        assert_eq!(system_tool("taskkill.exe", None), PathBuf::from(r"C:\Windows\System32\taskkill.exe"));
+        assert_eq!(system_tool("cmd.exe", Some(OsString::from("Windows"))), PathBuf::from(r"C:\Windows\System32\cmd.exe"));
+        assert!(system_tool("taskkill.exe", std::env::var_os("SystemRoot")).is_file());
     }
 
     #[test]
@@ -415,6 +504,8 @@ mod tests {
         assert_eq!(value(&env, "UV_PYTHON_PREFERENCE"), "only-managed");
         assert_eq!(value(&env, "UV_PYTHON_INSTALL_REGISTRY"), "0");
         assert_eq!(value(&env, "UV_NO_CONFIG"), "1");
+        assert_eq!(value(&env, "PYTHONNOUSERSITE"), "1");
+        assert_eq!(value(&env, "PYTHONSAFEPATH"), "1");
     }
 
     #[test]
@@ -424,6 +515,8 @@ mod tests {
         assert_eq!(value(&env, "AIVOICE_DATA"), r"C:\Users\x\AppData\Local\Voxweave\data");
         assert_eq!(value(&env, "AIVOICE_INSTALLED"), "1");
         assert_eq!(value(&env, "PYTHONDONTWRITEBYTECODE"), "1", "nothing is written into the program folder");
+        assert_eq!(value(&env, "PYTHONNOUSERSITE"), "1");
+        assert_eq!(value(&env, "PYTHONSAFEPATH"), "1");
         for name in ["AIVOICE_DATA", "HF_HOME"] {
             assert!(Path::new(&value(&env, name)).starts_with(r"C:\Users\x\AppData\Local\Voxweave"), "{name}");
         }
@@ -511,7 +604,7 @@ mod tests {
         assert_eq!(state.percent, 40, "the bar never goes backwards");
         state.fail("no network".into());
         assert_eq!((state.status, state.error.as_deref()), ("failed", Some("no network")));
-        state.restart();
+        state.restart(false);
         assert_eq!((state.status, state.percent, state.error.as_deref()), ("running", 0, None));
         state.succeed();
         assert_eq!((state.status, state.percent), ("ready", 100));
@@ -522,7 +615,33 @@ mod tests {
         let json = serde_json::to_value(SetupState::installed(&layout(), false)).unwrap();
         let mut names: Vec<&str> = json.as_object().unwrap().keys().map(String::as_str).collect();
         names.sort();
-        assert_eq!(names, ["data_dir", "error", "message", "mode", "percent", "root", "setup_log", "status", "step"]);
+        assert_eq!(
+            names,
+            ["can_retry", "data_dir", "error", "first_time", "message", "mode", "percent", "root", "setup_log", "status", "step"]
+        );
+    }
+
+    #[test]
+    fn a_setup_is_the_first_one_until_a_record_of_a_finished_one_exists() {
+        let dir = scratch("first-time");
+        let l = Installed { root: dir.join("root"), resources: dir.join("program") };
+        let state = SetupState::installed(&l, false);
+        assert!(state.first_time && state.can_retry);
+        std::fs::create_dir_all(l.runtime()).unwrap();
+        std::fs::write(l.record(), r#"{"version": "0.0.9"}"#).unwrap();
+        assert!(!SetupState::installed(&l, false).first_time, "an update only checks and downloads what changed");
+        let mut state = state;
+        state.restart(false);
+        assert!(!state.first_time);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_broken_app_shows_its_reason_and_offers_no_retry() {
+        let state = SetupState::broken(MISSING_FILE);
+        assert_eq!((state.mode, state.status), ("installed", "failed"));
+        assert_eq!(state.error.as_deref(), Some(MISSING_FILE));
+        assert!(!state.can_retry && !state.first_time);
     }
 
     #[test]

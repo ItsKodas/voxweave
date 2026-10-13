@@ -27,10 +27,17 @@ fn free_port() -> u16 {
         .expect("no free port")
 }
 
+/// The backend folder of the source checkout. Only development builds use it.
 fn backend_dir() -> PathBuf {
-    match std::env::var("AIVOICE_BACKEND_DIR") {
-        Ok(dir) => PathBuf::from(dir),
-        Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("backend"),
+    backend_dir_for(tauri::is_dev(), std::env::var_os("AIVOICE_BACKEND_DIR"))
+}
+
+/// `AIVOICE_BACKEND_DIR` is a convenience of the source checkout. A release build ignores it: a variable in
+/// the environment must never decide which python.exe the shipped app starts.
+fn backend_dir_for(dev_build: bool, chosen: Option<OsString>) -> PathBuf {
+    match chosen.filter(|dir| dev_build && !dir.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("backend"),
     }
 }
 
@@ -137,7 +144,7 @@ fn kill_tree(child: &mut Child) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        let _ = Command::new("taskkill")
+        let _ = Command::new(setup::system_tool("taskkill.exe", std::env::var_os("SystemRoot")))
             .args(["/PID", &child.id().to_string(), "/T", "/F"])
             .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
             .status();
@@ -203,9 +210,19 @@ fn supervise(port: u16, launch: Launch, shell: Arc<Shell>) {
     });
 }
 
+/// How this app starts its backend, or None when it must not start one at all: a release build never uses
+/// the source checkout's backend, so one that is not a complete installed app starts nothing.
+fn launch_for(mode: &setup::Mode, inherited: impl IntoIterator<Item = OsString>) -> Option<Launch> {
+    match mode {
+        setup::Mode::Dev => Some(dev_launch(backend_dir())),
+        setup::Mode::Installed(layout) => Some(installed_launch(layout, inherited)),
+        setup::Mode::Broken(_) => None,
+    }
+}
+
 /// What the commands, the backend supervisor and the setup share.
 struct Shell {
-    /// None in the source checkout.
+    /// None in the source checkout and in a release build that cannot run.
     installed: Option<setup::Installed>,
     version: String,
     state: Mutex<setup::SetupState>,
@@ -218,11 +235,16 @@ struct Shell {
 }
 
 impl Shell {
-    fn new(installed: Option<setup::Installed>, version: String) -> Self {
-        let ready = installed.as_ref().map(|layout| layout.setup_complete(&version));
-        let state = match (&installed, ready) {
-            (Some(layout), Some(ready)) => setup::SetupState::installed(layout, ready),
-            _ => setup::SetupState::dev(),
+    fn new(mode: setup::Mode, version: String) -> Self {
+        // `hold` keeps the backend from being started: until the setup is done, or for good.
+        let (installed, state, hold) = match mode {
+            setup::Mode::Dev => (None, setup::SetupState::dev(), false),
+            setup::Mode::Installed(layout) => {
+                let ready = layout.setup_complete(&version);
+                let state = setup::SetupState::installed(&layout, ready);
+                (Some(layout), state, !ready)
+            }
+            setup::Mode::Broken(reason) => (None, setup::SetupState::broken(&reason), true),
         };
         Shell {
             installed,
@@ -231,7 +253,7 @@ impl Shell {
             backend: Arc::new(Mutex::new(None)),
             setup_child: Mutex::new(None),
             setup_running: AtomicBool::new(false),
-            hold: Arc::new(AtomicBool::new(ready == Some(false))),
+            hold: Arc::new(AtomicBool::new(hold)),
             quitting: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -266,7 +288,8 @@ fn begin_setup(app: &AppHandle, shell: &Arc<Shell>) {
     let notify = move |state: setup::SetupState| {
         let _ = app.emit("setup-progress", state);
     };
-    shell.update(&notify, |state| state.restart());
+    let first_time = !layout.record().is_file();
+    shell.update(&notify, |state| state.restart(first_time));
     let shell = shell.clone();
     thread::spawn(move || {
         let waited = Instant::now();
@@ -407,23 +430,23 @@ fn start_setup(app: AppHandle, shell: State<Arc<Shell>>) -> setup::SetupState {
     shell.snapshot()
 }
 
-/// The installed app's folders, or None for the source checkout. Decided once, when the app starts.
-fn installed_layout(context: &tauri::Context) -> Option<setup::Installed> {
+/// Set to "1" at compile time by `npm run installer` (scripts/build-installer.ps1) and by nothing else.
+const INSTALLER_BUILD: bool = matches!(option_env!("VOXWEAVE_INSTALLER"), Some(flag) if flag.len() == 1 && flag.as_bytes()[0] == b'1');
+
+/// What kind of app this is. Decided once, when the app starts.
+fn app_mode(context: &tauri::Context) -> setup::Mode {
     let resources = tauri::utils::platform::resource_dir(context.package_info(), &tauri::utils::Env::default()).ok();
     let local_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
-    setup::detect(tauri::is_dev(), resources.as_deref(), local_data.as_deref(), std::env::var_os(setup::ROOT_OVERRIDE))
+    setup::detect(tauri::is_dev(), INSTALLER_BUILD, resources.as_deref(), local_data.as_deref())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let port = free_port();
     let context = tauri::generate_context!();
-    let installed = installed_layout(&context);
-    let launch = match &installed {
-        Some(layout) => installed_launch(layout, std::env::vars_os().map(|(name, _)| name)),
-        None => dev_launch(backend_dir()),
-    };
-    let shell = Arc::new(Shell::new(installed, context.package_info().version.to_string()));
+    let mode = app_mode(&context);
+    let launch = launch_for(&mode, std::env::vars_os().map(|(name, _)| name));
+    let shell = Arc::new(Shell::new(mode, context.package_info().version.to_string()));
     let (setup_shell, exit_shell) = (shell.clone(), shell.clone());
 
     let app = tauri::Builder::default()
@@ -477,7 +500,9 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
-            supervise(port, launch, setup_shell.clone());
+            if let Some(launch) = launch {
+                supervise(port, launch, setup_shell.clone());
+            }
             if setup_shell.hold.load(Ordering::SeqCst) {
                 // The installed app's first start, an update, or a damaged environment.
                 begin_setup(app.handle(), &setup_shell);
@@ -600,17 +625,41 @@ mod tests {
 
     #[test]
     fn the_source_checkout_has_no_setup_and_never_holds_the_backend() {
-        let shell = Shell::new(None, "0.1.0".into());
+        let shell = Shell::new(setup::Mode::Dev, "0.1.0".into());
         assert_eq!(shell.snapshot(), setup::SetupState::dev());
         assert!(!shell.hold.load(Ordering::SeqCst));
+        assert_eq!(launch_for(&setup::Mode::Dev, []), Some(dev_launch(backend_dir())));
+    }
+
+    #[test]
+    fn a_release_build_that_cannot_run_starts_no_backend_and_says_why() {
+        let mode = setup::Mode::Broken(setup::MISSING_FILE.into());
+        assert_eq!(launch_for(&mode, []), None, "never the source checkout's backend");
+        let shell = Shell::new(mode, "0.1.0".into());
+        assert!(shell.hold.load(Ordering::SeqCst));
+        assert!(shell.installed.is_none(), "there is nothing a setup could be run with");
+        let state = shell.snapshot();
+        assert_eq!((state.mode, state.status), ("installed", "failed"));
+        assert_eq!(state.error.as_deref(), Some("A file of the app is missing. Install Voxweave again."));
+        assert!(!state.can_retry);
+    }
+
+    #[test]
+    fn a_release_build_ignores_the_backend_folder_variable() {
+        let compiled_in = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("backend");
+        assert_eq!(backend_dir_for(false, Some(OsString::from("C:/x/backend"))), compiled_in);
+        assert_eq!(backend_dir_for(true, Some(OsString::from("C:/x/backend"))), PathBuf::from("C:/x/backend"));
+        assert_eq!(backend_dir_for(true, None), compiled_in);
+        assert_eq!(backend_dir_for(true, Some(OsString::new())), compiled_in);
     }
 
     #[test]
     fn an_installed_app_without_a_finished_setup_holds_the_backend() {
         let dir = scratch_dir("shell-installed");
         let layout = setup::Installed { root: dir.join("root"), resources: dir.join("program") };
-        let shell = Shell::new(Some(layout.clone()), "0.1.0".into());
+        let shell = Shell::new(setup::Mode::Installed(layout.clone()), "0.1.0".into());
         assert_eq!(shell.snapshot().status, "running");
+        assert!(shell.snapshot().first_time);
         assert!(shell.hold.load(Ordering::SeqCst));
 
         fs::create_dir_all(layout.python().parent().unwrap()).unwrap();
@@ -618,8 +667,9 @@ mod tests {
         fs::create_dir_all(layout.base_model().parent().unwrap()).unwrap();
         fs::write(layout.base_model(), b"").unwrap();
         fs::write(layout.record(), br#"{"version": "0.1.0"}"#).unwrap();
-        let shell = Shell::new(Some(layout), "0.1.0".into());
+        let shell = Shell::new(setup::Mode::Installed(layout.clone()), "0.1.0".into());
         assert_eq!(shell.snapshot().status, "ready");
+        assert!(launch_for(&setup::Mode::Installed(layout), []).is_some());
         assert!(!shell.hold.load(Ordering::SeqCst));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -632,9 +682,9 @@ mod tests {
         fs::create_dir_all(layout.runtime()).unwrap();
         let batch = dir.join("fake-setup.cmd");
         fs::write(&batch, format!("@echo off\r\n{}\r\n", script.replace('\n', "\r\n"))).unwrap();
-        let mut cmd = Command::new("cmd");
+        let mut cmd = Command::new(setup::system_tool("cmd.exe", std::env::var_os("SystemRoot")));
         cmd.arg("/C").arg(&batch).current_dir(&dir);
-        let shell = Shell::new(Some(layout.clone()), "0.1.0".into());
+        let shell = Shell::new(setup::Mode::Installed(layout.clone()), "0.1.0".into());
         (dir, layout, shell, cmd)
     }
 

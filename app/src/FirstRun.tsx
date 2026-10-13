@@ -53,17 +53,39 @@ export function useSetup(): { setup: SetupState | null; retry: () => void } {
   return { setup, retry };
 }
 
-/** Shown by the installed app until its one-time setup has finished. */
+/**
+ * Shown by the installed app instead of the app itself: during the first setup, during the check after an update
+ * or a repair, and for good when the app is incomplete and cannot run.
+ */
 export function FirstRun({ setup, onRetry }: { setup: SetupState; onRetry: () => void }) {
   const failed = setup.status === "failed";
+  if (!setup.can_retry) {
+    return (
+      <section className="first-run">
+        <h2>Voxweave cannot start</h2>
+        <div role="alert" className="error">
+          <p>{setup.error ?? "The app is incomplete. Install Voxweave again."}</p>
+        </div>
+      </section>
+    );
+  }
   return (
     <section className="first-run">
-      <h2>First-time setup</h2>
-      <p>
-        Voxweave is downloading what its voice engine needs: Python, the engine's packages and the base speech
-        model, {DOWNLOAD_SIZE} in total ({DISK_SIZE} on disk).
-      </p>
-      <p>It needs an internet connection this once. After that, live mode works without one.</p>
+      <h2>{setup.first_time ? "First-time setup" : "Checking the installation"}</h2>
+      {setup.first_time ? (
+        <>
+          <p>
+            Voxweave is downloading what its voice engine needs: Python, the engine's packages and the base speech
+            model, {DOWNLOAD_SIZE} in total ({DISK_SIZE} on disk).
+          </p>
+          <p>It needs an internet connection this once. After that, live mode works without one.</p>
+        </>
+      ) : (
+        <p>
+          Voxweave is checking the files of its voice engine. It downloads only what is missing or has changed,
+          which needs an internet connection; your voices and settings are not touched.
+        </p>
+      )}
       <div className="train-bar">
         <progress max={100} value={setup.percent} aria-label="Setup progress" />
         <span>{Math.round(setup.percent)}%</span>
