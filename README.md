@@ -204,6 +204,7 @@ You need, besides the Requirements above:
 - An AMD graphics driver, **AMD Adrenalin 26.2.2 or newer**. The training environment uses AMD's official PyTorch for Windows wheels (ROCm 7.2.1), which require it. It was developed and tested on an RX 7900 XTX with driver 32.0.31041.1004 (Adrenalin 26.8.1). A future driver can break the pairing: the environment check then says the GPU is not visible.
 - `ffmpeg` and `ffprobe` on `PATH` (the RVC preprocessing step runs both). Open a new Git Bash window after installing them and check with `ffmpeg -version` and `ffprobe -version`.
 - `git`, `curl` and `sha256sum` in Git Bash (they come with Git for Windows) and `uv`.
+- **Python 3.12** where `uv` can find it. The setup script does not download Python (it runs `uv venv --python 3.12 --no-python-downloads`); if you have no 3.12, get one first with `uv python install 3.12`.
 - The ONNX exporter environment in `tools/.rvc` from **Adding a voice** above. The last training step exports the model with it, and the training check fails without it.
 
 Then, from the repo root in Git Bash:
@@ -212,7 +213,7 @@ Then, from the repo root in Git Bash:
 bash trainer/setup.sh
 ```
 
-It creates `trainer/.venv` (Python 3.12), installs AMD's seven ROCm 7.2.1 wheels (hash-pinned) and the packages in `trainer/requirements.txt`, clones RVC into `trainer/rvc` at commit `81eed5e8f68b6bed1789f682fe78cdd324495afc`, applies the two patches in `trainer/patches/`, and downloads the pretrained files listed in `trainer/pretrained.json` (about 590 MB). Every pretrained file is checked against its recorded SHA-256 and size before it is put in place, and an unfinished download (`*.part`) is removed and never used. Nothing is installed system-wide, and the caches stay inside `trainer/.cache`.
+It creates `trainer/.venv` (Python 3.12), installs AMD's seven ROCm 7.2.1 wheels (hash-pinned) and the exact package versions in `trainer/requirements.lock` (the versions training was proven with; `trainer/requirements.txt` holds the ranges they were resolved from and is used, with a printed notice, only when the lock file is missing), clones RVC into `trainer/rvc` at commit `81eed5e8f68b6bed1789f682fe78cdd324495afc`, applies the two patches in `trainer/patches/`, and downloads the pretrained files listed in `trainer/pretrained.json` (about 590 MB). Every pretrained file is checked against its recorded SHA-256 and size before it is put in place, and an unfinished download (`*.part`) is removed and never used. The silence samples are unpacked to a temporary folder and put in place in one step, so an interrupted setup never leaves a half-unpacked set. Nothing is installed system-wide, and the caches stay inside `trainer/.cache`.
 
 **Size.** The AMD wheels are about 2.1 GB to download. On disk the environment is about 6.4 GB (`trainer/.venv`) and `trainer/rvc` about 0.6 GB. On a clean machine uv's package cache under `trainer/.cache/uv` is a further cost of similar size (the spike measured 6.5 GB for it). These sizes are from the development machine, which reused an existing cache: setup took 100 seconds there and 7 seconds when re-run. On a clean machine the downloads dominate.
 
@@ -236,7 +237,7 @@ Training turns a voice's dataset into an RVC v2 model (40 kHz, with pitch) that 
 
 - **Epochs** (100, 200 or 300; default 200). One epoch is one pass over all of the voice's audio. More epochs train longer and usually fit the voice more closely, up to a point. The backend accepts any whole number from 20 to 1000, but the screen offers these three. A checkpoint is saved every 5 epochs.
 - **Batch size** (4, 8 or 16; default 8), under **Advanced**: how many slices are processed at once. In the spike, 8 was nearly as fast as 16 at about a third of the GPU memory, and 4 was slower per epoch. Leave it at 8 unless you have a reason. It cannot be changed when resuming.
-- **Rough time** is shown on the screen: a fixed rule of thumb of about one second per epoch per minute of audio, rounded up to the next 5 minutes. Measured on the development machine at batch 8: 10 minutes of audio takes about 9.4 seconds per epoch, so about 31 minutes for 200 epochs; 30 minutes of audio is about 28 seconds per epoch, about 1 h 35 min for 200 epochs (extrapolated, not measured). The other stages add about 2 to 3 minutes for 10 minutes of audio (spike: 9 s slicing, 38 s pitch, 92 s features, 4 s index, 8 s export). The first training on a machine can take a few minutes longer while the GPU libraries compile their kernels.
+- **Rough time** is shown on the screen: a fixed rule of thumb of about one second per epoch per minute of audio, rounded up to the next 5 minutes. Measured on the development machine at batch 8: 10 minutes of audio takes about 9.4 seconds per epoch, so about 31 minutes for 200 epochs; 30 minutes of audio is about 28 seconds per epoch, about 1 h 35 min for 200 epochs (extrapolated, not measured). The other stages add about 2 to 3 minutes for 10 minutes of audio (spike: 9 s slicing, 38 s pitch, 92 s features, 4 s index, 8 s export). The first training on a machine can take a few minutes longer while the GPU libraries compile their kernels: the first epoch of a first-ever run can take minutes, and the box shows "Estimating time…" until two epochs are done.
 
 Press **Start training** (**Train again** for a voice that already has a model; it asks first, and the current model is replaced only when the new run finishes).
 
@@ -250,16 +251,19 @@ Press **Start training** (**Train again** for a voice that already has a model; 
 6. **Building index**: the search index used to blend in the trained voice at conversion time.
 7. **Exporting**: converts the model for live mode and puts it in place.
 
+**Windows display language.** The epoch count, the time remaining and the checkpoint backups are read from the English log lines RVC prints. RVC translates some of those lines for a few Windows display languages without an English fallback (Chinese, Japanese, Korean and a few others). On such a system a run still completes and its model is exported, but without epoch counts, without a time estimate and without checkpoint backups.
+
 While a run is active the box shows the stage, the bar and **Cancel**, and says "Live mode and recording are unavailable until training finishes." Starting live mode is refused with "Training is running. Wait for it to finish or cancel it before starting live mode", and recording with the same text ending "before recording". The box of any other voice says "Another voice is training". Only one training runs at a time.
 
 ### Cancel, Resume and Start over
 
-- **Cancel** asks "Stop training? You can resume it later." The trainer stops at the end of the epoch it is in (usually a few seconds; it is ended by force after at most 90 seconds) and the box says "Training was stopped". Nothing is thrown away: the saved training state stays, and so does any model you already had.
-- **Resume** (shown only when the stopped run can be resumed) continues from the last saved checkpoint, which is at most 5 epochs back, with the same epochs and batch size. It is refused if the clips changed since the run started (clips added, deleted or replaced), because old features must not be mixed with a new clip list: "The clips changed since this training run started. Start a new training run." It is not offered either when the saved state cannot be read. If a save was cut off in the middle (power loss, process killed), Resume uses the verified backup copy of the checkpoint instead of silently starting from scratch. A run stopped before its first checkpoint was saved resumes by training from epoch 1.
+- **Cancel** asks "Stop training? You can resume it later." The trainer stops at the end of the epoch it is in, so that it is never cut off in the middle of a save (usually a few seconds). The wait for the end of the epoch is one minute, or twice the length of the recent epochs when they are longer than that, and never more than 15 minutes; after it the trainer is ended anyway, and the app ends it by force 30 seconds later still if it has not gone. The box then says "Training was stopped". Nothing is thrown away: the saved training state stays, and so does any model you already had.
+- **Resume** is offered for a run that was cancelled, interrupted or failed, from the moment its clips are sliced. It keeps the same epochs and batch size, the sliced audio, and whatever pitch and feature files were already made. If a checkpoint was saved, training continues from the last one, which is at most 5 epochs back. If the run stopped before its first checkpoint (during pitch, features or the first epochs), the box says "Resume keeps the prepared audio and starts training from the first epoch." A run stopped while the clips were still being sliced has nothing prepared yet, so it offers only Start over.
+- Resume is refused if the clips changed since the run started (clips added, deleted or replaced), because old features must not be mixed with a new clip list: "The clips changed since this training run started. Start a new training run." After that refusal, and after any failure the trainer reports as one a resume cannot get past (the saved state cannot be read, the prepared audio is incomplete), Resume is no longer offered for that run, and the backend refuses it too: only Start over remains. If a save was cut off in the middle (power loss, process killed), Resume uses the verified backup copy of the checkpoint instead of silently starting from scratch.
 - **Start over** (shown in place of Start training after a run was stopped or failed) asks "Start over? The progress so far will be discarded." and then removes that voice's saved training state and begins again. A model already in the voice's folder is kept until the new one is finished.
 - A failed run shows its reason on screen; the details are in `data/voices/<id>/training/worker.log`.
 
-**Closing the app.** Hiding the window to the tray does not stop training. **Quit** in the tray menu (or Ctrl+C in the console running `npm run tauri dev`) does: the training worker is tied to the app and ends with it, so nothing keeps the GPU busy afterwards, and the app waits up to 10 seconds for it to stop. The next time the app starts, the voice shows "Training was interrupted when the app closed" and **Resume** continues from the last checkpoint (up to 5 epochs are repeated). The same happens after a backend crash; a worker left running by a crashed backend is found and ended.
+**Closing the app.** Hiding the window to the tray does not stop training. **Quit** in the tray menu does: it ends the backend and the whole training process tree at once, without waiting for the end of an epoch. Nothing keeps the GPU busy afterwards. The next time the app starts, the voice shows "Training was interrupted when the app closed" and **Resume** is offered (up to 5 epochs are repeated). Because the trainer is not given time to finish what it is doing, the interruption can land in the middle of a save; Resume then continues from the previous checkpoint's backup copy, so up to one more save interval is repeated, and nothing is lost silently. When the backend exits by itself in the normal way (for example Ctrl+C in the console running `npm run tauri dev`), it first asks the trainer to stop, waits up to 5 seconds, and then ends whatever is still running. The same recovery applies after a backend crash: the worker is tied to the backend and ends when it is gone, and a worker that is still found running at the next start is ended before anything else.
 
 **Where things are.**
 
@@ -273,17 +277,18 @@ data/voices/<id>/training/worker.log        what the training worker did, with t
 data/voices/<id>/training/worker.out.log    the worker's own output and errors, for a crash
 trainer/rvc/logs/voice-<id>/                temporary: checkpoints and working files of a run
 trainer/rvc/assets/weights/voice-<id>.pth   temporary: the small model, until it is exported
+data/trash/<id>/models-<UTC time>/          a model that a later training run replaced
 ```
 
-The model is exported into a new folder and swapped in only after it passes a check, so a failed run never damages the model you already have.
+The model is exported into a new folder and swapped in only after it passes a check, so a failed run never damages the model you already have. If the app is killed in the middle of that swap, the previous model is put back when the app next starts.
 
 **Disk use during a run.** Beyond the one-time environment (see Training setup), a run keeps a checkpoint pair of about 1.3 GB (`G_2333333.pth` 438 MB and `D_2333333.pth` 857 MB) under `trainer/rvc/logs/voice-<id>/`, plus a verified second copy of that pair (`.bak`) for crash safety, so keep about 2.6 GB free on that drive, plus the slices and features (hundreds of MB for 10 minutes of audio). All of it is deleted automatically when the run succeeds, and when the voice is deleted. It stays after Cancel, a failure or an interruption, because Resume needs it. The exported model is about 55 MB and its index about 90 MB for 10 minutes of audio.
 
 **Network.** Training makes no network requests: the worker sets `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`. Only `bash trainer/setup.sh` downloads anything.
 
-**Using the trained voice.** When a run finishes, the box says "Training finished. This voice is now available on the Live tab." and shows "Trained model: ready". On the **Live** tab the voice is listed under **Voice** with the name you gave it; choose it like any exported voice (see Running). The Live voice list reloads when a run finishes while the Voices tab is open. If a run finished while you were on another tab and the voice is missing, restart the app.
+**Using the trained voice.** When a run finishes while its box is on screen, the box says "Training finished. This voice is now available on the Live tab."; later, and for a run that finished while you were elsewhere, it says "Trained model: ready". On the **Live** tab the voice is listed under **Voice** with the name you gave it; choose it like any exported voice (see Running). The app follows a running job whichever tab is shown, so the Live voice list reloads when the run finishes even if you are waiting on the Live tab, and it reloads again every time you come back to the Live tab. Your selection and the rest of the form are kept.
 
-**Retraining.** Add or fix clips and press **Train again**. The new model replaces the old one only when the run completes; cancelling or failing leaves the old model in use.
+**Retraining.** Add or fix clips and press **Train again**. The new model replaces the old one only when the run completes; cancelling or failing leaves the old model in use. The replaced model is not erased: it is moved to `data/trash/<id>/models-<UTC time>/` (about 150 MB for 10 minutes of audio). Nothing empties the trash; delete those folders yourself when you no longer want them.
 
 ## Safety behaviour
 
@@ -337,9 +342,9 @@ A human needs to do this once; it has not been done yet. Everything in stage 3 w
 2. Select a voice with less than 5 minutes: the Train box says to record or import at least 5 minutes and offers no Start.
 3. Select a voice with at least 5 minutes of real speech (record it, or import a real recording). If the box lists a failing check, fix it and press **Check again**.
 4. Train a short run first: choose **100** epochs and press **Start training**. Watch the stages go through their names, the bar move, and "Epoch N of 100" with a time estimate. Live mode and recording are refused meanwhile. The GPU is busy (Task Manager, Performance, GPU).
-5. Press **Cancel** during Training and answer yes. It stops within seconds and says "Training was stopped". Press **Resume**: it continues from a saved epoch, not from 1 (unless you cancelled before the first save at epoch 5).
+5. Press **Cancel** during Training and answer yes. It stops within seconds and says "Training was stopped". Press **Resume**: it continues from a saved epoch, not from 1. If you cancelled before the first save at epoch 5, Resume is still offered, the box says "Resume keeps the prepared audio and starts training from the first epoch", and it does not slice the clips again (the pitch and feature stages only fill in what is missing) before it trains from epoch 1.
 6. Choose **Quit** in the tray menu mid-training, confirm no `python.exe` from `trainer/.venv` is left running, then reopen the app: the voice shows "Training was interrupted when the app closed" and **Resume** works.
-7. Let that short run finish. The box says "Training finished" and the voice appears under **Voice** on the Live tab. Start live mode with it, listen on headphones and note how it sounds. Check that `trainer/rvc/logs/voice-<id>/` is gone and `data/voices/<id>/models/rvc/` holds `model.onnx` and `model.index`.
+7. Let that short run finish while you wait on the **Live** tab: the voice appears under **Voice** there without a restart. Back on the Voices tab the box says "Trained model: ready" ("Training finished" if you watched it finish there). Start live mode with it, listen on headphones and note how it sounds. Check that `trainer/rvc/logs/voice-<id>/` is gone and `data/voices/<id>/models/rvc/` holds `model.onnx` and `model.index`.
 8. Cancel another run, then add a clip to the voice and press **Resume**: it is refused with the "clips changed" message, and **Start over** works.
 9. Then the full run: **Train again** with 200 (or 300) epochs and let it finish, listen on the Live tab again and compare it with the short run. Note the total time against the estimate.
 10. Delete a trained test voice and confirm `trainer/rvc/logs/voice-<id>/` and its `trainer/rvc/assets/weights/` file are gone.
@@ -360,13 +365,13 @@ cd app/src-tauri && cargo test
 
 `backend/tests/test_rvc_real.py` runs the real DirectML path and needs the GPU, the base model and a voice in `data/pretrained/rvc/`; it also shows that the speech packages did not remove DirectML.
 
-`backend/tests/test_worker_real.py` runs the real training pipeline on the GPU and is skipped unless asked for. It needs the training environment, takes about 5 to 6 minutes, and must not run while anything else uses the GPU (live mode, another training run):
+`backend/tests/test_worker_real.py` runs the real training pipeline on the GPU and is skipped unless asked for. It needs the training environment, takes about 10 minutes on a free GPU, and should not run while anything else uses the GPU (live mode, another training run):
 
 ```bash
 AIVOICE_RUN_TRAIN_TEST=1 backend/.venv/Scripts/python -m pytest backend/tests/test_worker_real.py -q -W error -s
 ```
 
-It runs a 2-epoch training and converts audio with the result, cancels and resumes a run, and kills a worker outright and resumes. Last result: 3 passed in 5 min 32 s. Without the variable the full backend suite reports those 3 as skipped (last result: 757 passed, 3 skipped).
+It runs a 2-epoch training and converts audio with the result, cancels and resumes a run, kills a worker outright and resumes, and drives the app's own training manager through a whole run and a cancelled one on a temporary data folder (a library voice of 5.2 minutes). Last result: 4 passed in 17 min 2 s, measured while another experiment was sharing the GPU; on a free GPU the first three took 5 min 32 s, and the fourth took 4 min 51 s run by itself. If anything of a test's experiment is left under `trainer/rvc` afterwards, the test run says so with a warning. Without the variable the full backend suite reports those 4 as skipped (last result: 827 passed, 4 skipped).
 
 ## Known limitations
 
@@ -384,6 +389,8 @@ It runs a 2-epoch training and converts audio with the result, cancels and resum
 - Training needs an AMD GPU with the driver named in Training setup and has only been run on an RX 7900 XTX. There is no CPU fallback.
 - Training and live mode cannot run at the same time (both need the GPU), and neither can training and recording. Quitting the app interrupts training; it can be resumed.
 - The training time estimate is a fixed rule of thumb, and the first epoch of a first-ever run is much slower while the GPU libraries compile.
-- The Live tab's voice list reloads when a run finishes while the Voices tab is open, not when you come back to the Live tab later; restart the app if a trained voice is missing.
+- Training reads its progress from RVC's English log lines; on a Windows display language that RVC translates without an English fallback (Chinese, Japanese, Korean and a few others) a run completes but shows no epoch counts or time estimate and makes no checkpoint backups. See Training a voice.
+- A model replaced by retraining is kept in `data/trash/` and is never removed automatically.
+- When a resume is refused because the clips changed, putting the clips back does not bring Resume back for that run; only Start over remains.
 - Recording, import, drag and drop, clip playback and transcript quality have been tested with fake devices and files only; see the Stage 2 checklist.
 - Windows only; DirectML GPU required for live mode (no CPU fallback).

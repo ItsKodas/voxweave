@@ -132,6 +132,53 @@ Nothing that changes the worker. Details worth knowing:
 
 No change was needed in `trainer/rvclog.py` or `trainer/filelist.py`.
 
+## 6a. Updated after the review fixes (2026-10-13)
+
+The sections above are left as they were written after the first real runs. Three statements in them no longer
+describe the code, and one was too strong:
+
+- **Section 5, first point, and section 6, fix 1** (a resumed run opens at epoch 0 and 13 %). This was changed in
+  the worker's fix round (commit 2e86d54): on a resume the worker reads the last saved epoch from its stage record
+  before it writes anything, so the first training line of the resumed run already carries that epoch and the
+  percent that goes with it, and the progress file no longer shows a drop across a cancel and its resume. The real
+  test asserts this now (no line of the resumed run is below the saved position, and every training line carries
+  an epoch at or after it). After the final review the reported epoch is also the one the trainer really loaded:
+  when the last save cannot be read and the backup is used, the count goes back to the backup's epoch (the percent
+  still never goes down within a run).
+- **Section 3, "None was rejected"** (checkpoint backups). That was true of the eleven backups of those first runs
+  and is not a property of the worker. Since the fix round the worker checks, after copying both files, that
+  neither was saved again in the meantime, and drops the copy if one was. With `--save-every 1` and 3 second epochs
+  the next save does begin during the copy now and then: in later real runs three backups were skipped for that
+  reason ("checkpoint backup skipped, the previous backup is kept"). The previous backup stays in each case, and
+  the app's default of a save every 5 epochs leaves far more room. After the final review the worker also writes
+  a `[worker] WARNING` line when three backups in a row are skipped.
+- **Section 3, Cancel.** The wait for the end of the epoch is no longer a fixed minute: it is twice the mean length
+  of the last ten epochs when that is longer, capped at 15 minutes, and the manager waits 30 seconds beyond what
+  the worker announces. A worker whose app has gone still waits one minute at most.
+
+Other changes of the final fix wave that touch what these notes describe: the voice's name reaches the exporter as
+one argument (`--name=<name>`); a model that a successful run replaces is moved to `<data>/trash/<voice-id>/`
+instead of being erased; and Resume is offered from the moment the clips are sliced, not only after the first
+checkpoint.
+
+**A real run through the manager.** `test_worker_real.py` now has a fourth test that drives the real
+`TrainingManager` (real launch, real `verify.py`, real progress tailing and process handling) on a temporary data
+folder: a library voice of 51 synthetic clips (5.24 minutes), 2 epochs at batch 4, followed by a second
+run that is cancelled after its first training epoch. Measured on the development machine while another
+experiment was also using the GPU:
+
+| | |
+| --- | ---: |
+| Making the voice (51 clips through `Library.add_clip`) | 4.2 s |
+| First run, start to "done" as the manager reports it | 179.7 s (176 status polls) |
+| Second run, start to its first finished epoch | 97.6 s |
+| Cancel through the manager, request to "cancelled" | 8.0 s |
+| The whole test | 4 min 51 s |
+
+After the first run the model was in the temporary voice's folder, the experiment folder was gone, and
+`worker.log` held only lines written by the worker (every line starts with a stage tag). After the cancel no
+process of the experiment was left, the stage record was there, and the manager offered Resume.
+
 ## 7. Progress file of the successful 2-epoch run (warm caches)
 
 ```json
