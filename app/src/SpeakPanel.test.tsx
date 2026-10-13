@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SpeakPanel } from "./SpeakPanel";
@@ -126,7 +126,7 @@ describe("SpeakPanel form", () => {
     await open();
     const listen = screen.getByRole("combobox", { name: "Listen on" });
     expect(listen).toHaveValue("2");
-    expect(screen.queryByRole("option", { name: /VoiceMeeter|CABLE/ })).not.toBeInTheDocument();
+    expect(within(listen).queryByRole("option", { name: /VoiceMeeter|CABLE/ })).not.toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "Send to virtual mic" })).toBeChecked();
     type("Hello");
     await userEvent.click(speakButton());
@@ -142,12 +142,38 @@ describe("SpeakPanel form", () => {
   });
 
   it("shows no virtual mic checkbox when there is none, and sends only to the listen device", async () => {
-    vi.mocked(api.devices).mockResolvedValue({ ...DEVICES, virtual_mic: null });
+    vi.mocked(api.devices).mockResolvedValue({ ...DEVICES, devices: [HEADSET, SPEAKERS], virtual_mic: null });
     await open();
     expect(screen.queryByRole("checkbox", { name: "Send to virtual mic" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Virtual mic" })).not.toBeInTheDocument();
     type("Hello");
     await userEvent.click(speakButton());
     expect(ttsApi.speak).toHaveBeenCalledWith(expect.objectContaining({ mic_device: null, monitor_device: 2 }));
+  });
+
+  it("lets you choose which virtual mic the speech goes to", async () => {
+    await open();
+    const mic = screen.getByRole("combobox", { name: "Virtual mic" });
+    expect(mic).toHaveValue("3"); // the detected one
+    expect(within(mic).getAllByRole("option").map((o) => o.textContent)).toEqual(["VoiceMeeter Input", "CABLE Input"]);
+    await userEvent.selectOptions(mic, "4");
+    type("Hello");
+    await userEvent.click(speakButton());
+    expect(ttsApi.speak).toHaveBeenCalledWith(expect.objectContaining({ mic_device: 4, monitor_device: 2 }));
+    // Unticking hides the choice and sends nothing to a virtual mic.
+    await userEvent.click(screen.getByRole("checkbox", { name: "Send to virtual mic" }));
+    expect(screen.queryByRole("combobox", { name: "Virtual mic" })).not.toBeInTheDocument();
+  });
+
+  it("starts on the virtual mic chosen on the Live tab, and shows no list when there is only one", async () => {
+    const { unmount } = render(<SpeakPanel tts={view()} active liveRunning={false} preferredMic={4} />);
+    await screen.findByRole("option", { name: /Demo/ });
+    expect(screen.getByRole("combobox", { name: "Virtual mic" })).toHaveValue("4");
+    unmount();
+    vi.mocked(api.devices).mockResolvedValue({ ...DEVICES, devices: [HEADSET, SPEAKERS, VM] });
+    await open();
+    expect(screen.getByRole("checkbox", { name: "Send to virtual mic" })).toBeChecked();
+    expect(screen.queryByRole("combobox", { name: "Virtual mic" })).not.toBeInTheDocument();
   });
 
   it("needs at least one output", async () => {

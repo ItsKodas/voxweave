@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LivePanel } from "./LivePanel";
@@ -154,6 +154,16 @@ describe("LivePanel", () => {
       await userEvent.click(screen.getByLabelText("Listen to output"));
       await userEvent.selectOptions(screen.getByLabelText("Listen on"), "Speakers");
       expect(onMonitorChosen).toHaveBeenLastCalledWith(6);
+    });
+
+    it("reports the chosen virtual mic so the Speak tab can default to it", async () => {
+      vi.mocked(api.devices).mockResolvedValue({ ...DEVICES, devices: [MIC, HEADSET, SPEAKERS, VM] });
+      const onMicChosen = vi.fn();
+      render(<LivePanel stats={IDLE} onMicChosen={onMicChosen} />);
+      await ready();
+      await waitFor(() => expect(onMicChosen).toHaveBeenLastCalledWith(VM.index));
+      await userEvent.selectOptions(screen.getByLabelText("Virtual mic"), "");
+      expect(onMicChosen).toHaveBeenLastCalledWith(null);
     });
 
     it("reloads the list, keeps selections that still exist, and reports the refresh", async () => {

@@ -28,12 +28,28 @@ function chooseMonitor(list: DeviceList, keep: number | null, preferred: number 
   return real[0]?.index ?? null;
 }
 
+/** The outputs other apps can use as a microphone (VoiceMeeter inputs, a virtual cable). */
+const virtualOutputs = (list: DeviceList | null) => (list?.devices ?? []).filter((d) => d.max_output > 0 && isVirtual(d));
+
+/**
+ * The virtual mic for a device list: `keep` while it still exists, otherwise the one chosen on the Live tab, otherwise
+ * the one the backend detected, otherwise any.
+ */
+function chooseMic(list: DeviceList, keep: number | null, preferred: number | null): number | null {
+  const virtual = virtualOutputs(list);
+  const has = (index: number | null): index is number => index !== null && virtual.some((d) => d.index === index);
+  if (has(keep)) return keep;
+  if (has(preferred)) return preferred;
+  if (has(list.virtual_mic)) return list.virtual_mic;
+  return virtual[0]?.index ?? null;
+}
+
 const ENGINE_STOPPED = "The voice engine stopped. It starts again the next time you speak.";
 
 /** Characters the way the backend counts them (an emoji is one, not two UTF-16 units). */
 const countChars = (s: string) => [...s].length;
 
-export function SpeakPanel({ tts, active, liveRunning, devicesVersion = 0, preferredMonitor = null }: {
+export function SpeakPanel({ tts, active, liveRunning, devicesVersion = 0, preferredMonitor = null, preferredMic = null }: {
   tts: TtsView;
   /** Whether the Speak tab is visible: nothing is asked of the backend until it first is. */
   active: boolean;
@@ -43,6 +59,8 @@ export function SpeakPanel({ tts, active, liveRunning, devicesVersion = 0, prefe
   devicesVersion?: number;
   /** The listen device chosen on the Live tab: where "Listen on" starts when it is a real output. */
   preferredMonitor?: number | null;
+  /** The virtual mic chosen on the Live tab: where "Virtual mic" starts when it is one of the virtual outputs. */
+  preferredMic?: number | null;
 }) {
   const { status, unreachable, refresh, apply } = tts;
   const [list, setList] = useState<DeviceList | null>(null);
@@ -56,6 +74,7 @@ export function SpeakPanel({ tts, active, liveRunning, devicesVersion = 0, prefe
   const [text, setText] = useState("");
   const [monitor, setMonitor] = useState<number | null>(null);
   const [toMic, setToMic] = useState(true);
+  const [mic, setMic] = useState<number | null>(null);
   const [save, setSave] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
@@ -68,6 +87,9 @@ export function SpeakPanel({ tts, active, liveRunning, devicesVersion = 0, prefe
   );
   const preferred = useRef(preferredMonitor);
   preferred.current = preferredMonitor;
+  const mics = useMemo(() => virtualOutputs(list), [list]);
+  const preferredMicRef = useRef(preferredMic);
+  preferredMicRef.current = preferredMic;
 
   const load = useCallback(async () => {
     try {
@@ -75,6 +97,7 @@ export function SpeakPanel({ tts, active, liveRunning, devicesVersion = 0, prefe
       if (!list) {
         setList(devs);
         setMonitor(chooseMonitor(devs, null, preferred.current));
+        setMic(chooseMic(devs, null, preferredMicRef.current));
       }
       setVoices(vs);
       setVoiceId((current) => {
@@ -122,6 +145,7 @@ export function SpeakPanel({ tts, active, liveRunning, devicesVersion = 0, prefe
         if (stale) return;
         setList(devs);
         setMonitor((current) => (current === null ? null : chooseMonitor(devs, current, preferred.current)));
+        setMic((current) => chooseMic(devs, current, preferredMicRef.current));
       },
       () => {}, // the list on screen is still valid; the next refresh loads it again
     );
@@ -137,7 +161,7 @@ export function SpeakPanel({ tts, active, liveRunning, devicesVersion = 0, prefe
   const busy = isBusy(status);
   const chars = countChars(text);
   const tooLong = chars > MAX_TEXT;
-  const hasVirtualMic = list?.virtual_mic != null;
+  const hasVirtualMic = mic !== null;
   const micOn = hasVirtualMic && toMic;
   const hasDestination = micOn || monitor !== null;
   const unchecked = env?.unknown === true; // the backend may not probe the GPU right now: not a broken setup
@@ -157,7 +181,7 @@ export function SpeakPanel({ tts, active, liveRunning, devicesVersion = 0, prefe
           voice_id: voice.id,
           text,
           preset: shownPreset,
-          mic_device: micOn ? (list?.virtual_mic ?? null) : null,
+          mic_device: micOn ? mic : null,
           monitor_device: monitor,
           save,
         }),
@@ -297,6 +321,14 @@ export function SpeakPanel({ tts, active, liveRunning, devicesVersion = 0, prefe
             <label className="row">
               <input type="checkbox" checked={toMic} disabled={busy} onChange={(e) => setToMic(e.target.checked)} />
               Send to virtual mic
+            </label>
+          )}
+          {micOn && mics.length > 1 && (
+            <label>
+              Virtual mic
+              <select value={mic ?? ""} onChange={(e) => setMic(Number(e.target.value))} disabled={busy}>
+                {mics.map((d) => <option key={d.index} value={d.index}>{d.name}</option>)}
+              </select>
             </label>
           )}
           {!hasDestination && <p className="hint">Choose a listen device or the virtual mic to speak.</p>}

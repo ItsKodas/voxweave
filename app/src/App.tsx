@@ -62,6 +62,7 @@ function Main() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [devicesVersion, setDevicesVersion] = useState(0);
   const [liveMonitor, setLiveMonitor] = useState<number | null>(null);
+  const [liveMic, setLiveMic] = useState<number | null>(null);
   const [voicesVersion, setVoicesVersion] = useState(0);
   const [tab, setTab] = useState<"live" | "voices" | "speak">("live");
   const reloadLiveVoices = useCallback(() => setVoicesVersion((v) => v + 1), []);
@@ -89,13 +90,13 @@ function Main() {
       {/* All three stay mounted so switching tabs never resets a form or interrupts a session. */}
       <div role="tabpanel" hidden={tab !== "live"}>
         <SetupCheck refreshKey={devicesVersion} />
-        <LivePanel stats={stats} actionError={actionError} voicesVersion={voicesVersion} speechActive={speechActive} onMonitorChosen={setLiveMonitor} onDevicesRefreshed={() => setDevicesVersion((v) => v + 1)} />
+        <LivePanel stats={stats} actionError={actionError} voicesVersion={voicesVersion} speechActive={speechActive} onMonitorChosen={setLiveMonitor} onMicChosen={setLiveMic} onDevicesRefreshed={() => setDevicesVersion((v) => v + 1)} />
       </div>
       <div role="tabpanel" hidden={tab !== "voices"}>
         <VoicesPanel active={tab === "voices"} speechActive={speechActive} devicesVersion={devicesVersion} onModelReady={reloadLiveVoices} onTrainingStarted={trainingStarted} />
       </div>
       <div role="tabpanel" hidden={tab !== "speak"}>
-        <SpeakPanel tts={tts} active={tab === "speak"} liveRunning={stats.running} devicesVersion={devicesVersion} preferredMonitor={liveMonitor} />
+        <SpeakPanel tts={tts} active={tab === "speak"} liveRunning={stats.running} devicesVersion={devicesVersion} preferredMonitor={liveMonitor} preferredMic={liveMic} />
       </div>
     </>
   );
