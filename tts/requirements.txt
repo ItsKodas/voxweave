@@ -1,0 +1,24 @@
+# Inference-only dependency set for f5-tts 1.1.22 (the package itself is installed by tts/setup.sh with --no-deps).
+# Ranges only; tts/requirements.lock holds the exact versions that were proven. psutil and huggingface_hub are not
+# listed: the worker does not use them directly (huggingface_hub still arrives through transformers).
+# Left out on purpose: gradio, bitsandbytes, torchcodec, transformers_stream_generator, cached_path, click, tomli
+# (web UI, 8-bit optimiser, torchaudio.load backend, CLI). wandb/accelerate/ema_pytorch/datasets are import-time
+# requirements of f5_tts.model.__init__ (it imports Trainer) even for inference.
+accelerate>=0.33.0
+datasets
+ema_pytorch>=0.5.2
+hydra-core>=1.3.0
+librosa
+matplotlib
+pydub
+pypinyin
+rjieba
+safetensors
+soundfile
+torchdiffeq
+tqdm>=4.65.0
+transformers
+unidecode
+vocos
+wandb
+x_transformers>=1.31.14

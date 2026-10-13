@@ -1,0 +1,26 @@
+[
+  {
+    "url": "https://huggingface.co/SWivid/F5-TTS/resolve/84e5a410d9cead4de2f847e7c9369a6440bdfaca/F5TTS_v1_Base/model_1250000.safetensors",
+    "path": "F5TTS_v1_Base/model_1250000.safetensors",
+    "bytes": 1348435761,
+    "sha256": "670900fd14e6c458b95da6e9ed317cdb20dbaf7a1c02ac06a05475a9d32b6a38"
+  },
+  {
+    "url": "https://huggingface.co/SWivid/F5-TTS/resolve/84e5a410d9cead4de2f847e7c9369a6440bdfaca/F5TTS_v1_Base/vocab.txt",
+    "path": "F5TTS_v1_Base/vocab.txt",
+    "bytes": 13800,
+    "sha256": "2a05f992e00af9b0bd3800a8d23e78d520dbd705284ed2eedb5f4bd29398fa3c"
+  },
+  {
+    "url": "https://huggingface.co/charactr/vocos-mel-24khz/resolve/0feb3fdd929bcd6649e0e7c5a688cf7dd012ef21/config.yaml",
+    "path": "vocos-mel-24khz/config.yaml",
+    "bytes": 461,
+    "sha256": "da9033922f969a47f0c160010226919e59f27761fd5066f3828d46de6650b0fc"
+  },
+  {
+    "url": "https://huggingface.co/charactr/vocos-mel-24khz/resolve/0feb3fdd929bcd6649e0e7c5a688cf7dd012ef21/pytorch_model.bin",
+    "path": "vocos-mel-24khz/pytorch_model.bin",
+    "bytes": 54365991,
+    "sha256": "97ec976ad1fd67a33ab2682d29c0ac7df85234fae875aefcc5fb215681a91b2a"
+  }
+]

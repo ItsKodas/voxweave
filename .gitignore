@@ -13,3 +13,6 @@ app/src-tauri/gen/
 trainer/.venv/
 trainer/rvc/
 trainer/.cache/
+tts/.venv/
+tts/models/
+tts/.cache/
