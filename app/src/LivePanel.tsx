@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, Device, DeviceList, Params, Stats, Voice } from "./api";
+import { CalibrationPanel } from "./CalibrationPanel";
+import { calibrationApi, VoiceProfile } from "./calibrationApi";
 
 const PRESET_LABELS: Record<string, string> = {
   low_latency: "Low latency",
@@ -85,6 +87,36 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [profile, setProfile] = useState<VoiceProfile | null>(null);
+  const [useCalibration, setUseCalibration] = useState(true);
+  const [pitchNote, setPitchNote] = useState<string | null>(null);
+
+  // With a calibration, choosing a voice sets the pitch that moves the speaker onto that voice. Only then: a
+  // pitch moved by hand stays until the voice or the calibration changes.
+  const calibrated = profile?.created ?? null;
+  useEffect(() => {
+    if (calibrated === null || voice === "") {
+      setPitchNote(null);
+      return;
+    }
+    let stale = false;
+    calibrationApi.suggestion(voice).then(
+      (s) => {
+        if (stale) return;
+        if (s.pitch_shift === null) {
+          setPitchNote(s.reason);
+          return;
+        }
+        setPitch(s.pitch_shift);
+        setPitchNote(`Set from your calibration: you speak at about ${Math.round(s.speaker_hz ?? 0)} Hz, this voice at about ${Math.round(s.target_hz ?? 0)} Hz.`);
+        if (stats.running) api.settings({ pitch_shift: s.pitch_shift }).catch(() => undefined);
+      },
+      () => undefined,
+    );
+    return () => {
+      stale = true;
+    };
+  }, [calibrated, voice]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (loaded) onMonitorChosen?.(monitor);
@@ -187,6 +219,7 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
         preset,
         overrides: changedOverrides(),
         pitch_shift: pitch,
+        ...(profile !== null ? { use_calibration: useCalibration } : {}),
       }),
     );
 
@@ -257,12 +290,12 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
       {loaded && (hasCable ? (
         <p className="hint">
           Other apps hear this app on the microphone called <strong>CABLE Output</strong>: choose it as the microphone
-          in Discord or wherever you talk. You can rename it (for example to "AI Voice Mic") in Windows Sound settings,
+          in Discord or wherever you talk. You can rename it (for example to "Voxweave Mic") in Windows Sound settings,
           under Recording.
         </p>
       ) : (
         <details className="setup-mic">
-          <summary>Set up a dedicated AI Voice microphone</summary>
+          <summary>Set up a dedicated Voxweave microphone</summary>
           <p>
             Windows only lets a signed driver add a microphone, so this uses VB-CABLE, a free virtual cable from the
             makers of VoiceMeeter. It adds one pair of devices that pass sound straight through.
@@ -280,7 +313,7 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
               </button>
               . "CABLE Input" is then chosen as the virtual mic above.
             </li>
-            <li>In other apps, choose <strong>CABLE Output</strong> as the microphone. You can rename it to "AI Voice Mic" in Windows Sound settings.</li>
+            <li>In other apps, choose <strong>CABLE Output</strong> as the microphone. You can rename it to "Voxweave Mic" in Windows Sound settings.</li>
           </ol>
         </details>
       ))}
@@ -354,10 +387,21 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
           onChange={(e) => {
             const semitones = Number(e.target.value);
             setPitch(semitones);
+            setPitchNote(null);
             if (stats.running) api.settings({ pitch_shift: semitones }).catch(reportFailure);
           }}
         />
       </label>
+      {pitchNote && <p className="hint">{pitchNote}</p>}
+
+      <CalibrationPanel input={input} disabled={stats.running || speechActive} onProfile={setProfile} />
+      {profile !== null && (
+        <label className="row">
+          <input type="checkbox" checked={useCalibration} disabled={stats.running}
+            onChange={(e) => setUseCalibration(e.target.checked)} />
+          Use my calibration (silence when I am quiet, even level)
+        </label>
+      )}
 
       <details>
         <summary>Advanced</summary>

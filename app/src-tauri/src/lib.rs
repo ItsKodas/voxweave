@@ -189,7 +189,7 @@ pub fn run() {
             let menu = Menu::with_items(app, &[&converted, &muted, &off, &show, &quit])?;
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().expect("window icon").clone())
-                .tooltip("AI Voice")
+                .tooltip("Voxweave")
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => app.exit(0),

@@ -88,7 +88,7 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
         # share no lock and neither takes the audio lock or the voices lock, so they are stopped side by side.
         await asyncio.gather(*(bounded(m.shutdown) for m in (tts, training) if m is not None))
 
-    app = FastAPI(title="AI Voice", lifespan=lifespan)
+    app = FastAPI(title="Voxweave", lifespan=lifespan)
     # Held while checking and then changing audio state, so recording and live mode cannot both win a race.
     audio_state = threading.Lock()
     app.state.audio_state = audio_state

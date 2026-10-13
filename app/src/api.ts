@@ -40,6 +40,8 @@ export type StartRequest = {
   preset: string;
   overrides: Partial<Params> | null;
   pitch_shift: number;
+  /** Whether the speaker's calibration (quiet gate, input level) is applied. Sent only when one exists. */
+  use_calibration?: boolean;
 };
 export type SettingsPatch = { pitch_shift?: number; monitor_enabled?: boolean; monitor_gain?: number };
 

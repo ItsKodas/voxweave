@@ -106,7 +106,7 @@ export default function App() {
   const { ready, failed } = useBackendReady();
   return (
     <main>
-      <h1>AI Voice</h1>
+      <h1>Voxweave</h1>
       {ready ? <Main /> : failed ? <StartFailure /> : <p>Starting the voice engine…</p>}
       <footer>Ctrl+Alt+V mutes and unmutes while live.</footer>
     </main>

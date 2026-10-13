@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "AI Voice",
+  "productName": "Voxweave",
   "version": "0.1.0",
   "identifier": "gg.horizons.aivoice",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "AI Voice",
+        "title": "Voxweave",
         "width": 520,
         "height": 760,
         "resizable": true

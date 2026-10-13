@@ -69,3 +69,6 @@ audio { width: 100%; margin: 6px 0; }
 .setup-mic summary { cursor: pointer; }
 .setup-mic ol { padding-left: 20px; }
 .setup-mic li { margin: 6px 0; }
+.calibration { margin: 12px 0; padding: 8px 12px; border: 1px solid #343843; border-radius: 6px; }
+.calibration h3 { margin: 0 0 6px; font-size: 1em; }
+.calibration button { margin-right: 8px; }

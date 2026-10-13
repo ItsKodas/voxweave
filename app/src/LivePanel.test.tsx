@@ -4,6 +4,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LivePanel } from "./LivePanel";
 import { IDLE } from "./useStats";
 
+vi.mock("./calibrationApi", () => ({
+  calibrationApi: { status: vi.fn(), start: vi.fn(), finish: vi.fn(), cancel: vi.fn(), forget: vi.fn(), suggestion: vi.fn() },
+}));
+const NO_PROFILE = { recording: false, seconds: 0, level: 0, phase: null, quiet_seconds: 3, total_seconds: 18, text: "Read me.", error: null, profile: null };
+const MY_VOICE = { pitch_hz: 118, pitch_low_hz: 95, pitch_high_hz: 160, level_db: -22, noise_db: -62, gate_db: -56, input_gain: 1.3, device: "Headset Mic", created: 5 };
 vi.mock("./api", () => ({
   api: {
     devices: vi.fn(), refreshDevices: vi.fn(), voices: vi.fn(), presets: vi.fn(),
@@ -11,6 +16,7 @@ vi.mock("./api", () => ({
   },
 }));
 import { api } from "./api";
+import { calibrationApi } from "./calibrationApi";
 
 const PRESETS = {
   low_latency: { chunk_ms: 120, crossfade_ms: 30, context_ms: 400, f0_method: "dio", index_rate: 0 },
@@ -29,6 +35,7 @@ const NO_VIRTUAL_MIC = { ...DEVICES, devices: [MIC, SPEAKERS, HEADSET], virtual_
 
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.mocked(calibrationApi.status).mockResolvedValue(NO_PROFILE as never);
   vi.mocked(api.devices).mockResolvedValue(DEVICES);
   vi.mocked(api.refreshDevices).mockResolvedValue(DEVICES);
   vi.mocked(api.voices).mockResolvedValue([{ id: "demo", name: "Demo", has_index: true }]);
@@ -422,14 +429,14 @@ describe("dedicated microphone setup", () => {
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     render(<LivePanel stats={IDLE} />);
     await ready();
-    expect(screen.getByText("Set up a dedicated AI Voice microphone")).toBeInTheDocument();
+    expect(screen.getByText("Set up a dedicated Voxweave microphone")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Copy link" }));
     expect(writeText).toHaveBeenCalledWith("https://vb-audio.com/Cable/");
     expect(await screen.findByRole("button", { name: "Copied" })).toBeInTheDocument();
 
     vi.mocked(api.refreshDevices).mockResolvedValue({ ...DEVICES, devices: [...DEVICES.devices, CABLE], virtual_mic: 41 });
     fireEvent.click(screen.getByRole("button", { name: "I have installed it" }));
-    await waitFor(() => expect(screen.queryByText("Set up a dedicated AI Voice microphone")).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText("Set up a dedicated Voxweave microphone")).not.toBeInTheDocument());
     expect(api.refreshDevices).toHaveBeenCalledTimes(1);
     expect(screen.getByText(/microphone called/)).toHaveTextContent("CABLE Output");
     expect(screen.getByLabelText("Virtual mic")).toHaveValue("41"); // moved from VoiceMeeter to the new cable
@@ -449,6 +456,50 @@ describe("dedicated microphone setup", () => {
     await ready();
     expect(screen.getByLabelText("Virtual mic")).toHaveValue("41");
     expect(screen.getByText(/microphone called/)).toHaveTextContent("CABLE Output");
-    expect(screen.queryByText("Set up a dedicated AI Voice microphone")).not.toBeInTheDocument();
+    expect(screen.queryByText("Set up a dedicated Voxweave microphone")).not.toBeInTheDocument();
+  });
+});
+
+describe("my voice calibration", () => {
+  it("without a calibration nothing about it is sent and the pitch stays where it is", async () => {
+    render(<LivePanel stats={IDLE} />);
+    await userEvent.click(await ready());
+    expect(vi.mocked(api.start).mock.calls[0][0]).not.toHaveProperty("use_calibration");
+    expect(calibrationApi.suggestion).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText(/Use my calibration/)).not.toBeInTheDocument();
+  });
+
+  it("with a calibration the pitch is set for the chosen voice and the calibration is used at start", async () => {
+    vi.mocked(calibrationApi.status).mockResolvedValue({ ...NO_PROFILE, profile: MY_VOICE } as never);
+    vi.mocked(calibrationApi.suggestion).mockResolvedValue({ pitch_shift: 7, reason: null, speaker_hz: 118, target_hz: 177 });
+    render(<LivePanel stats={IDLE} />);
+    const start = await ready();
+    expect(await screen.findByText(/Set from your calibration: you speak at about 118 Hz, this voice at about 177 Hz/)).toBeInTheDocument();
+    expect(calibrationApi.suggestion).toHaveBeenCalledWith("demo");
+    expect(screen.getByText("Pitch shift (+7 semitones)")).toBeInTheDocument();
+    await userEvent.click(start);
+    expect(api.start).toHaveBeenCalledWith(expect.objectContaining({ pitch_shift: 7, use_calibration: true }));
+  });
+
+  it("a pitch moved by hand is kept, and the calibration can be switched off for a start", async () => {
+    vi.mocked(calibrationApi.status).mockResolvedValue({ ...NO_PROFILE, profile: MY_VOICE } as never);
+    vi.mocked(calibrationApi.suggestion).mockResolvedValue({ pitch_shift: 7, reason: null, speaker_hz: 118, target_hz: 177 });
+    render(<LivePanel stats={IDLE} />);
+    const start = await ready();
+    await screen.findByText(/Set from your calibration/);
+    fireEvent.change(screen.getByLabelText(/Pitch shift/), { target: { value: "3" } });
+    expect(screen.queryByText(/Set from your calibration/)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByLabelText(/Use my calibration/));
+    await userEvent.click(start);
+    expect(api.start).toHaveBeenCalledWith(expect.objectContaining({ pitch_shift: 3, use_calibration: false }));
+  });
+
+  it("says why when a voice has nothing to measure, and leaves the pitch alone", async () => {
+    vi.mocked(calibrationApi.status).mockResolvedValue({ ...NO_PROFILE, profile: MY_VOICE } as never);
+    vi.mocked(calibrationApi.suggestion).mockResolvedValue({ pitch_shift: null, reason: "This voice has no recordings in the library to measure, so set the pitch by hand." });
+    render(<LivePanel stats={IDLE} />);
+    await ready();
+    expect(await screen.findByText(/no recordings in the library to measure/)).toBeInTheDocument();
+    expect(screen.getByText("Pitch shift (0 semitones)")).toBeInTheDocument();
   });
 });
