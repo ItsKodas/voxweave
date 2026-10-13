@@ -72,7 +72,8 @@ def same_app_only_for(allowed_origins: list[str]) -> Callable[[Request], None]:
 
 def library_router(studio: Studio, library: Library, importer: Importer, live_running: Callable[[], bool],
                    exclusive: AbstractContextManager, allowed_origins: list[str], training=None,
-                   voices_lock: AbstractContextManager | None = None, tts=None) -> APIRouter:
+                   voices_lock: AbstractContextManager | None = None, tts=None,
+                   calibrating: Callable[[], bool] = lambda: False) -> APIRouter:
     """`exclusive` is the audio lock, shared with the live-start and device-refresh routes: checking
     "is live running?" and then starting a recording must not interleave with the reverse."""
 
@@ -141,6 +142,8 @@ def library_router(studio: Studio, library: Library, importer: Importer, live_ru
                 raise ValueError("Training is running. Wait for it to finish or cancel it before recording")
             if tts is not None and tts.is_active():  # also a read only; speak checks and starts under this lock
                 raise ValueError("Stop the speech before recording")
+            if calibrating():
+                raise ValueError("Finish the calibration recording before recording a clip")
             with voices_lock:  # so a delete cannot check "not recording" and then lose the voice to a new take
                 studio.start_recording(body.voice_id, body.input_device, body.prompt)
         return studio.status()

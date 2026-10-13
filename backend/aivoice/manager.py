@@ -31,6 +31,7 @@ class StartConfig:
     preset: str = "balanced"
     overrides: dict | None = None
     pitch_shift: float = 0.0
+    use_calibration: bool = True  # the speaker's quiet gate and input gain, when a calibration exists
 
 
 def _check_pitch(value: float) -> None:
@@ -58,13 +59,15 @@ def default_engine_factory(data: Path) -> Callable[[PretrainedVoice], object]:
 
 class LiveManager:
     def __init__(self, data: Path, list_devices: Callable[[], list[Device]], engine_factory, stream_factory,
-                 sample_rate: int = SAMPLE_RATE, refresh_devices: Callable[[], None] | None = None):
+                 sample_rate: int = SAMPLE_RATE, refresh_devices: Callable[[], None] | None = None,
+                 calibration=None):
         self._data = data
         self._list_devices = list_devices
         self._engine_factory = engine_factory
         self._stream_factory = stream_factory
         self._sr = sample_rate
         self._refresh_devices = refresh_devices
+        self._calibration = calibration
         self._lock = threading.Lock()
         self._session: LiveSession | None = None
         self._last_error: str | None = None
@@ -106,6 +109,10 @@ class LiveManager:
                 engine.convert(np.zeros(processor.window, dtype=np.float32), self._sr, 0.0, params)
             except Exception as exc:  # noqa: BLE001
                 raise ValueError(f"Could not load voice {voice.name}: {exc}") from exc
+            if cfg.use_calibration and self._calibration is not None:
+                # After the model has proved itself on the warm-up above: a closed gate would have hidden a
+                # model that cannot run.
+                processor.engine = self._calibration.wrap(engine)
             processor.pitch_shift = cfg.pitch_shift
             router = Router(self._sr * 2)
             if "mic" in outputs:

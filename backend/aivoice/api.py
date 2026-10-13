@@ -56,6 +56,7 @@ class StartBody(BaseModel):
     preset: str = "balanced"
     overrides: dict | None = None
     pitch_shift: float = 0.0
+    use_calibration: bool = True
 
 
 class ModeBody(BaseModel):
@@ -71,7 +72,7 @@ class SettingsBody(BaseModel):
 def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list[Device]],
                providers: list[str], default_devices: Callable[[], dict] | None = None,
                allowed_hosts: list[str] = ALLOWED_HOSTS, studio=None, library=None, importer=None,
-               training=None, tts=None) -> FastAPI:
+               training=None, tts=None, calibration=None) -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI):
         yield
@@ -142,6 +143,8 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
                 raise ValueError("Stop recording before refreshing devices")
             if tts is not None and tts.is_active():  # it would tear down the streams the speech is played on
                 raise ValueError("Stop the speech before refreshing devices")
+            if calibration is not None and calibration.active:
+                raise ValueError("Finish the calibration recording before refreshing devices")
             manager.refresh_devices()
         return device_payload()
 
@@ -168,6 +171,8 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
             # loaded but idle holds no sound device and is no obstacle.
             if tts is not None and tts.is_active():
                 raise ValueError("Stop the speech before starting live mode")
+            if calibration is not None and calibration.active:
+                raise ValueError("Finish the calibration recording before starting live mode")
             manager.start(StartConfig(**body.model_dump()))
         return manager.stats()
 
@@ -214,7 +219,8 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
         from aivoice.api_library import library_router
 
         app.include_router(library_router(studio, library, importer, lambda: bool(manager.stats()["running"]),
-                                          audio_state, ALLOWED_ORIGINS, training, voices_lock, tts))
+                                          audio_state, ALLOWED_ORIGINS, training, voices_lock, tts,
+                                          calibrating=lambda: calibration is not None and calibration.active))
     if training is not None:
         from aivoice.api_training import training_router
 
@@ -226,5 +232,11 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
         app.include_router(tts_router(tts, library, studio, training, lambda: bool(manager.stats()["running"]),
                                       audio_state, voices_lock, training_starting, ALLOWED_ORIGINS,
                                       monitor_gain=lambda: manager.monitor_gain))
+
+    if calibration is not None:
+        from aivoice.api_calibration import calibration_router
+
+        app.include_router(calibration_router(calibration, studio, lambda: bool(manager.stats()["running"]),
+                                              audio_state, ALLOWED_ORIGINS))
 
     return app

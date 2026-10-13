@@ -27,15 +27,18 @@ def build_app():
     from aivoice.playback import Player
     from aivoice.recorder import Recorder
     from aivoice.studio import Studio
+    from aivoice.calibration import Calibration
     from aivoice.training import TrainingManager
     from aivoice.transcribe import WhisperTranscriber
     from aivoice.tts import TtsManager
 
     data = config.data_dir()
     streams = SoundDeviceStreams()
-    manager = LiveManager(data, list_devices, default_engine_factory(data), streams,
-                          refresh_devices=refresh_devices)
     library = Library(data)
+    # Its own recorder: a calibration take never shares state with a clip being recorded. 30 seconds at most.
+    calibration = Calibration(data, Recorder(streams, max_seconds=30.0), list_devices, library)
+    manager = LiveManager(data, list_devices, default_engine_factory(data), streams,
+                          refresh_devices=refresh_devices, calibration=calibration)
     # The model name is read when an import first needs it, so a bad setting cannot stop startup.
     importer = Importer(library, WhisperTranscriber(lambda: config.whisper_model(data), data / "pretrained" / "whisper"))
     studio = Studio(library, Recorder(streams), importer, list_devices)
@@ -45,7 +48,7 @@ def build_app():
     # started until something is spoken.
     tts = TtsManager(data, library, root / "tts", Player(streams), list_devices)
     return create_app(manager, data, list_devices, ort.get_available_providers(), default_devices=default_devices,
-                      studio=studio, library=library, importer=importer, training=training, tts=tts)
+                      studio=studio, library=library, importer=importer, training=training, tts=tts, calibration=calibration)
 
 
 def main() -> None:
