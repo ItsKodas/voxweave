@@ -139,4 +139,16 @@ describe("VoicesPanel", () => {
     expect(onModelReady).toHaveBeenCalledTimes(1);
     await vi.waitFor(() => expect(studioApi.voices).toHaveBeenCalledTimes(2));
   });
+
+  it("shows a hint and disables Delete while speech is active", async () => {
+    render(<VoicesPanel active speechActive />);
+    expect(await screen.findByRole("button", { name: "Delete voice Alpha" })).toBeDisabled();
+    expect(screen.getByText(/Speech is playing. Stop it on the Speak tab/)).toBeInTheDocument();
+  });
+
+  it("shows no speech hint otherwise", async () => {
+    render(<VoicesPanel active />);
+    expect(await screen.findByRole("button", { name: "Delete voice Alpha" })).toBeEnabled();
+    expect(screen.queryByText(/Speech is playing/)).not.toBeInTheDocument();
+  });
 });

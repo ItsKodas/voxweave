@@ -385,4 +385,11 @@ describe("LivePanel", () => {
       expect(api.stop).not.toHaveBeenCalled();
     });
   });
+
+  it("disables Start and Refresh devices with a reason while speech is active", async () => {
+    render(<LivePanel stats={IDLE} speechActive />);
+    await vi.waitFor(() => expect(screen.getByRole("button", { name: "Refresh devices" })).toBeDisabled());
+    expect(screen.getByRole("button", { name: "Start" })).toBeDisabled();
+    expect(screen.getByText(/Speech is playing. Stop it on the Speak tab/)).toBeInTheDocument();
+  });
 });

@@ -56,9 +56,11 @@ type Props = {
   onDevicesRefreshed?: () => void;
   /** Changes when the voice library changed (a training run finished): the voice list reloads, nothing else. */
   voicesVersion?: number;
+  /** Speech is being made or played: starting live mode and refreshing devices would be refused. */
+  speechActive?: boolean;
 };
 
-export function LivePanel({ stats, actionError = null, onDevicesRefreshed, voicesVersion = 0 }: Props) {
+export function LivePanel({ stats, actionError = null, onDevicesRefreshed, voicesVersion = 0, speechActive = false }: Props) {
   const [devices, setDevices] = useState<Device[]>([]);
   const [virtualMic, setVirtualMic] = useState<number | null>(null);
   const [voices, setVoices] = useState<Voice[]>([]);
@@ -188,13 +190,14 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, voice
   };
 
   const hasDestination = mic !== null || (monitorOn && monitor !== null);
-  const canStart = !busy && input !== null && hasDestination && voice !== "";
+  const canStart = !busy && !speechActive && input !== null && hasDestination && voice !== "";
   const shownError = error ?? actionError ?? stats.error;
 
   return (
     <section className="live">
       {shownError && <p role="alert" className="error">{shownError}</p>}
       {loadFailed && <button onClick={load}>Retry</button>}
+      {speechActive && !stats.running && <p className="hint">Speech is playing. Stop it on the Speak tab to use live mode.</p>}
       {loaded && voices.length === 0 && <p className="hint">No voice models installed. See the README to add one.</p>}
 
       <label>
@@ -261,7 +264,7 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, voice
           </label>
         </>
       )}
-      <button className="secondary" onClick={refreshDevices} disabled={busy || stats.running}>
+      <button className="secondary" onClick={refreshDevices} disabled={busy || stats.running || speechActive}>
         Refresh devices
       </button>
       <label>

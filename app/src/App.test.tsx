@@ -3,24 +3,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 
 vi.mock("./api", () => ({ api: { health: vi.fn() } }));
-vi.mock("./useStats", () => ({ useStats: () => ({ running: false }) }));
+let liveRunning = false;
+vi.mock("./useStats", () => ({ useStats: () => ({ running: liveRunning }) }));
 vi.mock("./useLiveShortcuts", () => ({ useLiveShortcuts: () => {} }));
 vi.mock("./SetupCheck", () => ({
   SetupCheck: ({ refreshKey }: { refreshKey: number }) => <p>setup check {refreshKey}</p>,
 }));
 vi.mock("./LivePanel", () => ({
-  LivePanel: ({ onDevicesRefreshed, voicesVersion }: { onDevicesRefreshed: () => void; voicesVersion?: number }) => (
+  LivePanel: ({ onDevicesRefreshed, voicesVersion, speechActive }: { onDevicesRefreshed: () => void; voicesVersion?: number; speechActive?: boolean }) => (
     <>
       <button onClick={onDevicesRefreshed}>live panel</button>
+      <p>live speech {speechActive ? "active" : "idle"}</p>
       <p>live voices {voicesVersion}</p>
     </>
   ),
 }));
 vi.mock("./VoicesPanel", () => ({
-  VoicesPanel: ({ active, devicesVersion, onModelReady, onTrainingStarted }: {
-    active: boolean; devicesVersion?: number; onModelReady?: () => void; onTrainingStarted?: () => void;
+  VoicesPanel: ({ active, devicesVersion, speechActive, onModelReady, onTrainingStarted }: {
+    active: boolean; devicesVersion?: number; speechActive?: boolean; onModelReady?: () => void; onTrainingStarted?: () => void;
   }) => (
     <>
+      <p>voices speech {speechActive ? "active" : "idle"}</p>
       <button onClick={onModelReady}>model ready</button>
       <button onClick={onTrainingStarted}>training started</button>
       <p>voices panel {active ? "active" : "idle"}</p>
@@ -28,12 +31,27 @@ vi.mock("./VoicesPanel", () => ({
     </>
   ),
 }));
+vi.mock("./SpeakPanel", () => ({
+  SpeakPanel: ({ active, liveRunning }: { active: boolean; liveRunning: boolean }) => (
+    <p>speak panel {active ? "active" : "idle"} live {liveRunning ? "running" : "off"}</p>
+  ),
+}));
+vi.mock("./ttsApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./ttsApi")>()),
+  ttsApi: { status: vi.fn() },
+}));
 vi.mock("./trainingApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./trainingApi")>()),
   trainingApi: { status: vi.fn() },
 }));
 import { api } from "./api";
 import { TrainingStatus, trainingApi } from "./trainingApi";
+import { TtsStatus, ttsApi } from "./ttsApi";
+
+const speech = (over: Partial<TtsStatus> = {}): TtsStatus => ({
+  engine: "ready", state: "idle", voice_id: null, preset: null, piece: 0, pieces: 0, error: null, saved_path: null,
+  started: null, ...over,
+});
 
 const job = (over: Partial<TrainingStatus> = {}): TrainingStatus => ({
   state: "idle", voice_id: null, stage: null, stage_index: null, stages: 7, epoch: null, epochs: null, percent: 0,
@@ -48,6 +66,8 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.mocked(api.health).mockReset();
   vi.mocked(trainingApi.status).mockReset().mockResolvedValue(job());
+  vi.mocked(ttsApi.status).mockReset().mockResolvedValue(speech());
+  liveRunning = false;
 });
 afterEach(() => vi.useRealTimers());
 
@@ -241,5 +261,61 @@ describe("App follows training whichever tab is shown", () => {
     expect(statusCalls()).toBe(2);
     await advance(30_000);
     expect(statusCalls()).toBe(2);
+  });
+});
+
+describe("App Speak tab", () => {
+  beforeEach(() => vi.mocked(api.health).mockResolvedValue({ status: "ok" }));
+  const ttsCalls = () => vi.mocked(ttsApi.status).mock.calls.length;
+
+  it("adds a third tab beside Live and Voices, and all three panels stay mounted", async () => {
+    render(<App />);
+    await advance(0);
+    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(["Live", "Voices", "Speak"]);
+    expect(screen.getByText(/speak panel idle/)).not.toBeVisible();
+    act(() => screen.getByRole("tab", { name: "Speak" }).click());
+    expect(screen.getByRole("tab", { name: "Speak" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText(/speak panel active/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "live panel", hidden: true })).not.toBeVisible();
+    expect(screen.getByText("voices panel idle")).not.toBeVisible();
+  });
+
+  it("tells the Speak panel when live mode is running", async () => {
+    liveRunning = true;
+    render(<App />);
+    await advance(0);
+    expect(screen.getByText(/live running/)).toBeInTheDocument();
+  });
+
+  it("does not poll while nothing is spoken, and asks once more when the tab is shown", async () => {
+    render(<App />);
+    await advance(30_000);
+    expect(ttsCalls()).toBe(1);
+    act(() => screen.getByRole("tab", { name: "Speak" }).click());
+    await advance(0);
+    expect(ttsCalls()).toBe(2);
+    await advance(30_000);
+    expect(ttsCalls()).toBe(2);
+  });
+
+  it("marks Live and Voices busy while speech is active on any tab, and clears it when it ends", async () => {
+    vi.mocked(ttsApi.status).mockResolvedValue(speech({ state: "speaking", piece: 1, pieces: 2 }));
+    render(<App />);
+    await advance(0);
+    expect(screen.getByText("live speech active")).toBeInTheDocument();
+    expect(screen.getByText("voices speech active")).toBeInTheDocument();
+    await advance(1000);
+    expect(ttsCalls()).toBe(3); // still following it from the Live tab
+    vi.mocked(ttsApi.status).mockResolvedValue(speech());
+    await advance(500);
+    expect(screen.getByText("live speech idle")).toBeInTheDocument();
+    expect(screen.getByText("voices speech idle")).toBeInTheDocument();
+  });
+
+  it("does not mark them busy while the voice engine is only loaded", async () => {
+    vi.mocked(ttsApi.status).mockResolvedValue(speech({ engine: "ready", state: "idle" }));
+    render(<App />);
+    await advance(0);
+    expect(screen.getByText("live speech idle")).toBeInTheDocument();
   });
 });

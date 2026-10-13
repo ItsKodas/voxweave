@@ -3,8 +3,11 @@ import { api } from "./api";
 import "./App.css";
 import { LivePanel } from "./LivePanel";
 import { SetupCheck } from "./SetupCheck";
+import { SpeakPanel } from "./SpeakPanel";
+import { isBusy } from "./ttsApi";
 import { useLiveShortcuts } from "./useLiveShortcuts";
 import { useStats } from "./useStats";
+import { useTtsStatus } from "./useTtsStatus";
 import { useTrainingWatch } from "./useTrainingWatch";
 import { VoicesPanel } from "./VoicesPanel";
 
@@ -59,10 +62,14 @@ function Main() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [devicesVersion, setDevicesVersion] = useState(0);
   const [voicesVersion, setVoicesVersion] = useState(0);
-  const [tab, setTab] = useState<"live" | "voices">("live");
+  const [tab, setTab] = useState<"live" | "voices" | "speak">("live");
   const reloadLiveVoices = useCallback(() => setVoicesVersion((v) => v + 1), []);
   // Followed here, not in a tab: a model that finishes while the Live tab is shown must still appear there.
   const trainingStarted = useTrainingWatch(reloadLiveVoices);
+
+  // Followed here, not in the Speak tab: Live and Voices must know while speech is playing and their routes would refuse.
+  const tts = useTtsStatus(tab === "speak");
+  const speechActive = isBusy(tts.status);
 
   useLiveShortcuts(latest, setActionError);
 
@@ -76,14 +83,18 @@ function Main() {
       <div role="tablist" className="tabs">
         <button role="tab" aria-selected={tab === "live"} onClick={showLive}>Live</button>
         <button role="tab" aria-selected={tab === "voices"} onClick={() => setTab("voices")}>Voices</button>
+        <button role="tab" aria-selected={tab === "speak"} onClick={() => setTab("speak")}>Speak</button>
       </div>
-      {/* Both stay mounted so switching tabs never resets a form or interrupts a session. */}
+      {/* All three stay mounted so switching tabs never resets a form or interrupts a session. */}
       <div role="tabpanel" hidden={tab !== "live"}>
         <SetupCheck refreshKey={devicesVersion} />
-        <LivePanel stats={stats} actionError={actionError} voicesVersion={voicesVersion} onDevicesRefreshed={() => setDevicesVersion((v) => v + 1)} />
+        <LivePanel stats={stats} actionError={actionError} voicesVersion={voicesVersion} speechActive={speechActive} onDevicesRefreshed={() => setDevicesVersion((v) => v + 1)} />
       </div>
       <div role="tabpanel" hidden={tab !== "voices"}>
-        <VoicesPanel active={tab === "voices"} devicesVersion={devicesVersion} onModelReady={reloadLiveVoices} onTrainingStarted={trainingStarted} />
+        <VoicesPanel active={tab === "voices"} speechActive={speechActive} devicesVersion={devicesVersion} onModelReady={reloadLiveVoices} onTrainingStarted={trainingStarted} />
+      </div>
+      <div role="tabpanel" hidden={tab !== "speak"}>
+        <SpeakPanel tts={tts} active={tab === "speak"} liveRunning={stats.running} />
       </div>
     </>
   );

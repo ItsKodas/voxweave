@@ -2,9 +2,11 @@ import { useCallback, useEffect, useState } from "react";
 import { LibraryVoice, studioApi } from "./studioApi";
 import { VoiceStudio } from "./VoiceStudio";
 
-export function VoicesPanel({ active, devicesVersion = 0, onModelReady, onTrainingStarted }: {
+export function VoicesPanel({ active, devicesVersion = 0, speechActive = false, onModelReady, onTrainingStarted }: {
   active: boolean;
   devicesVersion?: number;
+  /** Speech is being made or played: recording and deleting a voice would be refused. */
+  speechActive?: boolean;
   /** A training run finished (the Live tab's voice list must reload). */
   onModelReady?: () => void;
   /** A training run was started or resumed (the app follows it from then on, whichever tab is shown). */
@@ -79,6 +81,7 @@ export function VoicesPanel({ active, devicesVersion = 0, onModelReady, onTraini
           {error} {voices === null && <button onClick={() => load()}>Retry</button>}
         </p>
       )}
+      {speechActive && <p className="hint">Speech is playing. Stop it on the Speak tab to record or delete a voice.</p>}
       <form
         className="row"
         onSubmit={(e) => {
@@ -101,7 +104,7 @@ export function VoicesPanel({ active, devicesVersion = 0, onModelReady, onTraini
               <button className="link" aria-pressed={v.id === selected} onClick={() => setSelected(v.id)}>
                 <strong>{v.name}</strong> <span>{v.minutes.toFixed(1)} min, {v.clips} clips</span>
               </button>
-              <button className="danger" aria-label={`Delete voice ${v.name}`} onClick={() => remove(v)}>Delete</button>
+              <button className="danger" disabled={speechActive} aria-label={`Delete voice ${v.name}`} onClick={() => remove(v)}>Delete</button>
             </li>
           ))}
         </ul>

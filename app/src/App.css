@@ -58,3 +58,7 @@ audio { width: 100%; margin: 6px 0; }
 .train-bar { display: flex; align-items: center; gap: 8px; }
 .train-bar progress { flex: 1; height: 10px; }
 .train-bar span { font-size: 0.85rem; color: #aab0bb; min-width: 3ch; text-align: right; }
+
+.speak textarea { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; padding: 6px; background: #22252c; color: inherit; border: 1px solid #343843; border-radius: 6px; font: inherit; resize: vertical; }
+.speak .count { margin: 0; font-size: 0.8rem; color: #aab0bb; text-align: right; }
+.speak .count.over { color: #ffb4bb; font-weight: 600; }
