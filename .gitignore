@@ -16,3 +16,5 @@ trainer/.cache/
 tts/.venv/
 tts/models/
 tts/.cache/
+.scratch/
+installer/staged/

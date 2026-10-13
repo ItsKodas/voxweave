@@ -1,0 +1,6 @@
+# Extra input for installer/requirements.lock, next to backend/pyproject.toml and its "transcribe" extra.
+# faster-whisper depends on the plain onnxruntime package, which must never be installed beside
+# onnxruntime-directml (they share a module name). The lock is compiled with --no-emit-package onnxruntime
+# and installed without dependency resolution, so that package never reaches the environment.
+# Regenerate the lock with scripts/compile-lock.ps1.
+faster-whisper
