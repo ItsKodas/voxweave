@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api, Device, DeviceList, Params, Stats, Voice } from "./api";
 import { CalibrationPanel } from "./CalibrationPanel";
 import { calibrationApi, VoiceProfile } from "./calibrationApi";
+import { installedApp } from "./setupApi";
 import { heardAs, micOptionLabel } from "./virtualMic";
 
 const PRESET_LABELS: Record<string, string> = {
@@ -264,7 +265,9 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
       {shownError && <p role="alert" className="error">{shownError}</p>}
       {loadFailed && <button onClick={load}>Retry</button>}
       {speechActive && !stats.running && <p className="hint">Speech is playing. Stop it on the Speak tab to use live mode.</p>}
-      {loaded && voices.length === 0 && <p className="hint">No voice models installed. See the README to add one.</p>}
+      {loaded && voices.length === 0 && <p className="hint">{installedApp()
+        ? "No voice models installed. Bring in a trained voice as a voice pack (a .voxweave file)."
+        : "No voice models installed. See the README to add one."}</p>}
 
       <label>
         Microphone

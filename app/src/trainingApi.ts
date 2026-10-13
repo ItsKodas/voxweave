@@ -29,6 +29,9 @@ export type TrainingEnvironment = {
   checks: { id: string; ok: boolean; message: string }[];
   /** The backend has not checked yet and may not start a GPU check now (live mode or training is running). */
   unknown?: boolean;
+  /** This app has no such part at all (the installed app): the one check carries the plain message, and there is
+   * nothing to set up or check again. */
+  unavailable?: boolean;
   /** The answer is what was known before: no check was run because live mode is on. */
   checked_while_live?: boolean;
   /** Likewise, because a training run is active. */

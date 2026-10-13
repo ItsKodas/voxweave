@@ -23,6 +23,9 @@ export type TtsEnvironment = {
   checks: { id: string; ok: boolean; message: string }[];
   /** Nothing has been checked yet and the backend may not run a check now. */
   unknown?: boolean;
+  /** This app has no such part at all (the installed app): the one check carries the plain message, and there is
+   * nothing to set up or check again. */
+  unavailable?: boolean;
   checked_while_live?: boolean;
   checked_while_training?: boolean;
 };

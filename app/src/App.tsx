@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import "./App.css";
+import { FirstRun, useSetup } from "./FirstRun";
 import { LivePanel } from "./LivePanel";
 import { SetupCheck } from "./SetupCheck";
+import { SetupState } from "./setupApi";
 import { SpeakPanel } from "./SpeakPanel";
 import { isBusy } from "./ttsApi";
 import { useLiveShortcuts } from "./useLiveShortcuts";
@@ -39,6 +41,21 @@ function useBackendReady(): { ready: boolean; failed: boolean } {
     };
   }, []);
   return { ready, failed: failed && !ready };
+}
+
+/** The installed app has no README, checkout or script to point to: it names its own log and offers a repair. */
+function InstalledStartFailure({ setup, onRepair }: { setup: SetupState; onRepair: () => void }) {
+  return (
+    <div role="alert" className="error">
+      <p>The voice engine failed to start. The app keeps trying.</p>
+      <p>
+        If it stays like this, repair the installation: it checks the engine's files and downloads again what
+        is missing or damaged. Your voices and settings are kept.
+      </p>
+      <p><button className="secondary" onClick={onRepair}>Repair the installation</button></p>
+      <p>The details are in the log file {setup.data_dir}\backend.log</p>
+    </div>
+  );
 }
 
 function StartFailure() {
@@ -102,12 +119,22 @@ function Main() {
   );
 }
 
-export default function App() {
+function Engine({ setup, onRepair }: { setup: SetupState | null; onRepair: () => void }) {
   const { ready, failed } = useBackendReady();
+  if (ready) return <Main />;
+  if (!failed) return <p>Starting the voice engine…</p>;
+  return setup?.mode === "installed" ? <InstalledStartFailure setup={setup} onRepair={onRepair} /> : <StartFailure />;
+}
+
+export default function App() {
+  const { setup, retry } = useSetup();
+  // Only the installed app has a setup. In the source checkout, and until the shell has answered, the app
+  // starts as it always did.
+  const settingUp = setup !== null && setup.mode === "installed" && setup.status !== "ready";
   return (
     <main>
       <h1>Voxweave</h1>
-      {ready ? <Main /> : failed ? <StartFailure /> : <p>Starting the voice engine…</p>}
+      {settingUp ? <FirstRun setup={setup} onRetry={retry} /> : <Engine setup={setup} onRepair={retry} />}
       <footer>Ctrl+Alt+V mutes and unmutes while live.</footer>
     </main>
   );

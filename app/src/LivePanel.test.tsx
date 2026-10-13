@@ -17,6 +17,7 @@ vi.mock("./api", () => ({
 }));
 import { api } from "./api";
 import { calibrationApi } from "./calibrationApi";
+import { rememberMode, SetupState } from "./setupApi";
 
 const PRESETS = {
   low_latency: { chunk_ms: 120, crossfade_ms: 30, context_ms: 400, f0_method: "dio", index_rate: 0 },
@@ -35,6 +36,7 @@ const NO_VIRTUAL_MIC = { ...DEVICES, devices: [MIC, SPEAKERS, HEADSET], virtual_
 
 beforeEach(() => {
   vi.resetAllMocks();
+  rememberMode(null);
   vi.mocked(calibrationApi.status).mockResolvedValue(NO_PROFILE as never);
   vi.mocked(api.devices).mockResolvedValue(DEVICES);
   vi.mocked(api.refreshDevices).mockResolvedValue(DEVICES);
@@ -518,5 +520,21 @@ describe("naming the virtual microphone", () => {
     await ready();
     await userEvent.selectOptions(screen.getByLabelText(/^Virtual microphone/), "Headset");
     expect(screen.getByText(/not a virtual microphone/)).toBeInTheDocument();
+  });
+});
+
+describe("LivePanel without any voice", () => {
+  beforeEach(() => vi.mocked(api.voices).mockResolvedValue([]));
+
+  it("points the source checkout to the README", async () => {
+    render(<LivePanel stats={IDLE} />);
+    expect(await screen.findByText("No voice models installed. See the README to add one.")).toBeInTheDocument();
+  });
+
+  it("points the installed app to voice packs, not to a README it does not have", async () => {
+    rememberMode({ mode: "installed", status: "ready" } as SetupState);
+    render(<LivePanel stats={IDLE} />);
+    expect(await screen.findByText(/No voice models installed\. Bring in a trained voice as a voice pack/)).toBeInTheDocument();
+    expect(screen.queryByText(/README/)).not.toBeInTheDocument();
   });
 });

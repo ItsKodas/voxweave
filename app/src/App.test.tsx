@@ -49,7 +49,12 @@ vi.mock("./trainingApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./trainingApi")>()),
   trainingApi: { status: vi.fn() },
 }));
+vi.mock("./setupApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./setupApi")>()),
+  setupApi: { state: vi.fn(), start: vi.fn(), onProgress: vi.fn() },
+}));
 import { api } from "./api";
+import { SetupState, setupApi } from "./setupApi";
 import { TrainingStatus, trainingApi } from "./trainingApi";
 import { TtsStatus, ttsApi } from "./ttsApi";
 
@@ -67,8 +72,23 @@ const statusCalls = () => vi.mocked(trainingApi.status).mock.calls.length;
 
 const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
 
+const DATA = "C:\\Users\\me\\AppData\\Local\\Voxweave\\data";
+const setupState = (over: Partial<SetupState> = {}): SetupState => ({
+  mode: "installed", status: "running", step: "model", percent: 70, message: "Downloading the base speech model",
+  error: null, root: "C:\\Users\\me\\AppData\\Local\\Voxweave", data_dir: DATA,
+  setup_log: "C:\\Users\\me\\AppData\\Local\\Voxweave\\runtime\\setup.log", ...over,
+});
+const SOURCE_CHECKOUT = setupState({ mode: "dev", status: "ready", step: "", percent: 100, message: "", root: "", data_dir: "", setup_log: "" });
+let pushSetup: (state: SetupState) => void = () => {};
+
 beforeEach(() => {
   vi.useFakeTimers();
+  vi.mocked(setupApi.state).mockReset().mockResolvedValue(SOURCE_CHECKOUT);
+  vi.mocked(setupApi.start).mockReset().mockResolvedValue(setupState({ step: "python", percent: 0, message: "Downloading Python" }));
+  vi.mocked(setupApi.onProgress).mockReset().mockImplementation(async (handler) => {
+    pushSetup = handler;
+    return () => {};
+  });
   vi.mocked(api.health).mockReset();
   vi.mocked(trainingApi.status).mockReset().mockResolvedValue(job());
   vi.mocked(ttsApi.status).mockReset().mockResolvedValue(speech());
@@ -340,5 +360,93 @@ describe("App Speak tab", () => {
     render(<App />);
     await advance(0);
     expect(screen.getByText("live speech idle")).toBeInTheDocument();
+  });
+});
+
+describe("App in the installed app", () => {
+  it("shows the first-time setup instead of the app until the setup has finished", async () => {
+    vi.mocked(setupApi.state).mockResolvedValue(setupState());
+    vi.mocked(api.health).mockRejectedValue(new Error("refused"));
+    render(<App />);
+    await advance(0);
+    expect(screen.getByRole("heading", { name: "First-time setup" })).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "Setup progress" })).toHaveAttribute("value", "70");
+    expect(screen.getByText("Downloading the base speech model")).toBeInTheDocument();
+    expect(screen.queryByText(/starting the voice engine/i)).not.toBeInTheDocument();
+    await advance(20_000); // however long it takes, it is never reported as an engine that failed to start
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab")).not.toBeInTheDocument();
+
+    vi.mocked(api.health).mockResolvedValue({ status: "ok" });
+    act(() => pushSetup(setupState({ status: "ready", percent: 100 })));
+    await advance(0);
+    expect(screen.queryByRole("heading", { name: "First-time setup" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "live panel" })).toBeInTheDocument();
+  });
+
+  it("gives the engine its full 15 seconds once the setup is done", async () => {
+    vi.mocked(setupApi.state).mockResolvedValue(setupState());
+    vi.mocked(api.health).mockRejectedValue(new Error("refused"));
+    render(<App />);
+    await advance(60_000);
+    act(() => pushSetup(setupState({ status: "ready", percent: 100 })));
+    await advance(14_000);
+    expect(screen.getByText(/starting the voice engine/i)).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("shows a failed setup with Retry, which asks the shell to start it again", async () => {
+    vi.mocked(setupApi.state).mockResolvedValue(setupState({ status: "failed", error: "No internet connection." }));
+    render(<App />);
+    await advance(0);
+    expect(screen.getByRole("alert")).toHaveTextContent("No internet connection.");
+    await act(async () => screen.getByRole("button", { name: "Retry" }).click());
+    expect(setupApi.start).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByText("Downloading Python")).toBeInTheDocument();
+  });
+
+  it("goes straight to the app when the setup was done on an earlier start", async () => {
+    vi.mocked(setupApi.state).mockResolvedValue(setupState({ status: "ready", percent: 100 }));
+    vi.mocked(api.health).mockResolvedValue({ status: "ok" });
+    render(<App />);
+    await advance(0);
+    expect(screen.getByRole("button", { name: "live panel" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "First-time setup" })).not.toBeInTheDocument();
+  });
+
+  it("names its own log and offers a repair when the engine does not start, not the README", async () => {
+    vi.mocked(setupApi.state).mockResolvedValue(setupState({ status: "ready", percent: 100 }));
+    vi.mocked(api.health).mockRejectedValue(new Error("refused"));
+    render(<App />);
+    await advance(15_000);
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(/the voice engine failed to start/i);
+    expect(alert).toHaveTextContent(DATA + "\\backend.log");
+    expect(alert).not.toHaveTextContent(/README/);
+    expect(alert).not.toHaveTextContent("data/backend.log");
+    await act(async () => screen.getByRole("button", { name: "Repair the installation" }).click());
+    expect(setupApi.start).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("heading", { name: "First-time setup" })).toBeInTheDocument();
+  });
+});
+
+describe("App in the source checkout", () => {
+  it("never shows the first-time setup, whatever the shell says about a setup", async () => {
+    vi.mocked(setupApi.state).mockResolvedValue({ ...SOURCE_CHECKOUT, status: "running" });
+    vi.mocked(api.health).mockRejectedValue(new Error("refused"));
+    render(<App />);
+    await advance(1_000);
+    expect(screen.queryByRole("heading", { name: "First-time setup" })).not.toBeInTheDocument();
+    expect(screen.getByText(/starting the voice engine/i)).toBeInTheDocument();
+  });
+
+  it("starts as before when there is no shell to ask", async () => {
+    vi.mocked(setupApi.state).mockRejectedValue(new Error("no shell"));
+    vi.mocked(setupApi.onProgress).mockRejectedValue(new Error("no shell"));
+    vi.mocked(api.health).mockResolvedValue({ status: "ok" });
+    render(<App />);
+    await advance(0);
+    expect(screen.getByRole("button", { name: "live panel" })).toBeInTheDocument();
   });
 });

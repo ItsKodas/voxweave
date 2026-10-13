@@ -167,7 +167,8 @@ export function SpeakPanel({ tts, active, liveRunning, devicesVersion = 0, prefe
   const micHeard = micOn ? heardAs(mics.find((d) => d.index === mic)?.name ?? "") : null;
   const hasDestination = micOn || monitor !== null;
   const unchecked = env?.unknown === true; // the backend may not probe the GPU right now: not a broken setup
-  const envBroken = env !== null && !env.ready && !unchecked;
+  const unavailable = env?.unavailable === true; // the installed app: nothing here can be set up or checked again
+  const envBroken = env !== null && !env.ready && !unchecked && !unavailable;
   const failing = env?.checks.filter((c) => !c.ok) ?? [];
   const canSpeak =
     status !== null && !busy && !pending && !liveRunning && voice !== null && text.trim() !== "" && !tooLong &&
@@ -249,7 +250,8 @@ export function SpeakPanel({ tts, active, liveRunning, devicesVersion = 0, prefe
         </p>
       )}
       {envError && <p role="alert" className="error">{envError}</p>}
-      {voices !== null && voices.length === 0 && (
+      {unavailable && failing.map((c) => <p key={c.id} className="hint">{c.message}</p>)}
+      {voices !== null && voices.length === 0 && !unavailable && (
         <p className="hint">A voice needs one recorded sentence to be spoken. Record one on the Voices tab.</p>
       )}
       {envBroken && (
@@ -269,7 +271,7 @@ export function SpeakPanel({ tts, active, liveRunning, devicesVersion = 0, prefe
         <button className="secondary" disabled={checking} onClick={() => void checkEnvironment(true)}>Check again</button>
       )}
 
-      {voices !== null && voices.length > 0 && !envBroken && (
+      {voices !== null && voices.length > 0 && !envBroken && !unavailable && (
         <>
           <label>
             Voice

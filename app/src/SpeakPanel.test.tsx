@@ -463,3 +463,21 @@ describe("SpeakPanel environment", () => {
     expect(screen.getByRole("button", { name: "Check again" })).toBeInTheDocument();
   });
 });
+
+describe("SpeakPanel in the installed app", () => {
+  const MESSAGE = "Text to speech is not available in the installed app yet. It needs the source checkout of Voxweave on a PC with an AMD GPU.";
+
+  it("says plainly that text to speech is not available, with nothing to set up, check or speak", async () => {
+    vi.mocked(ttsApi.environment).mockResolvedValue({
+      ok: false, ready: false, unavailable: true, checks: [{ id: "installed_app", ok: false, message: MESSAGE }],
+    });
+    render(<SpeakPanel tts={view()} active liveRunning={false} />);
+    expect(await screen.findByText(MESSAGE)).toBeInTheDocument();
+    expect(screen.queryByText(/not set up on this computer/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/README/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Check again" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Speak" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Text to speak" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Record one on the Voices tab/)).not.toBeInTheDocument();
+  });
+});

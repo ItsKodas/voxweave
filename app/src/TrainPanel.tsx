@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { installedApp } from "./setupApi";
 import { LibraryVoice } from "./studioApi";
 import { TrainingEnvironment, TrainingStage, TrainingStatus, isActive, trainingApi } from "./trainingApi";
 import { useTrainingStatus } from "./useTrainingStatus";
@@ -114,7 +115,9 @@ export function TrainPanel({ voice, active, onModelReady, onStarted = () => {} }
     }
   }, []);
   useEffect(() => {
-    if (!active || !enough || status === null || ownActive || otherActive || asked.current) return;
+    // The installed app cannot train at all, which is worth saying before anyone records five minutes for it;
+    // there the question costs nothing. In the source checkout it starts a GPU check, so it waits for enough audio.
+    if (!active || (!enough && !installedApp()) || status === null || ownActive || otherActive || asked.current) return;
     asked.current = true;
     void checkEnvironment(false);
   }, [active, enough, status, ownActive, otherActive, checkEnvironment]);
@@ -202,6 +205,7 @@ export function TrainPanel({ voice, active, onModelReady, onStarted = () => {} }
   const stopped = status.state === "failed" || status.state === "cancelled" || status.state === "interrupted";
   const canStart = enough && env?.ready === true;
   const unchecked = env?.unknown === true; // the backend may not probe the GPU right now: not a broken setup
+  const unavailable = env?.unavailable === true; // the installed app: nothing here can be set up or checked again
   const failing = env?.checks.filter((c) => !c.ok) ?? [];
   const startLabel = stopped ? "Start over" : hasModel ? "Train again" : "Start training";
   const startConfirm = stopped
@@ -222,20 +226,21 @@ export function TrainPanel({ voice, active, onModelReady, onStarted = () => {} }
         <p className="hint">The details are in data/voices/{voice.id}/training/worker.log</p>
       )}
 
-      {!enough && <p className="hint">Record or import at least {MIN_TRAIN_MINUTES} minutes to train. You have {usable.toFixed(1)}.</p>}
+      {unavailable && failing.map((c) => <p key={c.id} className="hint">{c.message}</p>)}
+      {!enough && !unavailable && <p className="hint">Record or import at least {MIN_TRAIN_MINUTES} minutes to train. You have {usable.toFixed(1)}.</p>}
       {enough && env === null && !envError && <p className="hint">Checking this computer…</p>}
       {enough && unchecked && (
         <p className="hint">
           {env?.checked_while_live ? "Training can be checked once live mode is stopped." : "Training cannot be checked right now."}
         </p>
       )}
-      {enough && env !== null && !env.ready && !unchecked && (
+      {enough && env !== null && !env.ready && !unchecked && !unavailable && (
         <div className="setup">
           <p>Training is not set up on this computer. See Training setup in the README.</p>
           <ul>{failing.map((c) => <li key={c.id}>{c.message}</li>)}</ul>
         </div>
       )}
-      {enough && (envError !== null || (env !== null && !env.ready)) && (
+      {enough && !unavailable && (envError !== null || (env !== null && !env.ready)) && (
         <button className="secondary" disabled={checking} onClick={() => checkEnvironment(true)}>Check again</button>
       )}
 

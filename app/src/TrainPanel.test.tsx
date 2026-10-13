@@ -10,6 +10,7 @@ vi.mock("./trainingApi", async (importOriginal) => ({
   trainingApi: { status: vi.fn(), environment: vi.fn(), start: vi.fn(), cancel: vi.fn() },
 }));
 import { trainingApi } from "./trainingApi";
+import { rememberMode, SetupState } from "./setupApi";
 
 const VOICE: LibraryVoice = { id: "v1", name: "Alpha", created: "1", minutes: 10, clips: 60, models: [] };
 const make = (over: Partial<TrainingStatus> = {}): TrainingStatus => ({
@@ -29,6 +30,7 @@ function answer(own: TrainingStatus, latest: TrainingStatus = own) {
 beforeEach(() => {
   vi.resetAllMocks();
   forgetEnvironment();
+  rememberMode(null);
   answer(make());
   vi.mocked(trainingApi.environment).mockResolvedValue(READY);
   vi.mocked(trainingApi.start).mockResolvedValue(running());
@@ -410,5 +412,45 @@ describe("TrainPanel tells the app when a job starts", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Start training" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Stop live mode before training");
     expect(onStarted).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("TrainPanel in the installed app", () => {
+  const MESSAGE = "Training is not available in the installed app yet. It needs the source checkout of Voxweave on a PC with an AMD GPU.";
+  const UNAVAILABLE: TrainingEnvironment = {
+    ready: false, ok: false, unavailable: true, checks: [{ id: "installed_app", ok: false, message: MESSAGE }],
+  };
+  const INSTALLED = { mode: "installed", status: "ready" } as SetupState;
+
+  it("says plainly that training is not available, with nothing to set up or check again", async () => {
+    vi.mocked(trainingApi.environment).mockResolvedValue(UNAVAILABLE);
+    panel();
+    expect(await screen.findByText(MESSAGE)).toBeInTheDocument();
+    expect(screen.queryByText(/not set up on this computer/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/README/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Check again" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /start training|train again/i })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Epochs")).not.toBeInTheDocument();
+  });
+
+  it("says so at once for a voice with too little audio, instead of asking for more recordings", async () => {
+    rememberMode(INSTALLED);
+    vi.mocked(trainingApi.environment).mockResolvedValue(UNAVAILABLE);
+    panel({ ...VOICE, minutes: 3.25 });
+    expect(await screen.findByText(MESSAGE)).toBeInTheDocument();
+    expect(screen.queryByText(/Record or import at least 5 minutes to train/)).not.toBeInTheDocument();
+  });
+
+  it("still shows a model that came with a voice pack as ready", async () => {
+    vi.mocked(trainingApi.environment).mockResolvedValue(UNAVAILABLE);
+    panel({ ...VOICE, models: ["rvc"] });
+    expect(await screen.findByText(MESSAGE)).toBeInTheDocument();
+    expect(screen.getByText("Trained model: ready")).toBeInTheDocument();
+  });
+
+  it("does not ask about the environment of a short voice in the source checkout", async () => {
+    panel({ ...VOICE, minutes: 3.25 });
+    expect(await screen.findByText("Record or import at least 5 minutes to train. You have 3.2.")).toBeInTheDocument();
+    expect(trainingApi.environment).not.toHaveBeenCalled();
   });
 });
