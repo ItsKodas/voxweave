@@ -3,41 +3,44 @@ name: Release
 # A pushed tag v<version> builds the Windows installer and publishes it as a GitHub Release.
 #
 # To release: node scripts/version.mjs set 1.2.3, commit, git tag v1.2.3, git push --follow-tags.
-# The tag must match the version in app/package.json or the job stops before building.
+# The tag must match the version in app/package.json or the build stops before it starts.
+#
+# The installer is built from a clean state: no Rust or npm cache is restored. The build job can only read
+# the repository; only the publish job, which runs no code from the repository, may write (create the release).
+# Every action is pinned to a full commit SHA; .github/dependabot.yml proposes updates.
 
 on:
   push:
     tags: ["v*"]
 
 permissions:
-  contents: write # to create the release
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  installer:
+  build:
     runs-on: windows-latest
+    permissions:
+      contents: read
     env:
       TAG: ${{ github.ref_name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: app/package-lock.json
+          package-manager-cache: false
 
       - name: Rust (stable, already on the runner through rustup)
         run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: app/src-tauri
-
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
@@ -76,12 +79,32 @@ jobs:
         working-directory: app
         run: npm run installer
 
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installer
+          path: app/src-tauri/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write # to create the release; this job runs nothing from the repository
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: installer
+          path: installer
+
       - name: Publish the release
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          $installer = Get-ChildItem app/src-tauri/target/release/bundle/nsis -Filter "*-setup.exe" | Select-Object -First 1
+          $installer = Get-ChildItem installer -Filter "*-setup.exe" | Select-Object -First 1
           if ($null -eq $installer) { throw "No installer was built" }
           $hash = (Get-FileHash -Path $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           $notes = @(

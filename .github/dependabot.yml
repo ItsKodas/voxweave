@@ -1,0 +1,8 @@
+# The workflows pin every action to a commit SHA. This proposes a pull request when a pinned action has a
+# newer release, keeping the "# vX.Y.Z" comment beside the SHA in step.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
