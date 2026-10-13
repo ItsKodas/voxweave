@@ -2,8 +2,8 @@ import numpy as np
 import pytest
 
 from aivoice import tts_audio
-from aivoice.tts_audio import (SAMPLE_RATE, drop_reference_tail, finish, is_silent, join, max_chars_for,
-                                trim_edges)
+from aivoice.tts_audio import (PIECE_PEAK, SAMPLE_RATE, drop_reference_tail, finish, is_silent, join,
+                                max_chars_for, trim_edges)
 
 SR = SAMPLE_RATE
 
@@ -95,6 +95,50 @@ def test_drop_reference_tail_works_at_the_workers_sample_rate():
     piece = np.concatenate([tone(0.1, 0.05, sr=sr), noise(1.0, 0.001, sr=sr), tone(1.0, 0.3, sr=sr)])
     out = drop_reference_tail(piece, sr)
     assert 1.05 * sr <= len(piece) - len(out) <= 1.1 * sr
+
+
+# ---- the limits of the trimming, pinned ----
+# Both functions judge a piece by its shape alone, so real speech of the same shape as a lead-in is cut. These
+# tests state the limits; they are not wishes. They were not hardened (final fix wave, D5): the measured lead-ins
+# are a sound 12 to 30 dB below the loudest frame followed by 0.4 to 1.2 s of room tone that is itself only 30 to
+# 45 dB down (the spike saw up to 2 s), so neither "the gap must be much quieter than the sound" nor "at most
+# 1.5 s may be dropped" can be added without leaving the reference's tail in some real pieces.
+
+def test_limit_a_short_first_word_followed_by_a_long_pause_is_cut():
+    # "Well." said in a quarter of a second from the first sample on, a pause of 0.45 s, then the sentence
+    piece = np.concatenate([tone(0.25, 0.3), noise(0.45, 0.001), tone(1.0, 0.3)])
+    out = drop_reference_tail(piece, SR)
+    assert 0.65 * SR <= len(piece) - len(out) <= 0.70 * SR  # the word and the pause are gone
+    assert 1.0 <= len(out) / SR <= 1.05
+
+
+@pytest.mark.parametrize("word, pause", [
+    (0.25, 0.36),  # the same word before a pause shorter than 0.4 s
+    (0.44, 0.45),  # a word longer than 0.4 s before the same pause
+])
+def test_limit_the_same_word_is_kept_when_the_pause_is_shorter_or_the_word_longer(word, pause):
+    piece = np.concatenate([tone(word, 0.3), noise(pause, 0.001), tone(1.0, 0.3)])
+    assert np.array_equal(drop_reference_tail(piece, SR), piece)
+
+
+def test_limit_a_long_pause_after_a_short_first_word_does_not_save_the_word():
+    # nothing limits how much is dropped: the pause before the sentence was up to 2 s in the spike
+    piece = np.concatenate([tone(0.25, 0.3), noise(3.0, 0.001), tone(1.0, 0.3)])
+    assert 1.0 <= len(drop_reference_tail(piece, SR)) / SR <= 1.05
+
+
+def test_limit_a_first_sound_under_60_ms_followed_by_a_gap_is_dropped():
+    # a click of a consonant, 40 ms, a tenth of a second before the rest: trim_edges starts where sound lasts
+    piece = np.concatenate([noise(0.5, 0.0005), tone(0.04, 0.3), noise(0.1, 0.0005, seed=1), tone(1.0, 0.3)])
+    out = trim_edges(piece, SR)
+    assert 1.0 <= len(out) / SR <= 1.1
+    kept_from = len(piece) - len(out)
+    assert kept_from > int(0.54 * SR)  # the 40 ms sound lies before the cut
+
+
+def test_limit_a_first_sound_of_60_ms_is_kept():
+    piece = np.concatenate([noise(0.5, 0.0005), tone(0.06, 0.3), noise(0.1, 0.0005, seed=1), tone(1.0, 0.3)])
+    assert 1.16 <= len(trim_edges(piece, SR)) / SR <= 1.26
 
 
 # ---- trim_edges ----
@@ -230,6 +274,48 @@ def test_finish_empty_and_input_untouched():
     before = x.copy()
     finish(x, SR)
     assert np.array_equal(x, before)
+
+
+# ---- finish to one level (what the manager asks for) ----
+
+def test_two_pieces_of_different_raw_peak_are_finished_at_the_same_level():
+    # the worker scales a piece only above 1.0, so neighbours arrive anywhere between about 0.7 and 1.0
+    quiet, loud = finish(tone(0.5, 0.7), SR, level=PIECE_PEAK), finish(tone(0.5, 1.0), SR, level=PIECE_PEAK)
+    assert np.abs(quiet).max() == pytest.approx(PIECE_PEAK, abs=1e-3)
+    assert np.abs(loud).max() == pytest.approx(PIECE_PEAK, abs=1e-3)
+    assert PIECE_PEAK == 0.89
+
+
+def test_a_piece_from_a_quiet_reference_is_raised_to_the_same_level():
+    # the worker lowers what it generates by as much as it raised a quiet reference: up to 30 dB
+    out = finish(tone(0.5, 0.03, sr=24000), 24000, level=PIECE_PEAK)
+    assert np.abs(out).max() == pytest.approx(PIECE_PEAK, abs=2e-3)
+
+
+def test_the_level_is_set_after_resampling_and_before_the_fade():
+    out = finish(np.full(SR, 0.5, np.float32), SR, level=PIECE_PEAK)
+    n = SR * 10 // 1000
+    assert out[0] == 0 and out[-1] == 0
+    assert out[n + 5] == pytest.approx(PIECE_PEAK) and out.max() == pytest.approx(PIECE_PEAK)
+
+
+def test_what_is_silent_is_never_raised():
+    # below the peak is_silent calls nothing: raising it would play the noise floor at full level
+    x = tone(0.5, 0.004)
+    out = finish(x, SR, level=PIECE_PEAK)
+    assert np.abs(out).max() == pytest.approx(0.004, abs=1e-4)
+    assert not np.abs(finish(np.zeros(SR, np.float32), SR, level=PIECE_PEAK)).any()
+    assert is_silent(x, SR)  # the two rules use the same floor
+
+
+def test_the_level_leaves_the_input_untouched_and_copes_with_broken_audio():
+    x = tone(0.2, 0.3)
+    x[50] = np.nan
+    before = x.copy()
+    out = finish(x, SR, level=PIECE_PEAK)
+    assert np.array_equal(x, before, equal_nan=True)
+    assert np.isfinite(out).all() and np.abs(out).max() == pytest.approx(PIECE_PEAK, abs=1e-3)
+    assert len(finish(np.zeros(0, np.float32), SR, level=PIECE_PEAK)) == 0
 
 
 # ---- is_silent ----

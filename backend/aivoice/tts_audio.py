@@ -10,6 +10,9 @@ SAMPLE_RATE = 48000
 MIN_LEVEL_DB = -60.0
 MIN_SECONDS = 0.15
 MIN_PEAK = 0.005
+# The peak every played piece is brought to, about -1 dBFS: one level for all pieces of a request, with room
+# left for the player's gain stage and the 16-bit file.
+PIECE_PEAK = 0.89
 SAFETY_MARGIN = 0.85
 # The package sizes pieces for 22 s of reference plus generated audio, leaving room under the 30 s limit.
 PACKAGE_BUDGET_SECONDS = 22.0
@@ -107,15 +110,23 @@ def drop_reference_tail(audio, sr: int, rel_db: float = -30.0, frame_ms: int = 2
     return audio
 
 
-def finish(audio, sr: int, fade_ms: int = 10, peak: float = 0.97) -> np.ndarray:
-    """Mono float32 at 48 kHz: resampled if needed, edges faded, scaled down only if over the peak limit."""
+def finish(audio, sr: int, fade_ms: int = 10, peak: float = 0.97, level: float | None = None) -> np.ndarray:
+    """Mono float32 at 48 kHz: resampled if needed, set to its level, edges faded.
+
+    With a level, the piece's peak is brought to it, up or down, so that the pieces of a request sound equally
+    loud: the worker hands them over at whatever peak the model gave them (and far lower for a quiet reference
+    clip). What is_silent calls nothing is left as it is, never raised into noise. Without a level the piece is
+    only scaled down, and only if it is over the peak limit."""
     audio = _clean(audio)
     if len(audio) == 0:
         return audio
     if sr != SAMPLE_RATE:
         audio = np.array(soxr.resample(audio, sr, SAMPLE_RATE, quality="HQ"), dtype=np.float32)
     top = float(np.abs(audio).max()) if len(audio) else 0.0
-    if top > peak:
+    if level is not None:
+        if top >= MIN_PEAK:
+            audio = audio * np.float32(level / top)
+    elif top > peak:
         audio = audio * np.float32(peak / top)
     fade = min(SAMPLE_RATE * fade_ms // 1000, len(audio) // 2)
     if fade > 0:
