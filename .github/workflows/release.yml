@@ -1,0 +1,99 @@
+name: Release
+
+# A pushed tag v<version> builds the Windows installer and publishes it as a GitHub Release.
+#
+# To release: node scripts/version.mjs set 1.2.3, commit, git tag v1.2.3, git push --follow-tags.
+# The tag must match the version in app/package.json or the job stops before building.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # to create the release
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  installer:
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Rust (stable, already on the runner through rustup)
+        run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: The tag matches the version
+        shell: pwsh
+        run: node scripts/version.mjs check --tag "$env:TAG"
+
+      - name: Fetch the pinned uv (fails unless its SHA-256 is the committed one)
+        shell: pwsh
+        run: ./scripts/fetch-uv.ps1
+
+      - name: Install the app's packages
+        working-directory: app
+        run: npm ci
+
+      - name: Frontend tests
+        working-directory: app
+        run: npx vitest run
+
+      - name: Type check
+        working-directory: app
+        run: npx tsc --noEmit
+
+      - name: Build the frontend (the Rust tests embed it)
+        working-directory: app
+        run: npm run build
+
+      - name: Rust tests
+        working-directory: app/src-tauri
+        run: cargo test
+
+      - name: First-run setup tests
+        run: python -m unittest discover -s installer/tests -v
+
+      - name: Build the installer (NSIS, per-user, x64)
+        working-directory: app
+        run: npm run installer
+
+      - name: Publish the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $installer = Get-ChildItem app/src-tauri/target/release/bundle/nsis -Filter "*-setup.exe" | Select-Object -First 1
+          if ($null -eq $installer) { throw "No installer was built" }
+          $hash = (Get-FileHash -Path $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $notes = @(
+            "## Install",
+            "",
+            "Download **$($installer.Name)** below and run it. Windows 10 or 11 (64-bit) with a DirectX 12 GPU.",
+            "",
+            "The installer is not signed, so Windows SmartScreen may show ""Windows protected your PC"": choose **More info**, then **Run anyway**. The first start downloads about 525 MB once and needs an internet connection. See the Install section of the README for details, including what the installed app cannot do yet.",
+            "",
+            "SHA-256 of the installer: ``$hash``",
+            ""
+          ) -join "`n"
+          Set-Content -Path release-notes.md -Value $notes -Encoding utf8
+          gh release create "$env:TAG" "$($installer.FullName)" --verify-tag --title "Voxweave $env:TAG" --notes-file release-notes.md --generate-notes
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
