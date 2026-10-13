@@ -27,8 +27,10 @@ rewritten and every other digit is left exactly as typed:
 - An integer written with thousands separators ("1,200", up to 999,999,999,999, with an optional decimal part)
   becomes words: "one thousand two hundred", the decimals digit by digit after "point".
 - A phone number becomes its digits, one by one, with a comma between its groups: "555 0142" is "five five
-  five, zero one four two". A run of digits counts as a phone number only if it has 7 to 15 digits and looks
-  like one: see `_phone_groups` for what is, on purpose, left alone (dates, ranges, decimals, plain integers).
+  five, zero one four two". A run of digits counts as a phone number only if it has 7 to 15 digits and is
+  marked as one (a plus sign, brackets, a leading 0, hyphens or dots between its groups, a 1300 or 1800
+  shape): see `_phone_groups` for what is, on purpose, left alone (dates, ranges, decimals, plain integers,
+  and numbers that merely stand next to each other with spaces between them).
 The length limit is on the text as typed: it is checked before the numbers are written out, and the written-out
 text may be several times longer (at worst about eight times, for text that is nothing but twelve-digit
 numbers). Nothing later limits the whole: the pieces are cut to the byte budget after the rewriting, so each one
@@ -119,17 +121,28 @@ def _looks_like_a_year(group: str) -> bool:
     return len(group) == 4 and group[0] in "12"
 
 
+_SERVICE_PREFIXES = ("1300", "1800")  # ten-digit service numbers, written 4-3-3
+
+
 def _phone_groups(candidate: str) -> list[str] | None:
     """The digit groups of a phone number, or None for anything that might be something else. Wrongly reading a
     date or a quantity digit by digit is worse than leaving a phone number as it was, so when in doubt: None.
 
-    Always left alone: fewer than 7 or more than 15 digits; a date (three groups shaped like day, month and
-    year, either way round); two groups around a dot (a decimal); dotted groups shorter than three digits (a
-    version, a machine's address). A leading plus sign, an area code in brackets, or a first group that starts
-    with 0 marks a phone number, and then any grouping is accepted, an unbroken run too. Without such a mark an
-    unbroken run is a plain integer, two groups must be three or four digits then four ("555 0142", "9555
-    0142") and neither two years nor two round numbers (a range, a list), and three or more groups must end in
-    a group of four ("555 123 4567"), which thousands grouped by spaces never do."""
+    Always left alone: fewer than 7 or more than 15 digits; anything that begins with a date (three groups
+    shaped like day, month and year, either way round) or is made of years only; two groups around a dot (a
+    decimal); dotted groups shorter than three digits (a version, a machine's address).
+
+    A leading plus sign, an area code in brackets, or a first group that starts with 0 marks a phone number,
+    and then any grouping is accepted, an unbroken run too. So does the shape of a 1300 or 1800 number
+    (4-3-3). Without such a mark:
+    - an unbroken run is a plain integer;
+    - groups set apart by spaces only are numbers that happen to stand next to each other ("In 2023 4521
+      people", "room 101 2345", "10 20 30 4000", thousands grouped by spaces), with one exception: two groups
+      of three or four and then four digits whose last group begins with 0 and is not 0000 ("555 0142", the
+      number the model was measured to garble), which no quantity, year or group of thousands is written as;
+    - groups joined by hyphens or dots must be three or four digits then four ("555-0142") and neither two
+      years nor two round numbers (a range), or three or more groups ending in a group of four
+      ("555-123-4567")."""
     if candidate.count("(") != candidate.count(")"):
         return None
     groups = re.findall(r"\d+", candidate)
@@ -139,20 +152,28 @@ def _phone_groups(candidate: str) -> list[str] | None:
     lengths = [len(g) for g in groups]
     bracketed = "(" in candidate
     plus = candidate.startswith("+")
-    if not (plus or bracketed) and len(groups) == 3 and (
-            (lengths[0] <= 2 and lengths[1] <= 2 and lengths[2] == 4)
-            or (lengths[0] == 4 and lengths[1] <= 2 and lengths[2] <= 2)):
-        return None
+    if not (plus or bracketed):
+        if len(groups) >= 3 and ((lengths[0] <= 2 and lengths[1] <= 2 and lengths[2] == 4)
+                                 or (lengths[0] == 4 and lengths[1] <= 2 and lengths[2] <= 2)):
+            return None
+        if len(groups) >= 2 and all(_looks_like_a_year(g) for g in groups):
+            return None
     if "." in candidate and (len(groups) == 2 or min(lengths) < 3):
         return None
     if plus or bracketed or (groups[0][0] == "0" and lengths[0] >= 2):
         return groups
     if len(groups) == 1:
         return None
+    if lengths == [4, 3, 3] and groups[0] in _SERVICE_PREFIXES:
+        return groups
+    separators = re.findall(r"(?<=\d)\D+(?=\d)", candidate)
+    if all(separator == " " for separator in separators):
+        last = groups[-1]
+        if lengths in ([3, 4], [4, 4]) and last[0] == "0" and last != "0000":
+            return groups
+        return None
     if len(groups) == 2:
-        if lengths not in ([3, 4], [4, 4]):
-            return None
-        if all(_looks_like_a_year(g) for g in groups) or all(g[-1] == "0" for g in groups):
+        if lengths not in ([3, 4], [4, 4]) or all(g[-1] == "0" for g in groups):
             return None
         return groups
     return groups if lengths[-1] == 4 else None

@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from aivoice import tts_audio
-from aivoice.tts_audio import (PIECE_PEAK, SAMPLE_RATE, drop_reference_tail, finish, is_silent, join,
+from aivoice.tts_audio import (MAX_GAIN, PIECE_PEAK, SAMPLE_RATE, drop_reference_tail, finish, is_silent, join,
                                 max_chars_for, trim_edges)
 
 SR = SAMPLE_RATE
@@ -286,10 +286,18 @@ def test_two_pieces_of_different_raw_peak_are_finished_at_the_same_level():
     assert PIECE_PEAK == 0.89
 
 
-def test_a_piece_from_a_quiet_reference_is_raised_to_the_same_level():
-    # the worker lowers what it generates by as much as it raised a quiet reference: up to 30 dB
-    out = finish(tone(0.5, 0.03, sr=24000), 24000, level=PIECE_PEAK)
+def test_a_quieter_piece_is_raised_to_the_same_level_within_the_limit_of_the_gain():
+    out = finish(tone(0.5, 0.25, sr=24000), 24000, level=PIECE_PEAK)  # 3.56 times: inside the limit
     assert np.abs(out).max() == pytest.approx(PIECE_PEAK, abs=2e-3)
+
+
+@pytest.mark.parametrize("raw, played", [(0.01, 0.04), (0.006, 0.024), (0.1, 0.4), (0.2225, 0.89), (0.3, 0.89)])
+def test_the_gain_is_never_more_than_four_times(raw, played):
+    # A failed generation that is only room tone or a click, or the noise of a very quiet reference clip, must
+    # not go out at full scale: a piece is raised by 12 dB at most, whatever that leaves it short of the level.
+    out = finish(tone(0.5, raw), SR, level=PIECE_PEAK)
+    assert np.abs(out).max() == pytest.approx(played, rel=2e-3)
+    assert MAX_GAIN == 4.0
 
 
 def test_the_level_is_set_after_resampling_and_before_the_fade():

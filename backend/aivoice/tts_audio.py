@@ -13,6 +13,9 @@ MIN_PEAK = 0.005
 # The peak every played piece is brought to, about -1 dBFS: one level for all pieces of a request, with room
 # left for the player's gain stage and the 16-bit file.
 PIECE_PEAK = 0.89
+# A piece is raised by at most this much (12 dB) on its way to that level. More would put what is not speech at
+# full scale: a failed generation that is only room tone or a click, or the noise of a very quiet reference clip.
+MAX_GAIN = 4.0
 SAFETY_MARGIN = 0.85
 # The package sizes pieces for 22 s of reference plus generated audio, leaving room under the 30 s limit.
 PACKAGE_BUDGET_SECONDS = 22.0
@@ -114,9 +117,11 @@ def finish(audio, sr: int, fade_ms: int = 10, peak: float = 0.97, level: float |
     """Mono float32 at 48 kHz: resampled if needed, set to its level, edges faded.
 
     With a level, the piece's peak is brought to it, up or down, so that the pieces of a request sound equally
-    loud: the worker hands them over at whatever peak the model gave them (and far lower for a quiet reference
-    clip). What is_silent calls nothing is left as it is, never raised into noise. Without a level the piece is
-    only scaled down, and only if it is over the peak limit."""
+    loud: the worker hands them over at whatever peak the model gave them. A piece is raised by MAX_GAIN at
+    most, so one that is much quieter than speech ever is (room tone, a click, the output for a very quiet
+    reference clip) stays short of the level instead of being played at full scale; what is_silent calls
+    nothing is not raised at all. Without a level the piece is only scaled down, and only if it is over the
+    peak limit."""
     audio = _clean(audio)
     if len(audio) == 0:
         return audio
@@ -125,7 +130,7 @@ def finish(audio, sr: int, fade_ms: int = 10, peak: float = 0.97, level: float |
     top = float(np.abs(audio).max()) if len(audio) else 0.0
     if level is not None:
         if top >= MIN_PEAK:
-            audio = audio * np.float32(level / top)
+            audio = audio * np.float32(min(level / top, MAX_GAIN))
     elif top > peak:
         audio = audio * np.float32(peak / top)
     fade = min(SAMPLE_RATE * fade_ms // 1000, len(audio) // 2)

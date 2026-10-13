@@ -274,10 +274,12 @@ def test_a_currency_or_minus_sign_stays_where_it_is():
     ("555 0142", "five five five, zero one four two"),  # the one measured
     ("555-0142", "five five five, zero one four two"),
     ("9555 0142", "nine five five five, zero one four two"),
-    ("555 123 4567", "five five five, one two three, four five six seven"),
     ("555-123-4567", "five five five, one two three, four five six seven"),
     ("555.123.4567", "five five five, one two three, four five six seven"),
-    ("1 800 555 0199", "one, eight zero zero, five five five, zero one nine nine"),
+    ("1800 123 456", "one eight zero zero, one two three, four five six"),
+    ("1300 655 506", "one three zero zero, six five five, five zero six"),
+    ("1800-123-456", "one eight zero zero, one two three, four five six"),
+    ("555 123-4567", "five five five, one two three, four five six seven"),
     ("(555) 123-4567", "five five five, one two three, four five six seven"),
     ("(02) 9555 0142", "zero two, nine five five five, zero one four two"),
     ("0412 345 678", "zero four one two, three four five, six seven eight"),
@@ -309,6 +311,11 @@ def test_phone_numbers_are_read_digit_by_digit_with_a_pause_between_groups(writt
     "1987 2004", "1987-2004", "1000-2000", "500-1000", "3000-5000", "250 1000",
     # decimals, versions, addresses of machines
     "555.0142", "1234.5678", "0.1234567", "3.14159265", "1.2.3.4567", "192.168.1.100", "10.0.0.1234",
+    # groups set apart by spaces only, with nothing that marks a phone number: they were read correctly as typed
+    "2023 4521", "500 3271", "101 2345", "2024 2025 2026", "10 20 30 4000", "2 500 1000", "15 000 0000",
+    "555 123 4567", "1 800 555 0199", "9555 1142", "1900 123 456", "1800 1234 56", "555 0000",
+    # a date first, whatever follows it
+    "5-10-2026 1200", "1-10-2026 2-10-2026", "2026-10-13 1500", "01-02-2026 1234", "13.10.2026 5550142",
     # groups that are not a phone number's
     "100 200 300", "1 200 000", "12 345 678", "555 0142 12", "12345 67890", "55 501 42", "1 2 3 4 5 6 7",
     # stuck to something else
@@ -386,3 +393,28 @@ def test_property_random_text_with_numbers_written_out():
                 split(text, max_chars, numbers=True)
             continue
         check_pieces(split(text, max_chars, numbers=True), max_chars, write_out_numbers(cleaned))
+
+
+@pytest.mark.parametrize("sentence", [
+    "In 2023 4521 people attended.",
+    "Of the 500 3271 were counted.",
+    "It is in room 101 2345 times a year.",
+    "On 5-10-2026 1200 people came.",
+    "From 1-10-2026 2-10-2026 is one day.",
+    "By 2026-10-13 1500 had signed.",
+    "In 2024 2025 2026 it rose.",
+    "Count 10 20 30 4000 and stop.",
+    "Between 2 500 1000 and more.",
+    "About 15 000 0000 units.",
+])
+def test_numbers_that_stand_next_to_each_other_are_not_taken_for_a_phone_number(sentence):
+    assert write_out_numbers(sentence) == sentence
+    assert split(sentence, 200, numbers=True) == [sentence]
+
+
+def test_the_measured_phone_number_is_still_read_digit_by_digit():
+    # "555 0142" is what the model garbled in the first real run. Set apart by a space only, a last group of
+    # four digits that begins with 0 is what marks it: no quantity, year or group of thousands is written so.
+    assert write_out_numbers("Call 555 0142 before noon.") == "Call five five five, zero one four two before noon."
+    assert write_out_numbers("Call 9555 0142.") == "Call nine five five five, zero one four two."
+    assert write_out_numbers("Call 555 1142.") == "Call 555 1142."

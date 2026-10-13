@@ -879,10 +879,10 @@ def test_best_sends_every_piece_through_the_voices_model_at_48_khz(rig):
     for (_, played), given, returned in zip(rig.player.played, rig.converter.inputs, rig.converter.outputs):
         assert given.dtype == np.float32 and 0.95 * 48000 < len(given) < 1.15 * 48000  # trimmed, at 48 kHz
         assert 0.25 < np.abs(given).max() < 0.35  # the converter is given the piece at the level it came in
-        # What was played is what the converter returned (half the level), trimmed again and brought to the
-        # level every piece is played at.
+        # What was played is what the converter returned (half the level), trimmed again and raised towards the
+        # level every piece is played at: by four times, the most a piece is ever raised (0.15 becomes 0.6).
         assert 0.1 < np.abs(returned).max() < 0.2
-        assert np.abs(played).max() == pytest.approx(0.89, abs=0.005)
+        assert np.abs(played).max() == pytest.approx(0.6, abs=0.005)
         assert np.array_equal(played, tts_audio.finish(tts_audio.trim_edges(returned, 48000), 48000, level=0.89))
 
 
@@ -2301,6 +2301,16 @@ def test_the_listen_volume_is_applied_to_the_listen_device_only(rig):
     assert rig.player.starts == [{"mic": 2, "monitor": 1}] and rig.player.gains == [{"monitor": 0.35}]
 
 
+@pytest.mark.parametrize("asked, used", [(2.0, 1 / 0.89), (1.5, 1 / 0.89), (1.13, 1 / 0.89), (1.12, 1.12),
+                                         (1.0, 1.0), (0.0, 0.0)])
+def test_the_listen_volume_is_held_where_a_piece_at_full_level_does_not_clip(rig, asked, used):
+    # every piece has its peak at 0.89, and the volume is applied after that: above 1.12 it would clip
+    rig.speak(monitor_gain=asked)
+    rig.finish()
+    assert rig.player.gains == [{"monitor": pytest.approx(used)}]
+    assert rig.player.gains[0]["monitor"] * tts_audio.PIECE_PEAK <= 1.0 + 1e-9
+
+
 def test_without_a_listen_device_or_a_volume_nothing_is_turned_down(rig):
     voice = rig.voice()
     rig.speak(voice, mic_device=2, monitor_device=None, monitor_gain=0.35)
@@ -2320,8 +2330,8 @@ def test_a_listen_volume_outside_live_modes_range_is_refused(rig, gain):
 # ---------------------------------------------------------------- one level for every piece (B5)
 
 def test_pieces_of_different_raw_level_are_played_at_the_same_level(rig):
-    # as the worker hands them over: anything from quiet (a quiet reference clip) to full scale
-    levels = [0.9, 0.5, 0.02]
+    # as the worker hands them over: anything from a quarter of full scale to full scale
+    levels = [0.9, 0.5, 0.25]
     rig.audio_for = lambda index: speech(level=levels[index])
     rig.speak(save=True)
     status = rig.finish()
@@ -2330,6 +2340,16 @@ def test_pieces_of_different_raw_level_are_played_at_the_same_level(rig):
     assert peaks == pytest.approx([0.89] * 3, abs=0.005)
     saved, _ = read_wav(status["saved_path"])
     assert float(np.abs(saved).max()) == pytest.approx(0.89, abs=0.005)  # and saved as played
+
+
+def test_a_piece_that_is_nearly_nothing_is_raised_four_times_at_most(rig):
+    # room tone or a click that passed for sound, or a very quiet reference clip: never full scale into the mic
+    levels = [0.3, 0.01, 0.1]
+    rig.audio_for = lambda index: speech(level=levels[index])
+    rig.speak()
+    assert rig.finish()["error"] is None
+    peaks = [float(np.abs(audio).max()) for _, audio in rig.player.played]
+    assert peaks == pytest.approx([0.89, 0.04, 0.4], rel=0.02)
 
 
 def test_a_piece_that_is_silent_is_still_refused_and_never_raised_to_the_level(rig):

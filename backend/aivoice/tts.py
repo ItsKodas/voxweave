@@ -760,7 +760,9 @@ class TtsManager:
             outputs = self._outputs(mic_device, monitor_device)
             if not _is_number(monitor_gain) or not 0 <= monitor_gain <= MAX_MONITOR_GAIN:
                 raise TtsError(f"monitor_gain must be between 0 and {MAX_MONITOR_GAIN:g}")
-            gains = {"monitor": float(monitor_gain)} if "monitor" in outputs else {}
+            # The volume is applied after every piece has been brought to PIECE_PEAK: more than this would clip.
+            listen = min(float(monitor_gain), 1.0 / tts_audio.PIECE_PEAK)
+            gains = {"monitor": listen} if "monitor" in outputs else {}
         except TtsError:
             raise
         except ValueError as exc:
@@ -1220,8 +1222,9 @@ class TtsManager:
                 raise _Failed(f"Voice conversion failed for sentence {number}: {_reason(exc)}") from exc
             if tts_audio.is_silent(audio, rate):
                 raise _Failed(f"Voice conversion produced no sound for sentence {number}")
-        # Every piece at the same peak: the model's pieces differ by a few decibels, and by far more when the
-        # reference clip is quiet. Silence was refused above, so nothing is raised that is not speech.
+        # Every piece at the same peak: the model's pieces differ by a few decibels. The gain is limited
+        # (tts_audio.MAX_GAIN), because "not silent" above does not mean "speech": a piece of room tone or a
+        # click, and the quiet output for a quiet reference clip, are raised by 12 dB at most, never to full scale.
         audio = tts_audio.finish(audio, rate, level=tts_audio.PIECE_PEAK)
         self._watch(job)  # stopped meanwhile: nothing more is queued
         queued = self._now()
