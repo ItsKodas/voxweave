@@ -1,5 +1,6 @@
 """A real run of text to speech from end to end: the real TtsManager, the real worker and model on the GPU, a
-temporary data folder and a temporary voice. Opt-in: it needs the TTS environment and takes about two minutes.
+temporary data folder and a temporary voice. Opt-in: it needs the TTS environment and takes about a minute (65 to
+70 seconds measured, of which up to half a minute is the last test waiting for the housekeeping thread's round).
 
     AIVOICE_RUN_TTS_TEST=1 backend/.venv/Scripts/python -m pytest backend/tests/test_tts_real.py -q -W error -s
 
@@ -26,7 +27,7 @@ import psutil
 import pytest
 import soxr
 
-from aivoice import config, tts_audio, tts_text
+from aivoice import config, tts, tts_audio, tts_text
 from aivoice.audiofile import read_wav
 from aivoice.devices import Device
 from aivoice.library import Library
@@ -128,6 +129,7 @@ class Rig:
         self.converter_load_s = []
         self.results = {}
         self.seen = []  # every worker process seen, so that none is lost at the end
+        self.worker_pids = []  # the processes of the worker the first request started
         self.manager = TtsManager(self.data, self.library, TTS, self.player, lambda: list(DEVICES),
                                   rvc_factory=self._rvc)
         voice = self.library.create("Package sample")
@@ -208,6 +210,13 @@ def rig(tmp_path_factory):
                 Path(target).write_text(json.dumps(rig.results, indent=2), encoding="utf-8")
 
 
+def frame_levels(audio, frame):
+    """The RMS level in dBFS of each whole frame of the audio."""
+    count = len(audio) // frame
+    frames = np.asarray(audio[:count * frame], dtype=np.float64).reshape(count, frame)
+    return 10.0 * np.log10(np.maximum(np.mean(frames ** 2, axis=1), 1e-20))
+
+
 def check_pieces(pieces, texts):
     """What the player was given: one piece per sentence, each mono float32 at 48 kHz, audible, finished the way
     the pipeline finishes a piece, and of a believable length for its sentence."""
@@ -219,13 +228,14 @@ def check_pieces(pieces, texts):
         assert 0.5 * expected <= seconds <= 2.0 * expected, (seconds, expected, text)
         peak = float(np.abs(audio).max())
         assert 0.05 < peak <= 0.97 + 1e-6, peak
+        assert peak == pytest.approx(tts_audio.PIECE_PEAK, abs=0.005), peak  # every piece at the one level
         assert float(np.sqrt(np.mean(np.square(audio)))) > 0.005
         assert not tts_audio.is_silent(audio, RATE)
         assert abs(float(audio[0])) < 0.01 and abs(float(audio[-1])) < 0.01  # faded in and out
         # It starts with the sentence: not with what was left of the reference clip's last word and then the
         # second of room tone the model puts before a sentence (the first real run played both).
         frame = RATE * 20 // 1000
-        level = tts_audio._frame_db(audio, frame)
+        level = frame_levels(audio, frame)
         loud = level >= level.max() - 30.0
         assert loud[:3].any() and all(loud[i:i + 20].any() for i in range(15)), text
 
@@ -419,3 +429,25 @@ def test_unload_leaves_no_worker_process(rig):
     assert rig.leftovers() == []
     rig.results["gpu_dedicated_mb_after_unload"] = gpu_dedicated_mb()
     rig.results["worker_log"] = rig.log()[-1500:]
+
+
+def test_an_idle_worker_is_unloaded_by_the_manager_itself_with_nobody_asking_for_the_status(rig, monkeypatch):
+    """The screen asks for the status only while a request runs, so the idle unload is the manager's own job: its
+    housekeeping thread looks every HOUSEKEEPING seconds. Here the idle time is shortened to two seconds; the
+    thread's own pace is left as it is, so this waits for its next round (at most half a minute)."""
+    status, _, pieces, _ = rig.speak(THREE[0], "fast")  # starts a fresh worker: the last test unloaded it
+    assert status["error"] is None and status["engine"] == "ready", f"{status}\n{rig.log()}"
+    check_pieces(pieces, THREE[:1])
+    workers = rig.workers()
+    assert workers and rig.manager._keeper.is_alive()
+    monkeypatch.setattr(tts, "IDLE_UNLOAD", 2.0)
+    began = time.perf_counter()
+    deadline = began + 2 * tts.HOUSEKEEPING + 30
+    while worker_processes() and time.perf_counter() < deadline:  # psutil only: the manager is never asked
+        time.sleep(0.5)
+    rig.results["idle_unload_noticed_after_s"] = round(time.perf_counter() - began, 1)
+    _, alive = psutil.wait_procs(workers, timeout=10)
+    assert alive == [] and worker_processes() == [], rig.log()
+    assert rig.manager.housekeeping_failures == 0 and rig.manager.status_failures == 0
+    assert rig.manager.status()["engine"] == "stopped"  # stopped as planned: not reported as a failure
+    assert rig.leftovers() == []

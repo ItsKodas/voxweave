@@ -928,6 +928,13 @@ class Noisy:
         return (np.sin(2 * np.pi * 220.0 * t) * 0.3).astype(np.float32), 24000
 
 
+if os.environ.get("TTS_TEST_COMMAND_ERROR"):
+    def broken(self, line):  # an error in the serving loop itself, on the main thread, once commands are read
+        raise {"RuntimeError": RuntimeError, "KeyboardInterrupt": KeyboardInterrupt}[
+            os.environ["TTS_TEST_COMMAND_ERROR"]]("raised on purpose")
+
+    worker._Server.handle = broken
+
 worker.run(sys.argv[2:], engine_factory=Noisy)  # the entry point's own way of ending the process
 '''
 
@@ -1420,13 +1427,48 @@ def test_bad_command_line_arguments_are_reported_as_a_json_line(tmp_path):
         assert result.returncode == 2
 
 
-@pytest.mark.parametrize("error", ["RuntimeError", "KeyboardInterrupt"])
-def test_an_error_nothing_catches_still_ends_the_process_with_exit_code_1(tmp_path, error):
-    """Never through the ordinary interpreter exit, which crashes while the reader thread waits on stdin."""
-    result = run_driver(tmp_path, ["--model-dir", "m"], TTS_TEST_FACTORY_ERROR=error)
+def test_an_interrupt_before_anything_is_served_ends_the_process_with_exit_code_1(tmp_path):
+    """(An ordinary error at this point would end the process with exit code 1 whatever run() did, so only the
+    interrupt, which Python reports with another code, says anything here. The test below covers both.)"""
+    result = run_driver(tmp_path, ["--model-dir", "m"], TTS_TEST_FACTORY_ERROR="KeyboardInterrupt")
     assert result.returncode == 1, (result.returncode, result.stderr)
     assert result.stdout == b""
-    assert error.encode() in result.stderr
+    assert b"KeyboardInterrupt" in result.stderr
+
+
+@pytest.mark.parametrize("error", ["RuntimeError", "KeyboardInterrupt"])
+def test_an_error_nothing_catches_while_serving_still_ends_the_process_with_exit_code_1(tmp_path, error):
+    """Never through the ordinary interpreter exit: by now the reader thread is blocked reading stdin, which
+    stays open here as it does under the manager, and an ordinary exit in that state does not end cleanly."""
+    driver = tmp_path / "driver.py"
+    driver.write_text(NOISY_DRIVER, encoding="utf-8")
+    process = subprocess.Popen([sys.executable, "-u", str(driver), str(MODULE), "--model-dir", "m"],
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1", TTS_TEST_COMMAND_ERROR=error))
+    guard = threading.Timer(120.0, process.kill)  # a hung worker fails the test instead of hanging it
+    guard.start()
+    errors = []
+    drain = threading.Thread(target=lambda: errors.append(process.stderr.read()), daemon=True)
+    drain.start()
+    try:
+        ready = process.stdout.readline()
+        assert ready and json.loads(ready)["event"] == "ready"  # the reader thread is running from here on
+        process.stdin.write(b'{"cmd": "anything"}\n')
+        process.stdin.flush()  # and stdin is left open: the reader thread goes back to waiting on it
+        code = process.wait(timeout=WAIT)
+        rest = process.stdout.read()
+    finally:
+        guard.cancel()
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=60)
+        process.stdin.close()
+        process.stdout.close()
+    drain.join(WAIT)
+    process.stderr.close()
+    assert code == 1, (code, errors)
+    assert rest == b""  # nothing but the ready line ever reached the protocol
+    assert error.encode() in errors[0] and b"raised on purpose" in errors[0]
 
 
 def test_a_real_worker_started_for_a_parent_that_is_already_gone_ends_before_loading(tmp_path):
