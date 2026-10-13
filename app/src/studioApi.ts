@@ -18,7 +18,11 @@ export type Clip = {
   origin: string | null;
 };
 /** `index` is null once every sentence has been recorded. */
-export type Prompt = { index: number | null; text: string | null; total: number; recorded: number };
+export type PromptKind = "sentences" | "paragraphs";
+/** `number` is the position within the kind, from 1; `index` is what a recording is started with. */
+export type Prompt = {
+  index: number | null; text: string | null; total: number; recorded: number; kind?: PromptKind; number?: number | null;
+};
 export type TakeResult = { accepted: boolean; reason: string | null; message: string | null; clip: Clip | null };
 export type ImportStatus = {
   active: boolean;
@@ -53,8 +57,8 @@ export const studioApi = {
     if (!res.ok) throw await failure(res);
     return URL.createObjectURL(await res.blob());
   },
-  prompt: (id: string, after?: number) =>
-    call<Prompt>("GET", `${voicePath(id)}/prompt${after === undefined ? "" : `?after=${after}`}`),
+  prompt: (id: string, after?: number, kind: PromptKind = "sentences") =>
+    call<Prompt>("GET", `${voicePath(id)}/prompt?kind=${kind}${after === undefined ? "" : `&after=${after}`}`),
   recordStart: (voiceId: string, inputDevice: number, prompt: number) =>
     call<StudioStatus>("POST", "/library/record/start", { voice_id: voiceId, input_device: inputDevice, prompt }),
   recordStop: () => call<TakeResult>("POST", "/library/record/stop"),

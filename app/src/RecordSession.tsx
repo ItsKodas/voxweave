@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, Device, DeviceList } from "./api";
-import { Clip, Prompt, studioApi } from "./studioApi";
+import { Clip, Prompt, PromptKind, studioApi } from "./studioApi";
 import { useStudioStatus } from "./useStudioStatus";
 
 /** Takes with more than 20 s of speech are rejected, so the warning comes while there is time to finish. */
@@ -17,6 +17,9 @@ export function RecordSession({ voiceId, active, devicesVersion = 0, onSaved }: 
   const [inputs, setInputs] = useState<Device[]>([]);
   const [input, setInput] = useState<number | null>(null);
   const [prompt, setPrompt] = useState<Prompt | null>(null);
+  // Paragraphs are two or three sentences in one take: more speech per press of Record.
+  const [kind, setKind] = useState<PromptKind>("sentences");
+  const kindRef = useRef(kind);
   const [recording, setRecording] = useState(false);
   const [saved, setSaved] = useState<{ clip: Clip; url: string | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -37,7 +40,7 @@ export function RecordSession({ voiceId, active, devicesVersion = 0, onSaved }: 
 
   const loadPrompt = useCallback(
     async (after?: number) => {
-      setPrompt(await studioApi.prompt(voiceId, after));
+      setPrompt(await studioApi.prompt(voiceId, after, kindRef.current));
       setSaved(null);
     },
     [voiceId],
@@ -186,8 +189,33 @@ export function RecordSession({ voiceId, active, devicesVersion = 0, onSaved }: 
       setRecording(false);
     });
 
+  const paragraphs = kind === "paragraphs";
+  const chooser = (
+    <div role="radiogroup" aria-label="What to read" className="kind">
+      {(["sentences", "paragraphs"] as const).map((k) => (
+        <label key={k}>
+          <input type="radio" name="prompt-kind" checked={kind === k} disabled={recording || busy}
+            onChange={() => {
+              kindRef.current = k;
+              setKind(k);
+              run(() => loadPrompt());
+            }} />
+          {k === "sentences" ? "Sentences" : "Paragraphs"}
+        </label>
+      ))}
+    </div>
+  );
+
   if (prompt && prompt.index === null) {
-    return <p className="hint">Every sentence is recorded. Import more audio below, or redo clips from the list.</p>;
+    return (
+      <section className="record">
+        {chooser}
+        <p className="hint">
+          Every {paragraphs ? "paragraph" : "sentence"} is recorded. {paragraphs ? "Switch to sentences" : "Switch to paragraphs"},
+          import more audio below, or redo clips from the list.
+        </p>
+      </section>
+    );
   }
 
   return (
@@ -201,10 +229,12 @@ export function RecordSession({ voiceId, active, devicesVersion = 0, onSaved }: 
       </label>
       {inputs.length === 0 && <p className="hint">No microphone was found. Plug one in and use Refresh devices on the Live tab.</p>}
 
+      {chooser}
+      {paragraphs && <p className="hint">Paragraphs take 10 to 15 seconds to read. Keep each take under 20 seconds.</p>}
       {prompt && prompt.index !== null && (
         <>
           <p className="progress-line">
-            Sentence {prompt.index + 1} of {prompt.total}. {prompt.recorded} recorded.
+            {paragraphs ? "Paragraph" : "Sentence"} {prompt.number ?? prompt.index + 1} of {prompt.total}. {prompt.recorded} recorded.
           </p>
           <p className="sentence">{prompt.text}</p>
         </>
@@ -227,7 +257,7 @@ export function RecordSession({ voiceId, active, devicesVersion = 0, onSaved }: 
           <p className="ok">Saved. {saved.clip.seconds.toFixed(1)} s.</p>
           {saved.url && <audio aria-label="Play back the take" controls src={saved.url} />}
           <div className="actions">
-            <button onClick={() => run(() => loadPrompt())} disabled={busy}>Next sentence</button>
+            <button onClick={() => run(() => loadPrompt())} disabled={busy}>{paragraphs ? "Next paragraph" : "Next sentence"}</button>
             <button className="secondary" onClick={record} disabled={busy}>Redo</button>
           </div>
         </>

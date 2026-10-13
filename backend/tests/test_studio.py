@@ -244,3 +244,44 @@ def test_a_take_that_cannot_be_saved_is_a_readable_error_and_keeps_the_earlier_t
     assert not studio.recording
     assert [c.index for c in lib.get(voice.id).clips] == [1]  # the redo failed, so the earlier take stays
     assert not (tmp_path / "trash").exists()
+
+
+def test_paragraphs_follow_the_sentences_and_are_asked_for_by_kind(tmp_path):
+    lib = Library(tmp_path)
+    studio = Studio(lib, Recorder(CapturingStreams()), Importer(lib, NoTranscriber()), lambda: DEVICES,
+                    prompts=PROMPTS, paragraphs=("First paragraph. It is longer.", "Second paragraph. Also long."))
+    voice = lib.create("Ada")
+    assert studio.prompt(voice.id, kind="sentences") == {
+        "index": 0, "text": "First sentence here.", "total": 3, "recorded": 0, "kind": "sentences", "number": 1}
+    assert studio.prompt(voice.id, kind="paragraphs") == {
+        "index": 3, "text": "First paragraph. It is longer.", "total": 2, "recorded": 0, "kind": "paragraphs",
+        "number": 1}
+    # Skip moves on within the kind and wraps round inside it.
+    assert studio.prompt(voice.id, after=3, kind="paragraphs")["index"] == 4
+    assert studio.prompt(voice.id, after=4, kind="paragraphs")["index"] == 3
+    assert studio.prompt(voice.id, after=2, kind="sentences")["index"] == 0
+    with pytest.raises(ValueError, match="sentences or paragraphs"):
+        studio.prompt(voice.id, kind="songs")
+
+
+def test_a_recorded_paragraph_counts_only_among_the_paragraphs(tmp_path):
+    lib = Library(tmp_path)
+    studio = Studio(lib, Recorder(CapturingStreams()), Importer(lib, NoTranscriber()), lambda: DEVICES,
+                    prompts=PROMPTS, paragraphs=("First paragraph. It is longer.", "Second paragraph. Also long."))
+    voice = lib.create("Ada")
+    lib.add_clip(voice.id, np.zeros(48000, dtype=np.float32), "First paragraph. It is longer.", "recorded", prompt=3)
+    assert studio.prompt(voice.id, kind="paragraphs")["index"] == 4
+    assert studio.prompt(voice.id, kind="paragraphs")["recorded"] == 1
+    assert studio.prompt(voice.id, kind="sentences")["recorded"] == 0
+    lib.add_clip(voice.id, np.zeros(48000, dtype=np.float32), "Second paragraph. Also long.", "recorded", prompt=4)
+    assert studio.prompt(voice.id, kind="paragraphs") == {
+        "index": None, "text": None, "total": 2, "recorded": 2, "kind": "paragraphs", "number": None}
+
+
+def test_the_real_studio_offers_the_shipped_paragraphs_after_the_200_sentences(tmp_path):
+    lib = Library(tmp_path)
+    studio = Studio(lib, Recorder(CapturingStreams()), Importer(lib, NoTranscriber()), lambda: DEVICES)
+    voice = lib.create("Ada")
+    first = studio.prompt(voice.id, kind="paragraphs")
+    assert (first["index"], first["total"], first["number"]) == (200, 40, 1)
+    assert studio.prompt(voice.id, kind="sentences")["total"] == 200

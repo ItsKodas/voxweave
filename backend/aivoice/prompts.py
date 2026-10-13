@@ -8,6 +8,13 @@ def load_prompts() -> tuple[str, ...]:
     return tuple(line.strip() for line in text.splitlines() if line.strip())
 
 
+@lru_cache(maxsize=1)
+def load_paragraphs() -> tuple[str, ...]:
+    """Longer passages of two or three sentences, each short enough to read aloud in well under 20 seconds."""
+    text = Path(__file__).with_name("prompts_en_long.txt").read_text(encoding="utf-8")
+    return tuple(line.strip() for line in text.splitlines() if line.strip())
+
+
 def next_prompt(recorded: set[int], total: int, after: int | None = None) -> int | None:
     """The next sentence to read: the first one not yet recorded after `after`, wrapping round."""
     if after is None or not 0 <= after < total:

@@ -263,8 +263,40 @@ describe("RecordSession", () => {
     await ready();
     vi.mocked(studioApi.prompt).mockResolvedValue(P1);
     await userEvent.click(screen.getByRole("button", { name: "Skip" }));
-    expect(studioApi.prompt).toHaveBeenLastCalledWith("v-1", 0);
+    expect(studioApi.prompt).toHaveBeenLastCalledWith("v-1", 0, "sentences");
     expect(await screen.findByText(P1.text)).toBeInTheDocument();
+  });
+
+  it("switching to paragraphs asks for the next paragraph and keeps the chosen microphone", async () => {
+    render(<RecordSession voiceId="v-1" active onSaved={() => {}} />);
+    await ready();
+    expect(studioApi.prompt).toHaveBeenLastCalledWith("v-1", undefined, "sentences");
+    await userEvent.selectOptions(screen.getByLabelText("Microphone"), "1");
+    const para = { index: 202, text: "The ferry leaves at seven. The gulls follow it.", total: 40, recorded: 2,
+      kind: "paragraphs" as const, number: 3 };
+    vi.mocked(studioApi.prompt).mockResolvedValue(para);
+    await userEvent.click(screen.getByRole("radio", { name: "Paragraphs" }));
+    expect(studioApi.prompt).toHaveBeenLastCalledWith("v-1", undefined, "paragraphs");
+    expect(await screen.findByText(para.text)).toBeInTheDocument();
+    expect(screen.getByText("Paragraph 3 of 40. 2 recorded.")).toBeInTheDocument();
+    expect(api.devices).toHaveBeenCalledTimes(1); // the microphone list is not reloaded
+    expect(screen.getByLabelText("Microphone")).toHaveValue("1");
+    await userEvent.click(screen.getByRole("button", { name: "Record" }));
+    expect(studioApi.recordStart).toHaveBeenLastCalledWith("v-1", 1, 202);
+    // Skip stays among the paragraphs.
+    vi.mocked(studioApi.recordCancel).mockResolvedValue(IDLE);
+  });
+
+  it("when every paragraph is recorded the way back to sentences is still offered", async () => {
+    render(<RecordSession voiceId="v-1" active onSaved={() => {}} />);
+    await ready();
+    vi.mocked(studioApi.prompt).mockResolvedValue({ index: null, text: null, total: 40, recorded: 40,
+      kind: "paragraphs" as const, number: null });
+    await userEvent.click(screen.getByRole("radio", { name: "Paragraphs" }));
+    expect(await screen.findByText(/Every paragraph is recorded/)).toBeInTheDocument();
+    vi.mocked(studioApi.prompt).mockResolvedValue(P0);
+    await userEvent.click(screen.getByRole("radio", { name: "Sentences" }));
+    expect(await screen.findByText(P0.text)).toBeInTheDocument();
   });
 
   it("Cancel discards the take", async () => {

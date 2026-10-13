@@ -130,7 +130,7 @@ Open the **Voices** tab. A dataset is a set of short clips of one voice, each wi
 
 ### Guided recording
 
-Under **Record**, choose the **Microphone** (the Windows default is preselected). The list follows **Refresh devices** on the Live tab: after plugging in a microphone, press it there and the microphone appears here too, with your chosen microphone still selected if it is still connected. The list never changes during a take. The app shows one of 200 English sentences at a time.
+Under **Record**, choose the **Microphone** (the Windows default is preselected). The list follows **Refresh devices** on the Live tab: after plugging in a microphone, press it there and the microphone appears here too, with your chosen microphone still selected if it is still connected. The list never changes during a take. The app shows one of 200 English sentences at a time. Above the text you can switch between **Sentences** and **Paragraphs**: there are also 40 paragraphs of two or three sentences (10 to 15 seconds each), which collect speech faster with fewer presses of Record. Each list keeps its own count, and Skip and Next stay within the list you chose. Paragraph takes are longer than the 5 to 10 seconds text to speech wants for its reference clip, so keep at least a few single sentences recorded as well.
 
 - **Record** starts a take; read the sentence aloud. A level meter and the length of the take are shown.
 - **Stop** ends the take and checks it. If it is good the app says "Saved", plays it back so you can hear it, and offers **Next sentence** and **Redo**.

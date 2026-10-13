@@ -80,3 +80,19 @@ def test_next_prompt_none_when_all_recorded():
 def test_out_of_range_after_is_treated_as_start():
     assert next_prompt(set(), 3, after=99) == 0
     assert next_prompt(set(), 3, after=-5) == 0
+
+
+def test_paragraphs_are_distinct_short_enough_to_read_in_one_take_and_fit_a_transcript():
+    from aivoice.library import MAX_TEXT
+    from aivoice.prompts import load_paragraphs
+
+    paragraphs = load_paragraphs()
+    assert len(paragraphs) == 40 and len(set(paragraphs)) == 40
+    for p in paragraphs:
+        words = len(p.split())
+        # 25 to 38 words: about 10 to 15 seconds aloud, inside the 20 second limit on a take.
+        assert 25 <= words <= 38, p
+        assert len(p) <= MAX_TEXT and p[-1] in ".?!"
+        assert sum(p.count(mark) for mark in ".?!") >= 2, p
+        assert not any(ch.isdigit() for ch in p), p
+    assert not set(paragraphs) & set(load_prompts())

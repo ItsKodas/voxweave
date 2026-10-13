@@ -7,7 +7,7 @@ from aivoice.dataset import PROBLEM_MESSAGES, clip_problem, trim_silence
 from aivoice.devices import Device, get_device
 from aivoice.importer import Importer
 from aivoice.library import SAMPLE_RATE, Library, LibraryError
-from aivoice.prompts import load_prompts, next_prompt
+from aivoice.prompts import load_paragraphs, load_prompts, next_prompt
 from aivoice.recorder import Recorder
 
 log = logging.getLogger(__name__)
@@ -18,12 +18,19 @@ class Studio:
 
     def __init__(self, library: Library, recorder: Recorder, importer: Importer,
                  list_devices: Callable[[], list[Device]], prompts: tuple[str, ...] | None = None,
+                 paragraphs: tuple[str, ...] | None = None,
                  sample_rate: int = SAMPLE_RATE):
         self._library = library
         self._recorder = recorder
         self._importer = importer
         self._list_devices = list_devices
-        self._prompts = prompts if prompts is not None else load_prompts()
+        # Sentences first, then the longer paragraphs: a clip remembers its prompt by position in this list, so
+        # the sentences keep the positions they always had.
+        if paragraphs is None:
+            paragraphs = load_paragraphs() if prompts is None else ()
+        sentences = prompts if prompts is not None else load_prompts()
+        self._long_from = len(sentences)
+        self._prompts = tuple(sentences) + tuple(paragraphs)
         self._sr = sample_rate
         self._lock = threading.Lock()
         self._take: tuple[str, int] | None = None
@@ -32,12 +39,23 @@ class Studio:
     def recording(self) -> bool:
         return self._recorder.recording
 
-    def prompt(self, voice_id, after: int | None = None) -> dict:
+    def prompt(self, voice_id, after: int | None = None, kind: str | None = None) -> dict:
+        """The next thing to read. kind "sentences" or "paragraphs" keeps to that part of the list and adds
+        "kind" and "number" (the position within it, from 1); without a kind the whole list is one sequence."""
         voice = self._library.get(voice_id)
         recorded = {c.prompt for c in voice.clips if c.prompt is not None}
-        index = next_prompt(recorded, len(self._prompts), after)
-        return {"index": index, "text": None if index is None else self._prompts[index],
-                "total": len(self._prompts), "recorded": len(recorded)}
+        if kind is None:
+            index = next_prompt(recorded, len(self._prompts), after)
+            return {"index": index, "text": None if index is None else self._prompts[index],
+                    "total": len(self._prompts), "recorded": len(recorded & set(range(len(self._prompts))))}
+        if kind not in ("sentences", "paragraphs"):
+            raise ValueError("kind must be sentences or paragraphs")
+        first, end = (0, self._long_from) if kind == "sentences" else (self._long_from, len(self._prompts))
+        done = {i - first for i in recorded if first <= i < end}
+        local = next_prompt(done, end - first, None if after is None else after - first)
+        index = None if local is None else first + local
+        return {"index": index, "text": None if index is None else self._prompts[index], "total": end - first,
+                "recorded": len(done), "kind": kind, "number": None if local is None else local + 1}
 
     def start_recording(self, voice_id, device: int, prompt: int) -> None:
         with self._lock:

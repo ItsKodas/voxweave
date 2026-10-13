@@ -129,8 +129,8 @@ def library_router(studio: Studio, library: Library, importer: Importer, live_ru
         return FileResponse(library.clip_audio_path(voice_id, index), media_type="audio/wav")
 
     @router.get("/voices/{voice_id}/prompt")
-    def prompt(voice_id: str, after: int | None = None) -> dict:
-        return studio.prompt(voice_id, after)
+    def prompt(voice_id: str, after: int | None = None, kind: str | None = None) -> dict:
+        return studio.prompt(voice_id, after, kind)
 
     @router.post("/record/start")
     def record_start(body: RecordBody) -> dict:
