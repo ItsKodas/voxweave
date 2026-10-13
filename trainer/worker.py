@@ -1,7 +1,7 @@
 """The training worker: trains one RVC v2 voice model and hands it to the app.
 
   python -P trainer/worker.py --voice-dir <data/voices/id> --job-dir <data/voices/id/training>
-      --experiment voice-<id> --epochs 200 --batch-size 8 --save-every 5 [--resume] [--parent-pid N] --name "<name>"
+      --experiment voice-<id> --epochs 200 --batch-size 8 --save-every 5 [--resume] [--parent-pid N] --name=<name>
 
 Runs under the training environment's Python but uses only the standard library plus rvclog.py, filelist.py and
 procutil.py from this folder.
@@ -17,7 +17,8 @@ What it protects:
 - The training state. RVC overwrites its only checkpoint pair in place and silently restarts from the pretrained
   base when it cannot read it. The worker keeps a verified second copy (.bak), stops a trainer that did not print
   its two "Loaded checkpoint" lines before it can save anything, and falls back to the copy.
-- The model in use. The export goes to models/rvc.new/, is checked, and only then swapped into models/rvc/.
+- The model in use. The export goes to models/rvc.new/, is checked, and only then swapped into models/rvc/. The
+  model it replaces is moved to <data>/trash/<voice-id>/models-<UTC time>/, not erased.
 - The GPU. Stages are killed as a whole process tree, and on Windows every child is tied to the worker's own life.
 """
 import argparse
@@ -60,7 +61,12 @@ SAMPLE_RATE = "40k"
 # Lines that show train.py is past loading and is training. The loss line is among them because it is one RVC
 # never translates, so a trainer that did not resume is caught on any Windows display language.
 TRAINING_UNDER_WAY = ("epoch_progress", "loss", "saved", "epoch_done")
+# After a stop request the trainer is left alone until the current epoch ends, so that it is never killed during
+# a save. How long that wait may last: a minute, or twice the mean length of the last epochs when they are
+# longer than that (once two are known), and never more than a quarter of an hour.
 CANCEL_GRACE_SECONDS = 60
+MAX_CANCEL_GRACE_SECONDS = 15 * 60
+BACKUP_SKIPS_WORTH_A_WARNING = 3
 ETA_WINDOW = 10
 TAIL_LINES = 20
 MIN_MODEL_BYTES = 1024 * 1024
@@ -178,6 +184,7 @@ class _Training:
         self.saving = False        # between a "Saving model" line and the end of that epoch
         self.kill_now = False      # an epoch just ended with a stop pending: the one safe moment to kill
         self.stop_seen_at = None
+        self.grace = float(CANCEL_GRACE_SECONDS)  # set when the stop is first seen
 
     @property
     def resume_confirmed(self):
@@ -198,6 +205,7 @@ class Job:
         self.cancel_file = self.job_dir / "cancel"
         self.stage, self.percent = "prepare", 0.0
         self.epochs_done, self.epoch_times, self.eta = 0, deque(maxlen=ETA_WINDOW + 1), None
+        self.backups_skipped = 0  # in a row
         self.stop_reason = None
         self.done_stages = {}
         self.tail = deque(maxlen=TAIL_LINES)
@@ -473,6 +481,10 @@ class Job:
         done = self.done_stages.get("preprocess")
         if done:
             expected, found = (done.get("segments") if isinstance(done, dict) else None), self._segments()
+            if not isinstance(expected, int) or isinstance(expected, bool):
+                raise JobError("The prepared training data cannot be checked: it was made by an older version of "
+                               "the app, which did not record how many slices there were. Start a new training "
+                               "run.", resumable=False)
             if expected != found:  # never train on a part of the voice without saying so
                 raise JobError("The prepared training data is incomplete (%s of %s slices are there). "
                                "Start a new training run." % (found, expected), resumable=False)
@@ -582,7 +594,9 @@ class Job:
             if kind == "resumed":
                 state.resumed_lines += 1
                 if state.resume_confirmed:
-                    self.epochs_done = max(self.epochs_done, min(event["epoch"], args.epochs))
+                    # The epoch the trainer really loaded: lower than the last saved one when that save could
+                    # not be read and the backup was used. (The percent never goes down within a run.)
+                    self.epochs_done = min(event["epoch"], args.epochs)
                     self._emit(self.epochs_done / args.epochs, "Continuing from epoch %d" % event["epoch"])
                 return
             if kind in TRAINING_UNDER_WAY and expect_resume and not state.resume_confirmed:
@@ -601,11 +615,13 @@ class Job:
             if not self._poll_stop():
                 return False
             if state.stop_seen_at is None:
-                state.stop_seen_at = self.clock()
-                self._emit(self.epochs_done / args.epochs, "Stopping after the current epoch")
+                state.stop_seen_at, state.grace = self.clock(), self._cancel_grace()
+                # The app waits this long (and a little more) before it gives up on the worker and kills it.
+                self._emit(self.epochs_done / args.epochs, "Stopping after the current epoch",
+                           {"grace_seconds": state.grace})
             # A kill between a "Saving" line and the end of that epoch can cut the only checkpoint short, so wait
             # for the end of an epoch; but not for ever.
-            return state.kill_now or self.clock() - state.stop_seen_at >= CANCEL_GRACE_SECONDS
+            return state.kill_now or self.clock() - state.stop_seen_at >= state.grace
 
         code = self._run([
             self.python, "train/train.py", "-e", self.experiment, "-sr", SAMPLE_RATE, "-f0", "1",
@@ -621,12 +637,27 @@ class Job:
         self._require_success(code)
         return state.resume_confirmed or not expect_resume
 
+    def _mean_epoch_seconds(self):
+        """The mean length of the last ETA_WINDOW epochs, or None until two epochs have ended in this run (the
+        first one includes start-up, so it is never averaged)."""
+        if len(self.epoch_times) < 2:
+            return None
+        return (self.epoch_times[-1] - self.epoch_times[0]) / (len(self.epoch_times) - 1)
+
+    def _cancel_grace(self):
+        """How long a stop request waits for the current epoch to end before the trainer is killed anyway."""
+        mean = self._mean_epoch_seconds()
+        if mean is None or self.stop_reason != "cancel":
+            # Without the app nobody owns this trainer, so it leaves the GPU within the minute whatever the epochs.
+            return float(CANCEL_GRACE_SECONDS)
+        return float(min(MAX_CANCEL_GRACE_SECONDS, max(CANCEL_GRACE_SECONDS, 2 * mean)))
+
     def _epoch_done(self, epoch, state):
         saved, state.saving = state.saving or epoch % self.args.save_every == 0, False
         self.epoch_times.append(self.clock())
         self.epochs_done = max(self.epochs_done, min(epoch, self.args.epochs))
-        if len(self.epoch_times) >= 2:  # the first epoch of a run includes start-up, so it is never averaged
-            mean = (self.epoch_times[-1] - self.epoch_times[0]) / (len(self.epoch_times) - 1)
+        mean = self._mean_epoch_seconds()
+        if mean is not None:
             self.eta = round(mean * (self.args.epochs - self.epochs_done), 1)
         self._emit(self.epochs_done / self.args.epochs, "Epoch %d of %d" % (self.epochs_done, self.args.epochs))
         if saved:
@@ -667,11 +698,17 @@ class Job:
                 os.replace(self.exp / (name + ".bak.tmp"), self.exp / (name + ".bak"))
             for name in CHECKPOINTS:
                 _unlink(self.exp / (name + ".failed"))
+            self.backups_skipped = 0
             self._log("worker", "checkpoint of epoch %d backed up in %.1f s" % (epoch, time.monotonic() - started))
         except OSError as exc:
             self._log("worker", "checkpoint backup skipped, the previous backup is kept: %s" % exc)
             for temp in temps:
                 _unlink_quietly(temp)
+            self.backups_skipped += 1
+            if self.backups_skipped % BACKUP_SKIPS_WORTH_A_WARNING == 0:
+                self._log("worker", "WARNING: %d checkpoint backups in a row were skipped. If the trainer is stopped "
+                                    "during a save now, the run can only go back to the last backup that was made, "
+                                    "or cannot be resumed if there is none." % self.backups_skipped)
 
     def _restore_backup(self):
         """Put the .bak pair in place of the checkpoint pair, keeping the unreadable files as .failed.
@@ -737,7 +774,8 @@ class Job:
             code = self._run_simple([
                 TOOLS_DIR / ".rvc" / "venv" / "Scripts" / "python.exe", TOOLS_DIR / "export_rvc_onnx.py",
                 self.weights, self.experiment, "--index", self._added_index(),
-                "--name", self.args.name or self.experiment], cwd=TOOLS_DIR.parent, env=env)
+                # One argument: as two, a name such as "-x" or "--cool" would be read as an option.
+                "--name=" + (self.args.name or self.experiment)], cwd=TOOLS_DIR.parent, env=env)
             self._require_success(code)
             self._check_export(new)
             try:
@@ -764,10 +802,12 @@ class Job:
         if not isinstance(info, dict) or not isinstance(info.get("sample_rate"), int):
             raise JobError("The export did not write a readable voice.json.")
 
-    @staticmethod
-    def _swap_model_in(models, new):
+    def _swap_model_in(self, models, new):
         live, old = models / "rvc", models / "rvc.old"
-        _remove_tree(old)
+        if os.path.lexists(old):  # left by an earlier swap: out of the way, to the trash if there is one
+            if not self._move_to_trash(old):
+                _remove_tree(old)  # it has to make room: the model in use is about to be parked under this name
+                self._log("worker", "the older model left in %s was deleted" % old)
         if live.exists():
             os.replace(live, old)
         try:
@@ -776,7 +816,48 @@ class Job:
             if old.exists():
                 os.replace(old, live)
             raise
-        shutil.rmtree(old, ignore_errors=True)
+        if old.exists():
+            self._retire_previous_model(old)
+
+    def _trash_dir(self):
+        """<data>/trash/<voice-id>, where the app keeps what it takes out of a voice; None when the voice folder
+        is not <data>/voices/<id> (then there is no data folder to hold a trash)."""
+        voice = self.voice_dir.resolve()
+        if voice.parent.name != "voices" or not voice.name:
+            return None
+        return voice.parent.parent / "trash" / voice.name
+
+    def _move_to_trash(self, folder):
+        """Move a model folder to the trash under a name of its own (a rename on the same drive, never a copy).
+        False, with the folder untouched, when there is no trash or the move failed."""
+        trash = self._trash_dir()
+        if trash is None:
+            return False
+        try:
+            trash.mkdir(parents=True, exist_ok=True)
+            stamp = "models-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(self.clock()))
+            target, n = trash / stamp, 1
+            while os.path.lexists(target):
+                n += 1
+                target = trash / ("%s-%d" % (stamp, n))
+            os.rename(folder, target)
+        except (OSError, OverflowError, ValueError) as exc:
+            self._log("worker", "could not move %s to the trash: %s" % (folder, exc))
+            return False
+        self._log("worker", "the previous model was moved to %s" % target)
+        return True
+
+    def _retire_previous_model(self, old):
+        """The new model is in place. The one it replaced goes to the trash; it is erased only where there is no
+        data folder around the voice, and stays beside the new one when the trash cannot be used."""
+        if self._move_to_trash(old):
+            return
+        if self._trash_dir() is None:
+            shutil.rmtree(old, ignore_errors=True)
+            self._log("worker", "the previous model was deleted: the voice folder is not inside a data folder, "
+                                "so there is no trash to move it to")
+        else:
+            self._log("worker", "the previous model stays in %s" % old)
 
     def _repair_model_swap(self):
         """A swap cut off between its two renames leaves the model in use parked as rvc.old: put it back."""

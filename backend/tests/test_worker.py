@@ -208,7 +208,8 @@ class FakeRunner:
         out = Path(c.env["AIVOICE_EXPORT_DIR"])
         (out / "model.onnx").write_bytes(b"\1" * (1024 * 1024 + 1))
         (out / "model.index").write_bytes(Path(c.arg("--index")).read_bytes())
-        (out / "voice.json").write_text(json.dumps({"name": c.arg("--name"), "sample_rate": 40000}))
+        name = next(a for a in c.argv if a.startswith("--name="))[len("--name="):]
+        (out / "voice.json").write_text(json.dumps({"name": name, "sample_rate": 40000}))
         c.line(f"Exported {c.argv[3]} at 40000 Hz to {out}")
         return 0
 
@@ -1083,7 +1084,7 @@ def test_the_export_runs_the_exporter_with_its_own_python_into_a_new_folder(rig)
     index = rig.exp / f"added_IVF225_Flat_nprobe_1_{EXP}_v2.index"
     assert call.argv == [
         str(rig.tools / ".rvc" / "venv" / "Scripts" / "python.exe"), str(rig.tools / "export_rvc_onnx.py"),
-        str(rig.weights), EXP, "--index", str(index), "--name", "My Voice"]
+        str(rig.weights), EXP, "--index", str(index), "--name=My Voice"]
     assert Path(call.cwd) == rig.tools.parent
     assert call.env["AIVOICE_EXPORT_DIR"] == str(rig.voice / "models" / "rvc.new")
     assert "PYTHONPATH" not in call.env or call.env["PYTHONPATH"] == os.environ.get("PYTHONPATH")
@@ -1237,16 +1238,18 @@ def test_the_command_line_matches_the_documented_interface(worker):
     assert worker.parse_args(["--voice-dir", "v", "--job-dir", "j", "--experiment", "e"]).resume is False
 
 
-def test_the_worker_imports_only_the_standard_library_and_its_two_helpers():
+@pytest.mark.parametrize("script", ["worker.py", "procutil.py", "rvclog.py", "filelist.py"])
+def test_the_worker_and_its_helpers_import_only_the_standard_library(script):
     import ast
 
     names = set()
-    for node in ast.walk(ast.parse(MODULE.read_text("utf8"))):
+    for node in ast.walk(ast.parse((MODULE.parent / script).read_text("utf8"))):
         if isinstance(node, ast.Import):
             names.update(alias.name.split(".")[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
+            assert node.level == 0, "helpers are loaded by path, never by a relative import"
             names.add((node.module or "").split(".")[0])
-    assert names <= set(sys.stdlib_module_names)
+    assert names and names <= set(sys.stdlib_module_names), names - set(sys.stdlib_module_names)
 
 
 # ---------------------------------------------------------------- review fix round 1
@@ -1482,3 +1485,222 @@ def test_the_job_object_does_not_change_the_workers_exit_code(code):
     done = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, stdin=subprocess.DEVNULL,
                           creationflags=subprocess.CREATE_NO_WINDOW, timeout=60)
     assert done.returncode == code, done.stderr
+
+
+# ---------------------------------------------------------------- final review fixes
+
+def run_with(rig, args):
+    return rig.worker.run(args, runner=rig.runner, clock=rig.clock, kill_tree=lambda pid: None,
+                          parent_alive=lambda pid: rig.parent_alive(pid))
+
+
+# F7: the voice's name is one argument, whatever it looks like
+
+@pytest.mark.parametrize("name", ["-x", "--cool", "--index", "My \"best\" voice, 'take 2'", "a=b", ""])
+def test_a_voice_name_that_looks_like_an_option_still_reaches_the_exporter(rig, name):
+    args = rig.worker.parse_args([
+        "--voice-dir", str(rig.voice), "--job-dir", str(rig.job), "--experiment", EXP, "--epochs", "10",
+        f"--name={name}"])
+    assert args.name == name
+    assert run_with(rig, args) == 0
+    argv = rig.runner.calls[-1].argv
+    assert argv[-1] == "--name=" + (name or EXP) and "--name" not in argv
+    assert json.loads((rig.model / "voice.json").read_text())["name"] == (name or EXP)
+
+
+# F10: the wait for the end of the epoch grows with the length of the epochs
+
+def cancel_in_epoch(rig, epoch, epoch_seconds, ticks, stop=None):
+    rig.runner.epoch_seconds, rig.runner.ticks = epoch_seconds, ticks
+    seen = {}
+
+    def at(point):
+        if point == f"epoch_start:{epoch}":
+            (stop or rig.cancel)()
+            seen["at"] = rig.clock.now
+
+    rig.runner.at = at
+    code = rig.run(save_every=50)
+    return code, rig.clock.now - seen["at"]
+
+
+def test_cancel_waits_for_the_end_of_a_long_epoch(rig):
+    code, waited = cancel_in_epoch(rig, 4, 400.0, 20)  # epochs of 400 s: far longer than the old fixed minute
+    assert_cancelled(rig, code)
+    assert rig.runner.killed == ["train"] and waited == pytest.approx(400.0)
+    assert "====> Epoch: 4 " in rig.log(), "stopped at the epoch boundary, not in the middle of the epoch"
+    stopping = [line for line in rig.progress() if line["message"] == "Stopping after the current epoch"]
+    assert [line["grace_seconds"] for line in stopping] == [800.0]  # twice the mean of the epochs so far
+
+
+def test_the_wait_is_twice_the_mean_of_the_last_ten_epochs(rig):
+    durations = {n: 100.0 for n in range(1, 40)}
+    durations.update({1: 5000.0, 2: 3000.0, 3: 3000.0})  # the slow warm-up epochs age out of the mean
+    seen = {}
+
+    def at(point):
+        kind, _, n = point.partition(":")
+        if kind == "epoch_start":
+            rig.runner.epoch_seconds = durations[int(n)]
+            if int(n) == 14:
+                rig.runner.epoch_seconds, rig.runner.ticks = 1000.0, 100  # this one hangs
+                rig.cancel()
+                seen["cancelled"] = rig.clock.now
+
+    rig.runner.at = at
+    assert_cancelled(rig, rig.run(epochs=30, save_every=50))
+    assert 200 <= rig.clock.now - seen["cancelled"] <= 210  # epochs 4 to 13 took 100 s each
+    assert "====> Epoch: 14 " not in rig.log()
+
+
+def test_the_wait_for_the_end_of_an_epoch_is_never_longer_than_fifteen_minutes(rig):
+    code, waited = cancel_in_epoch(rig, 4, 1000.0, 100)  # twice the mean would be 2000 s
+    assert_cancelled(rig, code)
+    assert 900 <= waited <= 910 and "====> Epoch: 4 " not in rig.log()
+    assert [line["grace_seconds"] for line in rig.progress() if "grace_seconds" in line] == [900.0]
+
+
+def test_the_wait_stays_at_a_minute_until_two_epochs_are_known(rig):
+    code, waited = cancel_in_epoch(rig, 2, 400.0, 20)  # one finished epoch: its length includes start-up
+    assert_cancelled(rig, code)
+    assert 60 <= waited <= 80
+    assert [line["grace_seconds"] for line in rig.progress() if "grace_seconds" in line] == [60.0]
+
+
+def test_the_wait_is_never_shorter_than_a_minute(rig):
+    seen = {}
+
+    def at(point):
+        if point == "epoch_start:5":  # four epochs of 10 s are known: twice their mean would be 20 s
+            rig.runner.epoch_seconds, rig.runner.ticks = 400.0, 20
+            rig.cancel()
+            seen["cancelled"] = rig.clock.now
+
+    rig.runner.at = at
+    assert_cancelled(rig, rig.run(save_every=50))
+    assert 60 <= rig.clock.now - seen["cancelled"] <= 80
+
+
+def test_a_worker_whose_app_is_gone_never_waits_longer_than_a_minute(rig):
+    def app_gone():
+        rig.parent_alive = lambda pid: False
+
+    rig.runner.epoch_seconds, rig.runner.ticks = 400.0, 20
+    seen = {}
+
+    def at(point):
+        if point == "epoch_start:4":
+            app_gone()
+            seen["at"] = rig.clock.now
+
+    rig.runner.at = at
+    assert rig.run("--parent-pid", "4242", save_every=50) == 2
+    assert rig.final()["message"] == "The app was closed"
+    assert 60 <= rig.clock.now - seen["at"] <= 80, "nobody owns this trainer any more: it must leave the GPU soon"
+
+
+# F13: a replaced model goes to the trash, it is not erased
+
+def test_the_previous_model_is_moved_to_the_trash_when_a_new_one_replaces_it(rig):
+    import time
+
+    valid_model_folder(rig.model)
+    previous = rig.tree(rig.model)
+    assert rig.run() == 0
+    assert sorted(p.name for p in (rig.voice / "models").iterdir()) == ["rvc"]
+    assert (rig.model / "model.onnx").read_bytes() != previous["model.onnx"]
+    trash = rig.voice.parent.parent / "trash" / "abc"
+    kept = list(trash.iterdir())
+    assert [p.name for p in kept] == ["models-" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(rig.clock.now))]
+    assert rig.tree(kept[0]) == previous
+    assert "moved to" in rig.log() and kept[0].name in rig.log()
+
+
+def test_two_models_retired_in_the_same_second_get_different_names(rig):
+    valid_model_folder(rig.model, payload=b"the model in use")
+    valid_model_folder(rig.voice / "models" / "rvc.old", payload=b"left by an earlier swap")
+    assert rig.run() == 0
+    assert sorted(p.name for p in (rig.voice / "models").iterdir()) == ["rvc"]
+    kept = sorted((rig.voice.parent.parent / "trash" / "abc").iterdir())
+    assert len(kept) == 2 and kept[1].name == kept[0].name + "-2"
+    assert (kept[0] / "model.onnx").read_bytes().startswith(b"left by an earlier swap")
+    assert (kept[1] / "model.onnx").read_bytes().startswith(b"the model in use")
+
+
+def test_without_a_data_folder_around_the_voice_the_previous_model_is_deleted_as_before(rig, tmp_path):
+    import shutil
+
+    loose = tmp_path / "loose" / "abc"  # not .../voices/<id>: there is no data folder to hold a trash
+    shutil.copytree(rig.voice, loose)
+    valid_model_folder(loose / "models" / "rvc")
+    args = rig.args()
+    args.voice_dir, args.job_dir = str(loose), str(loose / "training")
+    assert run_with(rig, args) == 0
+    assert sorted(p.name for p in (loose / "models").iterdir()) == ["rvc"]
+    assert (loose / "models" / "rvc" / "model.onnx").read_bytes().startswith(b"\1")
+    assert not list(tmp_path.rglob("trash"))
+    assert "the previous model was deleted" in (loose / "training" / "worker.log").read_text("utf-8")
+
+
+def test_a_trash_that_cannot_be_used_leaves_the_previous_model_beside_the_new_one(rig, monkeypatch):
+    valid_model_folder(rig.model)
+    previous = rig.tree(rig.model)
+    real_rename = os.rename
+
+    def rename(src, dst):
+        if "trash" in Path(dst).parts:
+            raise PermissionError(13, "Access is denied")
+        real_rename(src, dst)
+
+    monkeypatch.setattr(rig.worker.os, "rename", rename)
+    assert rig.run() == 0, "the new model is in place: a trash that cannot be used is not a failed training run"
+    assert rig.tree(rig.voice / "models" / "rvc.old") == previous  # nothing was erased
+    assert (rig.model / "model.onnx").read_bytes() != previous["model.onnx"]
+    assert "Access is denied" in rig.log()
+
+
+# F14: wording, the resumed epoch, and a warning when backups keep being skipped
+
+def test_a_stage_record_without_a_slice_count_is_refused_in_plain_words(rig):
+    interrupt_training(rig)
+    stages = json.loads((rig.exp / "stages.json").read_text())
+    stages["preprocess"] = True  # how an older worker recorded it
+    (rig.exp / "stages.json").write_text(json.dumps(stages))
+    assert rig.run("--resume") == 1
+    final = rig.final()
+    assert "None" not in final["error"] and "older version" in final["error"]
+    assert "Start a new training run" in final["error"] and final["resumable"] is False
+    assert rig.runner.calls == []
+
+
+def test_a_resume_from_the_backup_reports_the_epoch_it_really_continues_from(rig):
+    interrupt_training(rig, point="epoch_start:12", epochs=20)  # saved and backed up at 5 and 10
+    write_checkpoint(rig.exp / "G_2333333.pth.bak", 5), write_checkpoint(rig.exp / "D_2333333.pth.bak", 5)
+    truncate(rig.exp / "D_2333333.pth")
+    first_run_lines = len(rig.progress())
+    assert rig.run("--resume", epochs=20) == 0
+    resumed = rig.progress()[first_run_lines:]
+    continuing = [line for line in resumed if line["message"] == "Continuing from epoch 5"]
+    assert [line["epoch"] for line in continuing] == [5]  # not the 10 that was saved last and could not be read
+    after = resumed[resumed.index(continuing[0]):]
+    assert [line["epoch"] for line in after if line["message"].startswith("Epoch ")] == list(range(5, 21))
+    assert [line["percent"] for line in resumed] == sorted(line["percent"] for line in resumed)
+
+
+def test_three_skipped_backups_in_a_row_are_a_warning_in_the_log(rig, monkeypatch):
+    real_copy = rig.worker.copy_durable
+    failing = {"saving:1", "saving:2", "saving:3", "saving:5", "saving:6"}
+
+    def copy(src, dst):
+        if rig.runner.points[-1] in failing:
+            raise OSError(28, "No space left on device")
+        real_copy(src, dst)
+
+    monkeypatch.setattr(rig.worker, "copy_durable", copy)
+    assert rig.run(epochs=8, save_every=1) == 0
+    lines = (rig.job / "worker.log").read_text("utf-8").splitlines()
+    skipped = [i for i, line in enumerate(lines) if "checkpoint backup skipped" in line]
+    warnings = [i for i, line in enumerate(lines) if line.startswith("[worker] WARNING")]
+    assert len(skipped) == 5
+    assert warnings == [skipped[2] + 1], "once, after the third skip in a row; a good backup starts the count again"
+    assert "3 checkpoint backups in a row" in lines[warnings[0]]

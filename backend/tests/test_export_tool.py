@@ -92,3 +92,20 @@ def test_the_guards_still_run_when_the_export_dir_is_set(tool, monkeypatch, tmp_
         tool.main()
     assert "RVC clone missing" in str(info.value.code)
     assert not (tmp_path / "out").exists()
+
+
+# The training worker passes the voice's name as one argument, "--name=<name>": only that form survives a name
+# that looks like an option.
+
+@pytest.mark.parametrize("name", ["-x", "--cool", "--index", "My \"best\" voice, 'take 2'", "a=b", " spaced  out "])
+def test_a_name_given_as_one_argument_is_taken_as_it_is(tool, name):
+    args = tool.parse_args(["voice.pth", "my-voice", "--index", "added.index", f"--name={name}"])
+    assert args.name == name
+    assert (args.pth, args.voice_id, args.index) == (Path("voice.pth"), "my-voice", Path("added.index"))
+
+
+@pytest.mark.parametrize("name", ["-x", "--cool"])
+def test_a_name_that_looks_like_an_option_cannot_be_given_as_a_second_argument(tool, name, capsys):
+    with pytest.raises(SystemExit) as info:
+        tool.parse_args(["voice.pth", "my-voice", "--name", name])
+    assert info.value.code == 2 and "--name" in capsys.readouterr().err

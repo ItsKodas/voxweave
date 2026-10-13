@@ -27,9 +27,6 @@ _PROGRESS = re.compile(r"^(?:Write )?[Pp]rogress: (\d{1,9})/(\d{1,9})(?!\d)")
 _COMPLETED = re.compile(r"^(?:Worker )?[Cc]ompleted \| Success: (\d{1,9})\b.*?\bFailed: (\d{1,9})(?!\d)")
 _FAILED_FILE = re.compile(r"^\[Failed\] (.+)$")
 
-_FATAL = re.compile(r"Traceback \(most recent call last\)|\b\w*Error\b|out of memory", re.IGNORECASE)
-_HARMLESS = re.compile(r"^MIOpen\(HIP\): Error \[EvaluateInvokers\]")
-
 
 def _message(line: str) -> str:
     """The message part of a train.py line in either form (or the line itself when it has no prefix)."""
@@ -99,21 +96,3 @@ def parse_stage_line(stage, line):
         return None
     except Exception:
         return None
-
-
-def is_fatal_noise(line):
-    """True when a line looks like a real failure (an Error, a traceback, out of memory).
-
-    Known harmless lines that contain the word Error (the MIOpen EvaluateInvokers message) return False.
-    Callers should classify training lines with parse_train_line first: a line such as
-    "INFO:Error:Training epoch: 1 [0%]" mentions the word only through the experiment name.
-    """
-    try:
-        if not isinstance(line, str):
-            return False
-        line = line.rstrip("\r\n")
-        if _HARMLESS.match(line):
-            return False
-        return bool(_FATAL.search(line))
-    except Exception:
-        return False

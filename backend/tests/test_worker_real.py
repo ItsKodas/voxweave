@@ -1,19 +1,22 @@
-"""Real end-to-end runs of trainer/worker.py on the GPU. Opt-in: they take minutes.
+"""Real end-to-end runs of trainer/worker.py on the GPU, and one through the real TrainingManager. Opt-in: they
+take minutes.
 
     AIVOICE_RUN_TRAIN_TEST=1 backend/.venv/Scripts/python -m pytest backend/tests/test_worker_real.py -q -W error -s
 
 Skipped unless that variable is set and `trainer/verify.py --fast` passes. The voice lives in pytest's tmp_path
-(never in data/voices). The experiment folder is under trainer/rvc/logs with the prefix "test-real-"; whatever
-happens, the fixture ends every process that mentions the experiment and removes its folder, small model and
-index links.
+(never in data/voices). The experiment folder is under trainer/rvc/logs with the prefix "test-real-" (or
+"voice-real-manager-test-" for the run through the manager); whatever happens, every process that mentions the
+experiment is ended and its folder, small model and index links are removed, with a warning if anything remains.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
 import uuid
+import warnings
 from functools import partial
 from pathlib import Path
 
@@ -180,16 +183,7 @@ class Real:
         return f"last progress line: {self.progress()[-1:]}\nworker.log tail:\n{tail}\nworker.out.log:\n{out}"
 
     def clean_up(self):
-        for proc in processes_of(self.experiment):
-            try:
-                proc.kill()
-            except psutil.Error:
-                pass
-        wait_until_none_left(self.experiment, 20)
-        shutil.rmtree(self.exp, ignore_errors=True)
-        self.weights.unlink(missing_ok=True)
-        for link in (RVC / "assets" / "indices").glob(f"{self.experiment}_*"):
-            link.unlink(missing_ok=True)
+        remove_experiment(self.experiment)  # warns when anything is left
 
     def left_under_trainer(self):
         return [str(p) for p in (self.exp, self.weights, *(RVC / "assets" / "indices").glob(f"{self.experiment}_*"))
@@ -319,3 +313,125 @@ def test_killing_the_worker_itself_leaves_no_stage_running_and_a_resume_works(re
     assert_finished_ok(real, real.progress())
     assert "Loaded checkpoint" in real.log()
     assert wait_until_none_left(real.experiment) == []
+
+
+# ---------------------------------------------------------------- through the real manager
+
+MANAGER_VOICE_SECONDS = 5.2 * 60  # the manager refuses to train on less than 5 minutes
+LOG_LINE = re.compile(r"\[(worker|%s)\]( .*)?" % "|".join(STAGES))
+
+
+def make_library_voice(library, name, total_seconds=MANAGER_VOICE_SECONDS, seed=3):
+    """A library voice of short clips. Speech-like audio is slow to make, so eight clips are made and each is saved
+    several times at a different volume (different files, the same kind of sound)."""
+    voice = library.create(name)
+    rng = np.random.default_rng(seed)
+    bases = [speech_like(rng, float(rng.uniform(5.5, 7.5))) for _ in range(8)]
+    done, number = 0.0, 0
+    while done < total_seconds:
+        base = bases[number % len(bases)]
+        gain = 0.55 + 0.45 * ((number // len(bases)) % 7) / 6
+        done += library.add_clip(voice.id, base * gain, "a transcript the trainer must never read", "recorded").seconds
+        number += 1
+    return voice.id
+
+
+def remove_experiment(experiment):
+    """Ends every process of an experiment and removes what it left under trainer/rvc. Returns what could not be
+    removed, and warns about it: a run's checkpoints are over a gigabyte and must not be left behind unnoticed."""
+    for proc in processes_of(experiment):
+        try:
+            proc.kill()
+        except psutil.Error:
+            pass
+    stubborn = wait_until_none_left(experiment, 20)
+    exp, weights = RVC / "logs" / experiment, RVC / "assets" / "weights" / f"{experiment}.pth"
+    shutil.rmtree(exp, ignore_errors=True)
+    weights.unlink(missing_ok=True)
+    for link in (RVC / "assets" / "indices").glob(f"{experiment}_*"):
+        link.unlink(missing_ok=True)
+    left = [str(p) for p in (exp, weights, *(RVC / "assets" / "indices").glob(f"{experiment}_*")) if p.exists()]
+    if left or stubborn:
+        warnings.warn(f"the real training test left something behind; remove it by hand: files {left}, "
+                      f"processes {stubborn}", stacklevel=2)
+    return left
+
+
+def test_the_real_manager_trains_a_library_voice_then_cancels_a_second_run(tmp_path, monkeypatch):
+    from aivoice import training
+    from aivoice.library import Library
+
+    monkeypatch.setattr(training, "MIN_EPOCHS", 2)  # the app never offers so few; the test has minutes, not hours
+    data = tmp_path / "data"
+    library = Library(data)
+    made = time.monotonic()
+    voice = make_library_voice(library, "Real manager test")
+    minutes = library.get(voice).minutes
+    print(f"\nmade {len(library.get(voice).clips)} clips, {minutes:.2f} min, in {time.monotonic() - made:.1f} s")
+    assert minutes >= 5.0
+    clips = data / "voices" / voice / "clips"
+    recordings = {p.name: (p.stat().st_size, p.stat().st_mtime_ns, p.read_bytes()) for p in sorted(clips.iterdir())}
+    experiment = f"voice-{voice}"
+    exp, job = RVC / "logs" / experiment, data / "voices" / voice / "training"
+    manager = training.TrainingManager(data, library, TRAINER)  # the real launch, verify and process tools
+
+    def poll(until, what, seconds=RUN_TIMEOUT):
+        seen, deadline = [], time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            status = manager.status(voice)
+            seen.append(status)
+            if until(status):
+                return seen
+            if status["state"] not in ("running", "cancelling"):
+                break
+            time.sleep(1.0)  # the app's own polling interval
+        out = (job / "worker.out.log").read_text("utf-8", errors="replace")[-2000:] if job.exists() else ""
+        log = "\n".join((job / "worker.log").read_text("utf-8", errors="replace").splitlines()[-40:]) if job.exists() else ""
+        pytest.fail(f"{what} did not happen; last status {seen[-1]}\nworker.log tail:\n{log}\nworker.out.log:\n{out}")
+
+    try:
+        # 1. A whole run: start, follow the progress as the app does, done.
+        started = time.monotonic()
+        first = manager.start(voice, epochs=2, batch_size=4)
+        assert first["state"] == "running" and manager.is_active()
+        seen = poll(lambda s: s["state"] == "done", "the first run finishing")
+        print(f"first run through the manager: {time.monotonic() - started:.1f} s, {len(seen)} status polls")
+        percents = [s["percent"] for s in seen]
+        assert percents == sorted(percents) and percents[-1] == 100.0, percents
+        assert any(s["stage"] == "train" for s in seen), "the progress file was followed while it trained"
+        assert manager.status_failures == 0 and not manager.is_active()
+        model = data / "voices" / voice / "models" / "rvc"
+        assert sorted(p.name for p in model.iterdir()) == ["model.index", "model.onnx", "voice.json"]
+        assert (model / "model.onnx").stat().st_size > 1024 * 1024
+        assert json.loads((model / "voice.json").read_text()) == {"name": "Real manager test", "sample_rate": 40000}
+        assert library.get(voice).models == ["rvc"]
+        assert not exp.exists(), "the experiment folder is removed after a successful run"
+        assert (job / "worker.out.log").is_file() and (job / "worker.log").is_file()
+        log_lines = (job / "worker.log").read_text("utf-8").splitlines()
+        damaged = [line for line in log_lines if line.strip() and not LOG_LINE.fullmatch(line)]
+        assert log_lines and damaged == [], f"worker.log has lines no stage wrote: {damaged[:5]}"
+        assert "a transcript the trainer must never read" not in "\n".join(log_lines)
+        assert json.loads((job / "job.json").read_text())["state"] == "done"
+        assert wait_until_none_left(experiment) == []
+
+        # 2. A second run, cancelled after its first training epoch.
+        started = time.monotonic()
+        manager.start(voice, epochs=20, batch_size=4)
+        poll(lambda s: s["stage"] == "train" and (s["epoch"] or 0) >= 1, "the first epoch of the second run")
+        print(f"second run reached its first epoch after {time.monotonic() - started:.1f} s")
+        asked = time.monotonic()
+        assert manager.cancel()["state"] == "cancelling"
+        seen = poll(lambda s: s["state"] == "cancelled", "the cancel", seconds=300)
+        print(f"cancel through the manager took {time.monotonic() - asked:.1f} s")
+        assert wait_until_none_left(experiment) == [], "no process of the experiment may remain after a cancel"
+        final = seen[-1]
+        assert final["can_resume"] is True and final["error"] is None
+        assert (exp / "stages.json").is_file() and not (job / "cancel").exists()
+        assert not manager.is_active() and manager.status_failures == 0
+        assert sorted(p.name for p in model.iterdir()) == ["model.index", "model.onnx", "voice.json"], \
+            "the model of the first run is still the voice's model"
+        now = {p.name: (p.stat().st_size, p.stat().st_mtime_ns, p.read_bytes()) for p in sorted(clips.iterdir())}
+        assert now == recordings, "the recordings must be untouched"
+    finally:
+        manager.shutdown()
+        remove_experiment(experiment)  # warns when anything is left

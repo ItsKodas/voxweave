@@ -194,25 +194,6 @@ def test_stage_lines_are_not_train_lines_and_vice_versa(rvclog):
 
 # --- noise and garbage ---------------------------------------------------------
 
-MIOPEN = (
-    "MIOpen(HIP): Error [EvaluateInvokers] Koda:C:/develop/TheRock/rocm-libraries/projects/miopen/src/conv/"
-    "solver_finders.cpp:303: Invalid elapsed time detected in EvaluateInvokers, failed condition: elapsed <= 0"
-)
-
-
-def test_miopen_evaluate_invokers_line_is_not_fatal(rvclog):
-    assert rvclog.is_fatal_noise(MIOPEN) is False
-    assert rvclog.is_fatal_noise(MIOPEN + "\r\n") is False
-
-
-def test_real_errors_are_still_fatal(rvclog):
-    assert rvclog.is_fatal_noise("RuntimeError: HIP out of memory") is True
-    assert rvclog.is_fatal_noise("Traceback (most recent call last):") is True
-    assert rvclog.is_fatal_noise("MIOpen(HIP): Error [Something] else") is True
-    assert rvclog.is_fatal_noise("INFO:spike1:Training epoch: 1 [0%]") is False
-    assert rvclog.is_fatal_noise("MIOpen(HIP): Warning [IsEnoughWorkspace] [EvaluateInvokers] Solver <GemmBwdRest>") is False
-
-
 GARBAGE = [
     "", " ", "\x00\x01\x02\xff\xfe", "\udcff\udcfe", "\t\t\t", ":::", "INFO::", "x" * 10000, "Epoch: " * 2000,
     "====> Epoch: " + "9" * 5000, "Training epoch: 1 [" + "9" * 5000 + "%]", "loss_disc=" + "9" * 3000,
@@ -225,10 +206,8 @@ def test_garbage_never_raises(rvclog, line):
     rvclog.parse_train_line(line)
     for stage in ("preprocess", "pitch", "features", "index", "other"):
         rvclog.parse_stage_line(stage, line)
-    assert isinstance(rvclog.is_fatal_noise(line), bool)
 
 
 def test_non_string_input_never_raises(rvclog):
     assert rvclog.parse_train_line(None) is None
     assert rvclog.parse_stage_line("pitch", None) is None
-    assert rvclog.is_fatal_noise(None) is False

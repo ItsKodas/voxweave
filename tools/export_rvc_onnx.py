@@ -8,7 +8,7 @@ this tag fails and bakes a fixed 200-frame length into the graph):
     uv pip install --python tools/.rvc/venv torch==2.6.0 numpy==1.26.4 onnx scipy --extra-index-url https://download.pytorch.org/whl/cpu
 
 Usage:
-    tools/.rvc/venv/Scripts/python tools/export_rvc_onnx.py <voice.pth> <voice-id> [--index file.index] [--name "Display Name"]
+    tools/.rvc/venv/Scripts/python tools/export_rvc_onnx.py <voice.pth> <voice-id> [--index file.index] [--name="Display Name"]
 
 The files are written to data/pretrained/rvc/<voice-id>/, or to the folder named by the environment variable
 AIVOICE_EXPORT_DIR when it is set (the training worker uses this to export into a voice's own folder).
@@ -62,13 +62,17 @@ def _output_dir(voice_id: str) -> Path:
     return Path(override) if override else ROOT / "data" / "pretrained" / "rvc" / voice_id
 
 
-def main() -> None:
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export an RVC v2 .pth voice to ONNX for the AI Voice backend.")
     parser.add_argument("pth", type=Path)
     parser.add_argument("voice_id")
     parser.add_argument("--index", type=Path)
-    parser.add_argument("--name")
-    args = parser.parse_args()
+    parser.add_argument("--name", help='the display name; write it as --name=<name> when it may start with "-"')
+    return parser.parse_args(argv)
+
+
+def main() -> None:
+    args = parse_args()
 
     # Checked after parsing so that --help works anywhere.
     _require_patched_repo()

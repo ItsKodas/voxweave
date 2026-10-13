@@ -17,6 +17,8 @@ TORCH_SUFFIX = "+rocm7.2.1"
 PATCHES = ["rvc_rocm_dilated_conv.patch", "rvc_preprocess_keep_all_tails.patch"]
 SETUP_HINT = "Run: bash trainer/setup.sh"
 TORCH_PROBE = "import torch; print(torch.__version__, torch.cuda.is_available())"
+# The silence samples every training filelist names (trainer/filelist.py), relative to rvc/logs/mute.
+MUTE_FILES = ("0_gt_wavs/mute40k.wav", "3_feature768/mute.npy", "2a_f0/mute.wav.npy", "2b-f0nsf/mute.wav.npy")
 DEFAULT_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -108,8 +110,9 @@ def _check_pretrained(trainer: Path):
             bad.append(f"{rel} (missing)")
         elif f.stat().st_size != e["bytes"]:
             bad.append(f"{rel} (size {f.stat().st_size}, expected {e['bytes']})")
-    if not (rvc / "logs" / "mute" / "0_gt_wavs" / "mute40k.wav").is_file():
-        bad.append("logs/mute (silence samples missing)")
+    for rel in MUTE_FILES:
+        if not (rvc / "logs" / "mute" / rel).is_file():
+            bad.append(f"logs/mute/{rel} (silence sample missing)")
     if bad:
         return False, f"pretrained files wrong: {'; '.join(bad)}. {SETUP_HINT}"
     return True, f"{len(entries)} pretrained downloads present"

@@ -2,6 +2,7 @@
 import ast
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -62,6 +63,8 @@ def test_verify_uses_only_the_standard_library():
 # ---- a healthy fake installation under tmp_path, and probes that answer like a healthy machine ----
 
 PATCHES = ["rvc_rocm_dilated_conv.patch", "rvc_preprocess_keep_all_tails.patch"]
+# The four files every filelist line for silence names (trainer/filelist.py), relative to rvc/logs/mute.
+MUTE_FILES = ("0_gt_wavs/mute40k.wav", "3_feature768/mute.npy", "2a_f0/mute.wav.npy", "2b-f0nsf/mute.wav.npy")
 
 
 @pytest.fixture
@@ -69,8 +72,9 @@ def root(tmp_path):
     t = tmp_path / "trainer"
     (t / ".venv" / "Scripts").mkdir(parents=True)
     (t / ".venv" / "Scripts" / "python.exe").write_bytes(b"")
-    (t / "rvc" / "logs" / "mute" / "0_gt_wavs").mkdir(parents=True)
-    (t / "rvc" / "logs" / "mute" / "0_gt_wavs" / "mute40k.wav").write_bytes(b"x")
+    for rel in MUTE_FILES:
+        (t / "rvc" / "logs" / "mute" / rel).parent.mkdir(parents=True)
+        (t / "rvc" / "logs" / "mute" / rel).write_bytes(b"x")
     (t / "patches").mkdir()
     for p in PATCHES:
         (t / "patches" / p).write_text("diff", encoding="utf-8")
@@ -156,10 +160,32 @@ def test_missing_pretrained_file_names_the_file(verify, root):
     assert not c["ok"] and "assets/pretrained_v2/a.pth" in c["message"]
 
 
-def test_missing_silence_samples_fail_pretrained(verify, root):
-    (root / "trainer" / "rvc" / "logs" / "mute" / "0_gt_wavs" / "mute40k.wav").unlink()
+@pytest.mark.parametrize("missing", MUTE_FILES)
+def test_each_of_the_four_silence_files_the_filelist_names_is_required(verify, root, missing):
+    (root / "trainer" / "rvc" / "logs" / "mute" / missing).unlink()
     c = by_id(run_checks(verify, root, Probes()))["pretrained"]
-    assert not c["ok"] and "mute" in c["message"]
+    assert not c["ok"] and f"logs/mute/{missing}" in c["message"] and "trainer/setup.sh" in c["message"]
+    others = [rel for rel in MUTE_FILES if rel != missing]
+    assert not any(f"logs/mute/{rel}" in c["message"] for rel in others)
+
+
+def test_the_silence_files_checked_are_the_ones_the_filelist_writes(verify, tmp_path):
+    spec = importlib.util.spec_from_file_location("trainer_filelist", REPO / "trainer" / "filelist.py")
+    filelist = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(filelist)
+    rvc = tmp_path / "rvc"
+    exp = rvc / "logs" / "voice-x"
+    for folder, name in (("0_gt_wavs", "0_0.wav"), ("3_feature768", "0_0.npy"), ("2a_f0", "0_0.wav.npy"),
+                         ("2b-f0nsf", "0_0.wav.npy")):
+        (exp / folder).mkdir(parents=True)
+        (exp / folder / name).write_bytes(b"x")
+    (rvc / "configs" / "v1").mkdir(parents=True)
+    (rvc / "configs" / "v1" / "40k.json").write_text(json.dumps({"train": {}}), encoding="utf-8")
+    filelist.write_filelist(rvc, "voice-x", shuffle=lambda lines: None)
+    mute_line = (exp / "filelist.txt").read_text(encoding="utf-8").splitlines()[-1]
+    root = Path(rvc / "logs" / "mute").as_posix()
+    named = [Path(part).as_posix().removeprefix(root + "/") for part in mute_line.split("|")[:4]]
+    assert tuple(named) == MUTE_FILES == verify.MUTE_FILES
 
 
 @pytest.mark.parametrize("missing", ["ffmpeg", "ffprobe"])
@@ -224,3 +250,40 @@ def test_main_prints_one_json_object_and_exit_code(verify, root, capsys, monkeyp
     out = json.loads(capsys.readouterr().out)
     assert code == 1 and out["ok"] is False
     assert not by_id(out)["ffmpeg"]["ok"]
+
+
+# ---- the lock file: exact versions of what requirements.txt pulls in, and nothing of AMD's ----
+
+LOCK = REPO / "trainer" / "requirements.lock"
+REQUIREMENTS = REPO / "trainer" / "requirements.txt"
+
+
+def _entries(path):
+    return [line.split("#")[0].strip() for line in path.read_text(encoding="utf-8").splitlines()
+            if line.split("#")[0].strip()]
+
+
+def _canonical(name):
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def test_the_lock_file_pins_one_exact_version_per_package():
+    pinned = {}
+    for entry in _entries(LOCK):
+        match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9._-]*)==([A-Za-z0-9][A-Za-z0-9.!+_-]*)", entry)
+        assert match, f"not an exact pin: {entry!r}"
+        assert _canonical(match.group(1)) not in pinned, f"pinned twice: {entry!r}"
+        pinned[_canonical(match.group(1))] = match.group(2)
+    assert pinned
+    # AMD's wheels are installed by setup.sh from their URLs with SHA-256; a pin here could swap in a CPU build.
+    assert not [name for name in pinned if name in ("torch", "torchaudio", "torchvision") or "rocm" in name]
+    assert not [version for version in pinned.values() if "rocm" in version]
+    wanted = {_canonical(re.match(r"[A-Za-z0-9._-]+", entry).group(0)) for entry in _entries(REQUIREMENTS)}
+    assert wanted and wanted <= set(pinned), wanted - set(pinned)
+    assert pinned["numpy"].startswith("1.")  # RVC at the pinned commit does not run on numpy 2
+
+
+def test_setup_installs_from_the_lock_file_and_says_so_when_it_falls_back():
+    script = (REPO / "trainer" / "setup.sh").read_text(encoding="utf-8")
+    assert '-r "$T/requirements.lock"' in script and '-r "$T/requirements.txt"' in script
+    assert script.index('-r "$T/requirements.lock"') < script.index("NOTICE") < script.index('-r "$T/requirements.txt"')

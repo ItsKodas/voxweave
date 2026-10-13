@@ -6,7 +6,8 @@
 # Creates trainer/.venv (Python 3.12 + AMD ROCm 7.2.1 PyTorch), trainer/rvc (RVC at a pinned commit with the two
 # patches in trainer/patches/), the pretrained files listed in trainer/pretrained.json (SHA-256 verified), and
 # trainer/.cache. Safe to re-run: every step is skipped when its result is already correct. It never deletes user
-# data; the only files it removes are its own unfinished *.part downloads.
+# data; the only files it removes are its own unfinished *.part downloads and an unfinished extraction of the
+# silence samples (trainer/rvc/logs/mute.partial, or a logs/mute that lacks one of its files).
 # Recipe and reasoning: docs/superpowers/notes/2026-10-13-stage-3-training-spike.md, section 2.
 set -euo pipefail
 
@@ -68,8 +69,14 @@ else
 fi
 
 # ---- 3. training-only Python packages (a no-op when already satisfied) ----
-say "packages: trainer/requirements.txt"
-uv pip install --python "$PY" -r "$T/requirements.txt"
+# The lock file pins the exact versions that were proven to train; requirements.txt holds the ranges behind it.
+if [ -f "$T/requirements.lock" ]; then
+  say "packages: trainer/requirements.lock (exact versions)"
+  uv pip install --python "$PY" -r "$T/requirements.lock"
+else
+  say "packages: NOTICE: trainer/requirements.lock is missing, so the newest versions allowed by trainer/requirements.txt are installed instead; they may differ from the versions that were tested"
+  uv pip install --python "$PY" -r "$T/requirements.txt"
+fi
 
 # ---- 4. RVC source at the pinned commit ----
 if [ ! -d "$RVC/.git" ]; then
@@ -123,18 +130,36 @@ while IFS=$'\t' read -r url rel bytes sha; do
   mv -f "$dest.part" "$dest"
 done <<< "$manifest"
 
-# mute.zip -> logs/mute (silence samples RVC appends to every filelist); the cached .spec.pt files are skipped
-if [ -f "$RVC/logs/mute/0_gt_wavs/mute40k.wav" ]; then
+# mute.zip -> logs/mute (silence samples RVC appends to every filelist); the cached .spec.pt files are skipped.
+# Extracted to logs/mute.partial and renamed only when all four files a filelist names are there, so an
+# interrupted run never leaves a logs/mute that looks complete. (trainer/verify.py checks the same four.)
+mute_ok=1
+for rel in 0_gt_wavs/mute40k.wav 3_feature768/mute.npy 2a_f0/mute.wav.npy 2b-f0nsf/mute.wav.npy; do
+  [ -f "$RVC/logs/mute/$rel" ] || mute_ok=0
+done
+if [ "$mute_ok" = 1 ]; then
   say "mute: already extracted"
 else
   say "mute: extracting"
   "$PY" -I -c '
-import sys, zipfile
-with zipfile.ZipFile(sys.argv[1]) as z:
+import os, shutil, sys, zipfile
+archive, logs = sys.argv[1], sys.argv[2]
+partial, final = os.path.join(logs, "mute.partial"), os.path.join(logs, "mute")
+needed = sys.argv[3:]
+shutil.rmtree(partial, ignore_errors=True)  # left by an interrupted run of this script
+with zipfile.ZipFile(archive) as z:
     for m in z.namelist():
         if not m.endswith(".spec.pt"):
-            z.extract(m, sys.argv[2])
-' "$T/.cache/mute.zip" "$RVC/logs"
+            z.extract(m, partial)
+missing = [n for n in needed if not os.path.isfile(os.path.join(partial, "mute", n))]
+if missing:
+    sys.exit("mute.zip does not contain: " + ", ".join(missing))
+if os.path.lexists(final):
+    shutil.rmtree(final)  # incomplete (checked above); only ever written by this script and by RVC itself
+os.rename(os.path.join(partial, "mute"), final)
+os.rmdir(partial)
+' "$T/.cache/mute.zip" "$RVC/logs" 0_gt_wavs/mute40k.wav 3_feature768/mute.npy 2a_f0/mute.wav.npy 2b-f0nsf/mute.wav.npy \
+    || die "extracting the silence samples failed; trainer/rvc/logs/mute was not changed unless it was incomplete."
 fi
 
 # ---- 7. verify ----
