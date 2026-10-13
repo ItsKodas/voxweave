@@ -312,6 +312,14 @@ describe("App Speak tab", () => {
     expect(screen.getByText("voices speech idle")).toBeInTheDocument();
   });
 
+  it("does not mark them busy while the voice engine is only starting with no request", async () => {
+    vi.mocked(ttsApi.status).mockResolvedValue(speech({ engine: "starting", state: "idle" }));
+    render(<App />);
+    await advance(0);
+    expect(screen.getByText("live speech idle")).toBeInTheDocument();
+    expect(screen.getByText("voices speech idle")).toBeInTheDocument();
+  });
+
   it("does not mark them busy while the voice engine is only loaded", async () => {
     vi.mocked(ttsApi.status).mockResolvedValue(speech({ engine: "ready", state: "idle" }));
     render(<App />);

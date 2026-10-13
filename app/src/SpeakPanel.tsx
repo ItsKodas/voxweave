@@ -256,6 +256,7 @@ export function SpeakPanel({ tts, active, liveRunning }: {
             Keep as a WAV file
           </label>
 
+          {voice === null && <p className="hint">No voice can be spoken yet. Record or import clips with transcripts in the Voices tab.</p>}
           {liveRunning && <p className="hint">Stop live mode on the Live tab to speak.</p>}
           <div className="actions">
             {busy ? (

@@ -45,7 +45,7 @@ describe("useTtsStatus", () => {
     expect(calls()).toBe(settled);
   });
 
-  it("treats a starting engine as active", async () => {
+  it("polls while the engine is starting for a request", async () => {
     vi.mocked(ttsApi.status).mockResolvedValue(make({ engine: "starting", state: "preparing" }));
     renderHook(() => useTtsStatus(true));
     await tick(1000);
@@ -110,6 +110,31 @@ describe("useTtsStatus", () => {
     expect(result.current.status?.state).toBe("speaking");
     await tick(500);
     expect(calls()).toBeGreaterThan(1);
+  });
+
+  it("discards a poll requested before a newer status was applied, and asks again", async () => {
+    let release: (s: TtsStatus) => void = () => {};
+    vi.mocked(ttsApi.status).mockReset().mockResolvedValueOnce(make());
+    const { result } = renderHook(() => useTtsStatus(true));
+    await tick(0);
+    vi.mocked(ttsApi.status).mockReturnValueOnce(new Promise((r) => { release = r; }));
+    act(() => result.current.refresh()); // a poll is now in flight
+    const preparing = make({ state: "preparing" });
+    act(() => result.current.apply(preparing)); // the speak response arrives
+    vi.mocked(ttsApi.status).mockResolvedValue(preparing);
+    await act(async () => { release(make()); }); // the older answer says idle
+    await tick(0);
+    expect(result.current.status?.state).toBe("preparing");
+    expect(calls()).toBe(3); // the stale answer was followed by a fresh ask
+    await tick(500);
+    expect(calls()).toBe(4); // and polling goes on
+  });
+
+  it("keeps polling while the engine is starting even with no request", async () => {
+    vi.mocked(ttsApi.status).mockResolvedValue(make({ engine: "starting", state: "idle" }));
+    renderHook(() => useTtsStatus(true));
+    await tick(1000);
+    expect(calls()).toBe(3);
   });
 
   it("stops and makes no state update after unmount", async () => {

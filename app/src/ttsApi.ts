@@ -51,5 +51,7 @@ export const ttsApi = {
   stop: () => call<TtsStatus>("POST", "/tts/stop"),
 };
 
-/** A request is in progress, or the worker is still launching for one. */
-export const isBusy = (s: TtsStatus | null | undefined) => !!s && (s.state !== "idle" || s.engine === "starting");
+/** A request exists (preparing, speaking or stopping): what the backend refuses other activities for. */
+export const isBusy = (s: TtsStatus | null | undefined) => !!s && s.state !== "idle";
+/** Worth polling: a request exists, or the worker is still launching. */
+export const isFollowing = (s: TtsStatus | null | undefined) => isBusy(s) || s?.engine === "starting";

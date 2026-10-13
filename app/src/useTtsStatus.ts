@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { TtsStatus, isBusy, ttsApi } from "./ttsApi";
+import { TtsStatus, isFollowing, ttsApi } from "./ttsApi";
 
 const RETRY_MS = 3000;
 
@@ -31,6 +31,8 @@ export function useTtsStatus(visible: boolean, intervalMs = 500): TtsView {
     let inFlight = false;
     let again = false;
     let active = false;
+    /** Counts the statuses handed in with apply(): an answer requested before the latest one is out of date. */
+    let generation = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
     const schedule = (delay: number) => {
@@ -46,11 +48,14 @@ export function useTtsStatus(visible: boolean, intervalMs = 500): TtsView {
       inFlight = true;
       clearTimeout(timer);
       let ok = false;
+      const asked = generation;
       try {
         const next = await ttsApi.status();
-        if (!stopped) {
+        if (asked !== generation) {
+          again = true; // newer information arrived meanwhile: this answer is stale, ask again
+        } else if (!stopped) {
           ok = true;
-          active = isBusy(next);
+          active = isFollowing(next);
           setStatus(next);
           setFailed(false);
         }
@@ -72,7 +77,8 @@ export function useTtsStatus(visible: boolean, intervalMs = 500): TtsView {
     kick.current = () => void run();
     take.current = (next) => {
       if (stopped) return;
-      active = isBusy(next);
+      generation++;
+      active = isFollowing(next);
       setStatus(next);
       setFailed(false);
       if (active && !inFlight) schedule(intervalMs);

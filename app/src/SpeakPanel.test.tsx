@@ -67,6 +67,18 @@ describe("SpeakPanel form", () => {
     expect(screen.queryByRole("button", { name: "Speak" })).not.toBeInTheDocument();
   });
 
+  it("says plainly when no voice can be spoken yet, next to the disabled Speak button", async () => {
+    vi.mocked(ttsApi.voices).mockResolvedValue([BAD]);
+    render(<SpeakPanel tts={view()} active liveRunning={false} />);
+    expect(await screen.findByText(/No voice can be spoken yet. Record or import clips with transcripts in the Voices tab./)).toBeInTheDocument();
+    expect(speakButton()).toBeDisabled();
+  });
+
+  it("does not show that hint when a voice can be spoken", async () => {
+    await open();
+    expect(screen.queryByText(/No voice can be spoken yet/)).not.toBeInTheDocument();
+  });
+
   it("counts characters against 5000 and disables Speak when empty or over", async () => {
     await open();
     expect(screen.getByText("0 of 5000 characters")).toBeInTheDocument();
@@ -169,6 +181,8 @@ describe("SpeakPanel form", () => {
     type("Hello");
     await userEvent.click(speakButton());
     expect(speakButton()).toBeDisabled();
+    await userEvent.type(text(), "{Control>}{Enter}{/Control}");
+    expect(ttsApi.speak).toHaveBeenCalledTimes(1);
     await act(async () => { release(idle({ state: "preparing" })); });
   });
 
@@ -227,6 +241,12 @@ describe("SpeakPanel status", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Speak" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
+  });
+
+  it("shows Getting ready for a starting engine with no request, without Stop", async () => {
+    await open(view(idle({ engine: "starting", state: "idle" })));
+    expect(screen.getByRole("status")).toHaveTextContent("Getting ready");
+    expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
   });
 
   it("shows the sentence being spoken and a Stop button that stops", async () => {
