@@ -1,3 +1,5 @@
+import threading
+
 import numpy as np
 import pytest
 
@@ -148,3 +150,46 @@ def test_refresh_devices_reinitialises_portaudio():
     sd = FakeSd()
     refresh_devices(sd)
     assert sd.calls == ["terminate", "initialize"]
+
+
+class _StreamSd:
+    """A sounddevice stand-in whose streams are objects with start(), as the real ones are."""
+
+    def __init__(self, log):
+        self.log = log
+
+    def WasapiSettings(self, **kwargs):
+        return kwargs
+
+    def _stream(self, **kwargs):
+        log = self.log
+
+        class Stream:
+            def start(self):
+                log.append(("start", threading.get_ident()))
+
+        return Stream()
+
+    InputStream = OutputStream = _stream
+
+
+def test_com_is_made_ready_on_the_thread_that_opens_and_on_the_thread_that_starts_a_stream():
+    # Found by the first real launch: a microphone stream started from a request thread failed with
+    # "Unanticipated host error" because COM was only initialised on the thread that loaded PortAudio.
+    for kind in ("input", "output"):
+        log = []
+        streams = SoundDeviceStreams(_StreamSd(log), com_init=lambda: log.append(("com", threading.get_ident())))
+        stream = getattr(streams, kind)(1, 48000, lambda *_: None)
+        assert log == [("com", threading.get_ident())]
+        starter = threading.Thread(target=stream.start)
+        starter.start()
+        starter.join(5)
+        assert [what for what, _ in log] == ["com", "com", "start"]
+        assert log[1][1] == log[2][1] == starter.ident != threading.get_ident()
+
+
+def test_ensure_com_runs_once_per_thread_and_never_raises():
+    from aivoice.devices import ensure_com
+
+    ensure_com()
+    ensure_com()

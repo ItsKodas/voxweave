@@ -1,3 +1,5 @@
+import sys
+import threading
 from dataclasses import dataclass
 from typing import Callable
 
@@ -77,20 +79,48 @@ def get_device(devices: list[Device], index: int) -> Device:
     raise DeviceError(f"Audio device {index} is no longer available")
 
 
+_com = threading.local()
+
+
+def ensure_com() -> None:
+    """Initialises COM on the calling thread, once. WASAPI needs it on every thread that opens or starts a
+    stream; PortAudio only did it for the thread that loaded it, so a stream started from a request or worker
+    thread failed with "Unanticipated host error" (-9999). COM stays initialised for the life of the thread."""
+    if sys.platform != "win32" or getattr(_com, "done", False):
+        return
+    import ctypes
+
+    ctypes.windll.ole32.CoInitializeEx(None, 0)  # multithreaded; "already initialised" answers are fine
+    _com.done = True
+
+
 class SoundDeviceStreams:
     """Opens WASAPI streams. auto_convert lets Windows resample devices that are not 48 kHz."""
 
-    def __init__(self, sd=None):
+    def __init__(self, sd=None, com_init: Callable[[], None] = ensure_com):
         self._sd = _sd(sd)
+        self._com_init = com_init
+
+    def _ready(self, stream):
+        """The stream, with COM made ready on whichever thread starts it."""
+        start = getattr(stream, "start", None)
+        if start is not None:
+            def start_with_com(*args, **kwargs):
+                self._com_init()
+                return start(*args, **kwargs)
+
+            stream.start = start_with_com
+        return stream
 
     def input(self, device: int, samplerate: int, on_audio: Callable[[np.ndarray], None]):
         def callback(indata, frames, time, status):
             on_audio(indata.copy())
 
-        return self._sd.InputStream(
+        self._com_init()
+        return self._ready(self._sd.InputStream(
             device=device, samplerate=samplerate, channels=1, dtype="float32", latency="low",
             callback=callback, extra_settings=self._sd.WasapiSettings(auto_convert=True),
-        )
+        ))
 
     def output(self, device: int, samplerate: int, fill: Callable[[int], np.ndarray]):
         def callback(outdata, frames, time, status):
@@ -103,7 +133,8 @@ class SoundDeviceStreams:
             except Exception:
                 outdata[:] = 0
 
-        return self._sd.OutputStream(
+        self._com_init()
+        return self._ready(self._sd.OutputStream(
             device=device, samplerate=samplerate, channels=2, dtype="float32", latency="low",
             callback=callback, extra_settings=self._sd.WasapiSettings(auto_convert=True),
-        )
+        ))
