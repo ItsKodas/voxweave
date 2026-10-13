@@ -19,7 +19,8 @@ FAIL = {"ok": False, "checks": [
     {"id": "torch_gpu", "ok": False, "message": "torch sees no GPU"},
     {"id": "ffmpeg", "ok": False, "message": "ffmpeg not found on PATH"},
 ]}
-CLIPS_CHANGED = "The clips changed since this training run started. Start a new training run."
+CLIPS_CHANGED = ("The clips changed since this training run started. Start a new training run. "
+                 "Or put the clips back as they were and resume.")
 STOPPED = "The training process stopped unexpectedly. See training/worker.log and training/worker.out.log."
 WORKER = Path(__file__).resolve().parents[2] / "trainer" / "worker.py"
 
@@ -981,13 +982,17 @@ def test_the_worker_says_whether_a_failed_run_can_be_resumed(rig):
         rig.manager.start(voice, resume=True)
     assert len(rig.launches) == 1
     rig.manager.start(voice)
+    # A run refused because the clips changed is the user's to put right: the clips can be put back.
     rig.finish(voice, 1, error=CLIPS_CHANGED, resumable=True)
-    assert rig.manager.status()["can_resume"] is True  # the worker's word beats the text of the error
+    assert rig.manager.status()["can_resume"] is True
     assert rig.record(voice)["resumable"] is True
+    rig.manager.start(voice, resume=True)  # the worker refuses again if the clips still differ, deleting nothing
+    assert "--resume" in rig.launches[-1][0] and len(rig.launches) == 3
 
 
-@pytest.mark.parametrize("error", [CLIPS_CHANGED, "The saved training state could not be read"])
-def test_an_older_worker_that_gives_no_hint_is_judged_by_its_error(rig, error):
+@pytest.mark.parametrize("error, permanent", [(CLIPS_CHANGED, False),
+                                              ("The saved training state could not be read", True)])
+def test_an_older_worker_that_gives_no_hint_is_judged_by_its_error(rig, error, permanent):
     voice = rig.voice()
     rig.write_record(voice, state="interrupted")
     rig.checkpoint(voice)
@@ -995,11 +1000,15 @@ def test_an_older_worker_that_gives_no_hint_is_judged_by_its_error(rig, error):
     rig.manager.start(voice, resume=True)
     rig.finish(voice, 1, error=error, resumable="no")  # not a boolean: as good as absent
     s = rig.manager.status()
-    assert (s["state"], s["error"], s["can_resume"]) == ("failed", error, False)
+    assert (s["state"], s["error"], s["can_resume"]) == ("failed", error, not permanent)
     assert rig.record(voice)["resumable"] is None
-    with pytest.raises(TrainingError, match="no interrupted training run"):
-        rig.manager.start(voice, resume=True)  # not offered, so not accepted (final review, F4)
-    assert len(rig.launches) == 1
+    if permanent:
+        with pytest.raises(TrainingError, match="no interrupted training run"):
+            rig.manager.start(voice, resume=True)  # not offered, so not accepted
+        assert len(rig.launches) == 1
+    else:  # changed clips can be put back, so the resume stays the user's to try
+        rig.manager.start(voice, resume=True)
+        assert "--resume" in rig.launches[-1][0] and len(rig.launches) == 2
 
 
 def test_the_fallback_error_texts_are_the_workers_own():
@@ -1650,7 +1659,7 @@ def test_resume_is_offered_exactly_when_a_resume_would_be_accepted(rig, case):
     rig.build()
     offered = rig.manager.status(voice)["can_resume"]
     assert offered is (case in ("stage record only", "checkpoint only", "both", "worker said yes",
-                                "old worker, other error"))
+                                "old worker, clips changed", "old worker, other error"))
     if offered:
         rig.manager.start(voice, resume=True)
         assert "--resume" in rig.launches[0][0]

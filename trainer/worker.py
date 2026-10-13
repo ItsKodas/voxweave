@@ -72,7 +72,8 @@ TAIL_LINES = 20
 MIN_MODEL_BYTES = 1024 * 1024
 SAFE_EXPERIMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 
-CLIPS_CHANGED = "The clips changed since this training run started. Start a new training run."
+CLIPS_CHANGED = ("The clips changed since this training run started. Start a new training run. "
+                 "Or put the clips back as they were and resume.")
 STATE_UNREADABLE = "The saved training state could not be read"
 STAGE_TITLES = {
     "preprocess": "Slicing the clips",
@@ -423,7 +424,9 @@ class Job:
             saved = read_json(self.exp / "dataset.json")
             if (not isinstance(saved, dict) or saved.get("fingerprint") != record["fingerprint"]
                     or saved.get("settings") != record["settings"]):
-                raise JobError(CLIPS_CHANGED, resumable=False)
+                # Still resumable: nothing was deleted and the saved state is intact, so once the clips are as
+                # they were this same run can go on. Until then every resume ends here, changing nothing.
+                raise JobError(CLIPS_CHANGED, resumable=True)
         else:
             self.done_stages = {}
             self._remove_training_output()

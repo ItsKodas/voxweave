@@ -17,7 +17,8 @@ import pytest
 
 MODULE = Path(__file__).resolve().parents[2] / "trainer" / "worker.py"
 EXP = "voice-abc"
-CLIPS_CHANGED = "The clips changed since this training run started. Start a new training run."
+CLIPS_CHANGED = ("The clips changed since this training run started. Start a new training run. "
+                 "Or put the clips back as they were and resume.")
 STATE_UNREADABLE = "The saved training state could not be read"
 windows_only = pytest.mark.skipif(os.name != "nt", reason="Windows process handling")
 
@@ -670,9 +671,11 @@ def test_resume_refuses_when_a_clip_was_added(rig):
     rig.add_clip(4)
     before = rig.tree(rig.exp)
     assert rig.run("--resume") == 1
-    assert rig.final()["error"] == CLIPS_CHANGED and rig.final()["resumable"] is False
+    assert rig.final()["error"] == CLIPS_CHANGED and rig.final()["resumable"] is True
     assert rig.runner.calls == []
     assert rig.tree(rig.exp) == before
+    (rig.clips / "0004.orig.wav").unlink(), (rig.clips / "0004.wav").unlink(), (rig.clips / "0004.txt").unlink()
+    assert rig.run("--resume") == 0, "with the clips as they were, the same run resumes"
 
 
 def test_resume_refuses_when_a_clip_was_deleted_or_rerecorded(rig):

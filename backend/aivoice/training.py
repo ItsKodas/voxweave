@@ -67,9 +67,10 @@ STOPPED_UNEXPECTEDLY = ("The training process stopped unexpectedly. "
                         "See training/worker.log and training/worker.out.log.")
 NO_RESUME = "There is no interrupted training run to resume for this voice"
 CANCELLED_BEFORE_START = "Training was cancelled before it started"
-# Whether a stopped run can be resumed is the worker's call ("resumable" in its final line). These are its
-# messages for a resume that cannot work, used only when a final line carries no such field.
-NEVER_RESUMABLE = ("The clips changed since this training run started", "The saved training state could not be read")
+# Whether a stopped run can be resumed is the worker's call ("resumable" in its final line). This is its message
+# for a resume that can never work, used only when a final line carries no such field. A run refused because the
+# clips changed is not among them: the user can put the clips back, and the worker checks them on every resume.
+NEVER_RESUMABLE = ("The saved training state could not be read",)
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _NEW_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)

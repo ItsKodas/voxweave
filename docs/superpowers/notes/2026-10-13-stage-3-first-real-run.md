@@ -159,7 +159,8 @@ describe the code, and one was too strong:
 Other changes of the final fix wave that touch what these notes describe: the voice's name reaches the exporter as
 one argument (`--name=<name>`); a model that a successful run replaces is moved to `<data>/trash/<voice-id>/`
 instead of being erased; and Resume is offered from the moment the clips are sliced, not only after the first
-checkpoint.
+checkpoint. A resume refused because the clips changed deletes nothing and stays resumable: with the
+clips put back as they were, the same run continues.
 
 **A real run through the manager.** `test_worker_real.py` now has a fourth test that drives the real
 `TrainingManager` (real launch, real `verify.py`, real progress tailing and process handling) on a temporary data
