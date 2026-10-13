@@ -63,6 +63,11 @@ export const studioApi = {
     call<StudioStatus>("POST", "/library/record/start", { voice_id: voiceId, input_device: inputDevice, prompt }),
   recordStop: () => call<TakeResult>("POST", "/library/record/stop"),
   recordCancel: () => call<StudioStatus>("POST", "/library/record/cancel"),
+  /** Saves the trained voice as one .voxweave file in the Downloads folder. */
+  exportPack: (id: string, includeReference: boolean) =>
+    call<{ path: string; bytes: number; has_reference: boolean }>("POST", `${voicePath(id)}/export`, { include_reference: includeReference }),
+  /** Makes a new voice from a .voxweave file on this computer. */
+  importPack: (path: string) => call<LibraryVoice>("POST", "/library/packs/import", { path }),
   importFiles: (id: string, paths: string[]) => call<StudioStatus>("POST", `${voicePath(id)}/import`, { paths }),
   importCancel: () => call<StudioStatus>("POST", "/library/import/cancel"),
   status: () => call<StudioStatus>("GET", "/library/status"),

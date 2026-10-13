@@ -1,3 +1,4 @@
+import { isPack } from "./VoicePack";
 import { useEffect, useRef, useState } from "react";
 import { onFilesDropped } from "./dropEvents";
 import { ImportStatus, studioApi } from "./studioApi";
@@ -35,8 +36,10 @@ export function ImportDrop({ voiceId, active, onImported }: { voiceId: string; a
     if (!active) return;
     let unsubscribe: (() => void) | null = null;
     let gone = false;
-    const handle = (paths: string[]) => {
-      if (gone) return;
+    const handle = (dropped: string[]) => {
+      // Voice packs dropped on the window are imported as voices of their own, not as audio for this one.
+      const paths = dropped.filter((path) => !isPack(path));
+      if (gone || paths.length === 0) return;
       const current = jobRef.current;
       if (starting.current || current?.active) {
         // An import into another voice already has its own notice on screen.

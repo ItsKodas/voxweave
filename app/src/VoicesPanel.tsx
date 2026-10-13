@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { LibraryVoice, studioApi } from "./studioApi";
+import { VoicePackDrop } from "./VoicePack";
 import { VoiceStudio } from "./VoiceStudio";
 
 export function VoicesPanel({ active, devicesVersion = 0, speechActive = false, onModelReady, onTrainingStarted }: {
@@ -82,6 +83,7 @@ export function VoicesPanel({ active, devicesVersion = 0, speechActive = false, 
         </p>
       )}
       {speechActive && <p className="hint">Speech is playing. Stop it on the Speak tab to record or delete a voice.</p>}
+      <VoicePackDrop active={active} onImported={(id) => { void load(id); onModelReady?.(); }} />
       <form
         className="row"
         onSubmit={(e) => {
@@ -97,6 +99,7 @@ export function VoicesPanel({ active, devicesVersion = 0, speechActive = false, 
       </form>
 
       {voices !== null && voices.length === 0 && <p className="hint">Create a voice to start recording.</p>}
+      <p className="hint">Got a voice from another computer? Drop its <code>.voxweave</code> file anywhere on this window.</p>
       {voices !== null && voices.length > 0 && (
         <ul aria-label="Voices" className="voice-list">
           {voices.map((v) => (
