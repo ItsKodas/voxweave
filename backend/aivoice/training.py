@@ -66,6 +66,10 @@ FINISHED = ("done",) + RESUMABLE
 STOPPED_UNEXPECTEDLY = ("The training process stopped unexpectedly. "
                         "See training/worker.log and training/worker.out.log.")
 NO_RESUME = "There is no interrupted training run to resume for this voice"
+# What the installed app answers instead of checking for a training environment it cannot have.
+NOT_IN_INSTALLED_APP = ("Training is not available in the installed app yet. It needs the source checkout of "
+                        "Voxweave on a PC with an AMD GPU. A voice trained there can be brought to this PC as a "
+                        "voice pack (a .voxweave file).")
 CANCELLED_BEFORE_START = "Training was cancelled before it started"
 # Whether a stopped run can be resumed is the worker's call ("resumable" in its final line). This is its message
 # for a resume that can never work, used only when a final line carries no such field. A run refused because the
@@ -244,6 +248,13 @@ def _failed_report(message: str) -> dict:
     return {"ok": False, "checks": [{"id": "verify", "ok": False, "message": message}]}
 
 
+def unavailable_report(message: str) -> dict:
+    """The environment report of a part this app does not have. Nothing was checked and nothing can be fixed
+    here, which "unavailable" tells the panels."""
+    return {"ok": False, "ready": False, "unavailable": True,
+            "checks": [{"id": "installed_app", "ok": False, "message": message}]}
+
+
 def _clean_report(raw) -> dict:
     """The verify report as {"ok", "checks"}, or a failing one if it does not have that shape."""
     if (isinstance(raw, dict) and isinstance(raw.get("ok"), bool) and isinstance(raw.get("checks"), list)
@@ -355,11 +366,14 @@ class _Job:
 
 class TrainingManager:
     def __init__(self, data: Path, library: Library, trainer_root: Path, launch=None, verify=None, pid_alive=None,
-                 now=time.time, is_worker=None, kill_pid=None, processes=None, sleep=time.sleep):
+                 now=time.time, is_worker=None, kill_pid=None, processes=None, sleep=time.sleep,
+                 unavailable: str | None = None):
         """launch(argv, log_path) -> handle with pid, poll() and kill_tree(); verify(fast) -> the verify.py report;
         pid_alive(pid) -> bool; is_worker(pid, experiment) -> whether that pid really is a worker for that
         experiment; kill_pid(pid) ends a process tree and raises if it could not; processes is a ProcessTools;
-        sleep(seconds) is how shutdown waits for the worker."""
+        sleep(seconds) is how shutdown waits for the worker; unavailable is the message of an app that has no
+        training at all (the installed app): nothing is checked or started then."""
+        self._unavailable = unavailable
         self._voices = Path(data) / "voices"
         self._library = library
         self._trainer = Path(trainer_root)
@@ -420,6 +434,8 @@ class TrainingManager:
         The full check starts a GPU process, so it never runs while a job is active or starting, nor when the
         caller says not to probe (live mode is running). The answer is then the last report there is, unchanged
         by refresh, or one marked "unknown" when this backend has not checked yet."""
+        if self._unavailable is not None:
+            return unavailable_report(self._unavailable)
         with self._lock:
             quiet = not probe or self._active is not None or self._starting is not None
             if refresh and not quiet:
@@ -793,6 +809,8 @@ class TrainingManager:
               resume: bool = False) -> dict:
         """Starts training (200 epochs, batch size 8 unless given). A resume keeps the stopped run's settings
         unless epochs is given; its batch size cannot change, because the prepared data depends on it."""
+        if self._unavailable is not None:
+            raise TrainingError(self._unavailable)
         self._service()
         with self._lock:
             try:

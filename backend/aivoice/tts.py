@@ -61,7 +61,7 @@ from aivoice.playback import save_wav
 # Stage 3's process handling, shared rather than copied: the windowless detached launch flags, the handle whose
 # kill_tree() lists the tree before killing it and checks the result, and the sweep that ends what is left.
 from aivoice.training import (KILL_RETRY, TREE_REFRESH, KillFailed, ProcessTools, _NEW_GROUP, _NO_WINDOW, _Worker,
-                              _end_survivors, _failed_report, _kill_tree, _pids, _reason)
+                              _end_survivors, _failed_report, _kill_tree, _pids, _reason, unavailable_report)
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +89,10 @@ LOG_NAME, PREVIOUS_LOG_NAME = "worker.log", "worker.prev.log"
 JOB_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")  # the worker's rule: the id becomes part of a file name
 
 ALREADY = "Already speaking. Stop it first."
+# What the installed app answers instead of checking for a text-to-speech environment it cannot have.
+NOT_IN_INSTALLED_APP = ("Text to speech is not available in the installed app yet. It needs the source checkout "
+                        "of Voxweave on a PC with an AMD GPU. Live mode works here with your voices, and a voice "
+                        "trained there can be brought to this PC as a voice pack (a .voxweave file).")
 NOTHING_TO_SAY = "There is nothing to say in that text"
 NO_MODEL = ("Best needs this voice's trained model, and it has none. Train the voice first, or choose Fast or "
             "Balanced.")
@@ -341,13 +345,16 @@ def _nothing() -> dict:
 
 class TtsManager:
     def __init__(self, data: Path, library: Library, tts_root: Path, player, list_devices, launch=None, verify=None,
-                 rvc_factory=None, now=time.time, processes=None, tick: float = TICK, pacer=None):
+                 rvc_factory=None, now=time.time, processes=None, tick: float = TICK, pacer=None,
+                 unavailable: str | None = None):
         """player is an aivoice.playback.Player; list_devices() -> the audio devices; launch(argv, log_path) -> a
         handle with pid, poll(), kill_tree(), stdin (bytes) and stdout (lines of bytes); verify(fast) -> the
         tts/verify.py report; rvc_factory(voice_id) -> an object whose convert(piece) takes and returns mono
         float32 at 48 kHz; processes is training's ProcessTools; tick is how often a waiting request looks up;
         pacer is what the housekeeping thread waits on between its rounds and what shutdown sets to end it (a
-        threading.Event: wait(seconds), set(), is_set())."""
+        threading.Event: wait(seconds), set(), is_set()); unavailable is the message of an app that has no text
+        to speech at all (the installed app): nothing is checked or started then."""
+        self._unavailable = unavailable
         self._data = Path(data)
         self._root = self._data / "tts"
         self._tmp = self._root / "tmp"
@@ -448,6 +455,8 @@ class TtsManager:
         The full check starts a GPU process, so it never runs while a request is in progress, nor when the caller
         says not to probe (live mode or training is running). The answer is then the last report there is,
         unchanged by refresh, or one marked "unknown" when this backend has not checked yet."""
+        if self._unavailable is not None:
+            return unavailable_report(self._unavailable)
         with self._lock:
             quiet = not probe or self._job is not None
             if refresh and not quiet:
@@ -732,6 +741,8 @@ class TtsManager:
         """Starts speaking the text in that voice and returns the status at once; status() follows it from there.
         Everything that can be refused is refused here, before anything is started. monitor_gain is the volume
         of the listen device only, as in live mode; the virtual mic always gets the speech as it is."""
+        if self._unavailable is not None:
+            raise TtsError(self._unavailable)
         try:
             text = tts_text.clean(text) if isinstance(text, str) else tts_text.clean("")
             # Whether anything speakable is in it does not depend on the piece size, so this needs no clip yet.

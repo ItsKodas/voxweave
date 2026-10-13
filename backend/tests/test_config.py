@@ -16,6 +16,15 @@ def test_data_dir_uses_env_and_creates(tmp_path, monkeypatch):
     assert target.is_dir()
 
 
+@pytest.mark.parametrize("value, expected", [(None, False), ("", False), ("0", False), ("1", True)])
+def test_installed_app_follows_the_variable_the_shell_sets(monkeypatch, value, expected):
+    if value is None:
+        monkeypatch.delenv("AIVOICE_INSTALLED", raising=False)
+    else:
+        monkeypatch.setenv("AIVOICE_INSTALLED", value)
+    assert config.installed_app() is expected
+
+
 def test_settings_default(tmp_path):
     assert config.load_settings(tmp_path) == {"dml_device_id": 0}
 

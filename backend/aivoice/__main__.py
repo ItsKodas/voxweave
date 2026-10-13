@@ -19,6 +19,15 @@ def _exit_when_parent_dies(pid: int) -> None:
     os._exit(0)
 
 
+def unavailable_parts() -> tuple[str | None, str | None]:
+    """The messages for training and for text to speech when this app has neither (the installed app), else None."""
+    if not config.installed_app():
+        return None, None
+    from aivoice import training, tts
+
+    return training.NOT_IN_INSTALLED_APP, tts.NOT_IN_INSTALLED_APP
+
+
 def build_app():
     import onnxruntime as ort
 
@@ -43,10 +52,11 @@ def build_app():
     importer = Importer(library, WhisperTranscriber(lambda: config.whisper_model(data), data / "pretrained" / "whisper"))
     studio = Studio(library, Recorder(streams), importer, list_devices)
     root = Path(__file__).resolve().parents[2]
-    training = TrainingManager(data, library, root / "trainer")
+    no_training, no_tts = unavailable_parts()
+    training = TrainingManager(data, library, root / "trainer", unavailable=no_training)
     # Speech is played through the same stream factory as live mode. No stream is opened and no worker is
     # started until something is spoken.
-    tts = TtsManager(data, library, root / "tts", Player(streams), list_devices)
+    tts = TtsManager(data, library, root / "tts", Player(streams), list_devices, unavailable=no_tts)
     return create_app(manager, data, list_devices, ort.get_available_providers(), default_devices=default_devices,
                       studio=studio, library=library, importer=importer, training=training, tts=tts, calibration=calibration)
 

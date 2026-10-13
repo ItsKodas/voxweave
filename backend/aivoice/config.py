@@ -14,6 +14,12 @@ def data_dir() -> Path:
     return path
 
 
+def installed_app() -> bool:
+    """Whether this is the app put on the computer by the installer (the shell sets AIVOICE_INSTALLED=1), as
+    opposed to a source checkout. The installed app has no training and no text-to-speech environment."""
+    return os.environ.get("AIVOICE_INSTALLED") == "1"
+
+
 def load_settings(data: Path) -> dict:
     settings = dict(_DEFAULTS)
     try:
