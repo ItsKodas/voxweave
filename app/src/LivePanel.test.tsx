@@ -146,6 +146,16 @@ describe("LivePanel", () => {
   });
 
   describe("Refresh devices", () => {
+    it("reports the chosen listen device so the Speak tab can default to it", async () => {
+      vi.mocked(api.devices).mockResolvedValue({ ...DEVICES, devices: [MIC, HEADSET, SPEAKERS, VM] });
+      const onMonitorChosen = vi.fn();
+      render(<LivePanel stats={IDLE} onMonitorChosen={onMonitorChosen} />);
+      await ready();
+      await userEvent.click(screen.getByLabelText("Listen to output"));
+      await userEvent.selectOptions(screen.getByLabelText("Listen on"), "Speakers");
+      expect(onMonitorChosen).toHaveBeenLastCalledWith(6);
+    });
+
     it("reloads the list, keeps selections that still exist, and reports the refresh", async () => {
       vi.mocked(api.devices).mockResolvedValue({ ...DEVICES, devices: [MIC, WEBCAM, HEADSET, SPEAKERS, VM] });
       const onRefreshed = vi.fn();

@@ -12,15 +12,37 @@ const PRESETS: { id: TtsPreset; label: string }[] = [
 /** A virtual mic or cable is never a place to listen: that would send the speech to other apps by another route. */
 const isVirtual = (d: Device) => /voicemeeter|cable/i.test(d.name);
 
+const isRealOutput = (d: Device, virtualMic: number | null) =>
+  d.max_output > 0 && !isVirtual(d) && d.index !== virtualMic;
+
+/**
+ * The listen device for a device list: `keep` while that device still exists (so a refresh does not move the choice),
+ * otherwise the monitor chosen on the Live tab, otherwise the Windows default output, otherwise any real output.
+ */
+function chooseMonitor(list: DeviceList, keep: number | null, preferred: number | null): number | null {
+  const real = list.devices.filter((d) => isRealOutput(d, list.virtual_mic));
+  const has = (index: number | null): index is number => index !== null && real.some((d) => d.index === index);
+  if (has(keep)) return keep;
+  if (has(preferred)) return preferred;
+  if (has(list.default_output)) return list.default_output;
+  return real[0]?.index ?? null;
+}
+
+const ENGINE_STOPPED = "The voice engine stopped. It starts again the next time you speak.";
+
 /** Characters the way the backend counts them (an emoji is one, not two UTF-16 units). */
 const countChars = (s: string) => [...s].length;
 
-export function SpeakPanel({ tts, active, liveRunning }: {
+export function SpeakPanel({ tts, active, liveRunning, devicesVersion = 0, preferredMonitor = null }: {
   tts: TtsView;
   /** Whether the Speak tab is visible: nothing is asked of the backend until it first is. */
   active: boolean;
   /** Live mode is running: a speak request would be refused, so Speak says so instead. */
   liveRunning: boolean;
+  /** Changes when the Live tab re-scanned the audio devices: the list here reloads. */
+  devicesVersion?: number;
+  /** The listen device chosen on the Live tab: where "Listen on" starts when it is a real output. */
+  preferredMonitor?: number | null;
 }) {
   const { status, unreachable, refresh, apply } = tts;
   const [list, setList] = useState<DeviceList | null>(null);
@@ -41,17 +63,18 @@ export function SpeakPanel({ tts, active, liveRunning }: {
   const envAsked = useRef(false);
 
   const outputs = useMemo(
-    () => (list?.devices ?? []).filter((d) => d.max_output > 0 && !isVirtual(d) && d.index !== list?.virtual_mic),
+    () => (list?.devices ?? []).filter((d) => isRealOutput(d, list?.virtual_mic ?? null)),
     [list],
   );
+  const preferred = useRef(preferredMonitor);
+  preferred.current = preferredMonitor;
 
   const load = useCallback(async () => {
     try {
       const [devs, vs] = await Promise.all([list ? Promise.resolve(list) : api.devices(), ttsApi.voices()]);
       if (!list) {
         setList(devs);
-        const real = devs.devices.filter((d) => d.max_output > 0 && !isVirtual(d) && d.index !== devs.virtual_mic);
-        setMonitor((real.find((d) => d.index === devs.default_output) ?? real[0])?.index ?? null);
+        setMonitor(chooseMonitor(devs, null, preferred.current));
       }
       setVoices(vs);
       setVoiceId((current) => {
@@ -85,6 +108,27 @@ export function SpeakPanel({ tts, active, liveRunning }: {
       void checkEnvironment(false);
     }
   }, [active]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The Live tab re-scanned the devices: take the new list, keeping the listen device if it is still there. Before the
+  // first load there is nothing to refresh; showing the tab loads the current list.
+  const seenDevicesVersion = useRef(devicesVersion);
+  useEffect(() => {
+    if (seenDevicesVersion.current === devicesVersion) return;
+    seenDevicesVersion.current = devicesVersion;
+    if (list === null) return;
+    let stale = false;
+    api.devices().then(
+      (devs) => {
+        if (stale) return;
+        setList(devs);
+        setMonitor((current) => (current === null ? null : chooseMonitor(devs, current, preferred.current)));
+      },
+      () => {}, // the list on screen is still valid; the next refresh loads it again
+    );
+    return () => {
+      stale = true;
+    };
+  }, [devicesVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const voice = voices?.find((v) => v.id === voiceId) ?? null;
   const bestAllowed = voice?.has_model === true;
@@ -139,12 +183,17 @@ export function SpeakPanel({ tts, active, liveRunning }: {
     }
   };
 
-  const message = actionError ?? (!pending && status?.state === "idle" ? status.error : null);
+  const idleNow = !pending && status?.state === "idle";
+  const message =
+    actionError ??
+    (idleNow ? (status.error ?? (status.engine === "failed" ? ENGINE_STOPPED : null)) : null);
   const speaking = status?.state === "speaking";
   const progress = (() => {
     if (!status) return "";
     if (status.engine === "starting")
-      return "Getting ready. Starting the voice engine. The first time takes about 20 seconds.";
+      return status.state === "idle"
+        ? "The voice engine is starting." // nothing is waiting to be spoken (a Stop came during start-up)
+        : "Getting ready. Starting the voice engine. This takes about 15 seconds, and up to half a minute the first time.";
     if (status.state === "speaking")
       return status.piece > 0 ? `Speaking sentence ${status.piece} of ${status.pieces}` : "Speaking";
     if (status.state === "preparing") return "Preparing the speech…";

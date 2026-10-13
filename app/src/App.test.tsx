@@ -10,9 +10,12 @@ vi.mock("./SetupCheck", () => ({
   SetupCheck: ({ refreshKey }: { refreshKey: number }) => <p>setup check {refreshKey}</p>,
 }));
 vi.mock("./LivePanel", () => ({
-  LivePanel: ({ onDevicesRefreshed, voicesVersion, speechActive }: { onDevicesRefreshed: () => void; voicesVersion?: number; speechActive?: boolean }) => (
+  LivePanel: ({ onDevicesRefreshed, onMonitorChosen, voicesVersion, speechActive }: {
+    onDevicesRefreshed: () => void; onMonitorChosen?: (index: number | null) => void; voicesVersion?: number; speechActive?: boolean;
+  }) => (
     <>
       <button onClick={onDevicesRefreshed}>live panel</button>
+      <button onClick={() => onMonitorChosen?.(6)}>live picks monitor 6</button>
       <p>live speech {speechActive ? "active" : "idle"}</p>
       <p>live voices {voicesVersion}</p>
     </>
@@ -32,8 +35,10 @@ vi.mock("./VoicesPanel", () => ({
   ),
 }));
 vi.mock("./SpeakPanel", () => ({
-  SpeakPanel: ({ active, liveRunning }: { active: boolean; liveRunning: boolean }) => (
-    <p>speak panel {active ? "active" : "idle"} live {liveRunning ? "running" : "off"}</p>
+  SpeakPanel: ({ active, liveRunning, devicesVersion, preferredMonitor }: {
+    active: boolean; liveRunning: boolean; devicesVersion?: number; preferredMonitor?: number | null;
+  }) => (
+    <p>speak panel {active ? "active" : "idle"} live {liveRunning ? "running" : "off"} devices {devicesVersion} monitor {String(preferredMonitor)}</p>
   ),
 }));
 vi.mock("./ttsApi", async (importOriginal) => ({
@@ -123,6 +128,16 @@ describe("App", () => {
     expect(screen.getByText("setup check 0")).toBeInTheDocument();
     act(() => screen.getByRole("button", { name: "live panel" }).click());
     expect(screen.getByText("setup check 1")).toBeInTheDocument();
+  });
+
+  it("tells the Speak tab when the Live tab refreshed the devices and which monitor it chose", async () => {
+    vi.mocked(api.health).mockResolvedValue({ status: "ok" });
+    render(<App />);
+    await advance(0);
+    expect(screen.getByText(/speak panel idle live off devices 0 monitor null/)).toBeInTheDocument();
+    act(() => screen.getByRole("button", { name: "live panel" }).click());
+    act(() => screen.getByRole("button", { name: "live picks monitor 6" }).click());
+    expect(screen.getByText(/devices 1 monitor 6/)).toBeInTheDocument();
   });
 
   it("tells the Voices tab when the Live tab refreshed the devices", async () => {

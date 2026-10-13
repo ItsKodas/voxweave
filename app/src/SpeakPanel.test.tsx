@@ -60,6 +60,15 @@ describe("SpeakPanel form", () => {
     expect(screen.getByRole("combobox", { name: "Voice" })).toHaveValue("demo");
   });
 
+  it("shows the backend's reason beside a voice whose reference clip is too quiet", async () => {
+    const quiet: TtsVoice = { ...BAD, id: "quiet", name: "Quiet", reference: { ok: false, seconds: 6, message: "The reference clip is too quiet." } };
+    vi.mocked(ttsApi.voices).mockResolvedValue([DEMO, quiet]);
+    await open();
+    const option = screen.getByRole("option", { name: /Quiet/ });
+    expect(option).toBeDisabled();
+    expect(option).toHaveTextContent("Quiet (The reference clip is too quiet.)");
+  });
+
   it("explains that a voice needs one recorded sentence when there are none", async () => {
     vi.mocked(ttsApi.voices).mockResolvedValue([]);
     render(<SpeakPanel tts={view()} active liveRunning={false} />);
@@ -233,20 +242,92 @@ describe("SpeakPanel form", () => {
   });
 });
 
+describe("SpeakPanel devices", () => {
+  const rendered = (props: { devicesVersion?: number; preferredMonitor?: number | null } = {}) => (
+    <SpeakPanel tts={view()} active liveRunning={false} {...props} />
+  );
+  const listen = () => screen.getByRole("combobox", { name: "Listen on" });
+
+  it("reloads the devices when devicesVersion changes and keeps a selection that still exists", async () => {
+    const { rerender } = render(rendered({ devicesVersion: 0 }));
+    await screen.findByRole("option", { name: /Demo/ });
+    await userEvent.selectOptions(listen(), "6");
+    const plugged = { index: 9, name: "USB Speaker", max_input: 0, max_output: 2 };
+    vi.mocked(api.devices).mockResolvedValue({ ...DEVICES, devices: [...DEVICES.devices, plugged] });
+    rerender(rendered({ devicesVersion: 1 }));
+    expect(await screen.findByRole("option", { name: "USB Speaker" })).toBeInTheDocument();
+    expect(api.devices).toHaveBeenCalledTimes(2);
+    expect(listen()).toHaveValue("6");
+  });
+
+  it("falls back to the default output when the chosen device is gone after a refresh", async () => {
+    const { rerender } = render(rendered({ devicesVersion: 0 }));
+    await screen.findByRole("option", { name: /Demo/ });
+    await userEvent.selectOptions(listen(), "6");
+    vi.mocked(api.devices).mockResolvedValue({ ...DEVICES, devices: [HEADSET, VM, CABLE] });
+    rerender(rendered({ devicesVersion: 1 }));
+    await act(async () => {});
+    expect(screen.queryByRole("option", { name: "Speakers" })).not.toBeInTheDocument();
+    expect(listen()).toHaveValue("2");
+  });
+
+  it("does not refetch devices when devicesVersion is unchanged", async () => {
+    const { rerender } = render(rendered({ devicesVersion: 3 }));
+    await screen.findByRole("option", { name: /Demo/ });
+    rerender(rendered({ devicesVersion: 3 }));
+    expect(api.devices).toHaveBeenCalledTimes(1);
+  });
+
+  it("listens on the monitor chosen on the Live tab when it is a real output", async () => {
+    render(rendered({ preferredMonitor: 6 }));
+    await screen.findByRole("option", { name: /Demo/ });
+    expect(listen()).toHaveValue("6");
+  });
+
+  it("ignores a Live-tab monitor that is virtual or missing and uses the default output", async () => {
+    const { unmount } = render(rendered({ preferredMonitor: 4 }));
+    await screen.findByRole("option", { name: /Demo/ });
+    expect(listen()).toHaveValue("2");
+    unmount();
+    render(rendered({ preferredMonitor: 77 }));
+    await screen.findByRole("option", { name: /Demo/ });
+    expect(listen()).toHaveValue("2");
+  });
+});
+
 describe("SpeakPanel status", () => {
   it("shows Getting ready while the engine starts, not an error, with Stop available", async () => {
     await open(view(idle({ engine: "starting", state: "preparing" })));
-    expect(screen.getByRole("status")).toHaveTextContent("Starting the voice engine. The first time takes about 20 seconds.");
+    expect(screen.getByRole("status")).toHaveTextContent("Starting the voice engine. This takes about 15 seconds, and up to half a minute the first time.");
     expect(screen.getByRole("status")).toHaveTextContent("Getting ready");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Speak" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
   });
 
-  it("shows Getting ready for a starting engine with no request, without Stop", async () => {
+  it("says only that the engine is starting when it starts with no request (after a Stop), without Stop", async () => {
     await open(view(idle({ engine: "starting", state: "idle" })));
-    expect(screen.getByRole("status")).toHaveTextContent("Getting ready");
+    expect(screen.getByRole("status")).toHaveTextContent("The voice engine is starting.");
+    expect(screen.getByRole("status")).not.toHaveTextContent("Getting ready");
     expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
+  });
+
+  it("shows a plain line when the engine failed while idle and no request error exists", async () => {
+    await open(view(idle({ engine: "failed" })));
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "The voice engine stopped. It starts again the next time you speak.",
+    );
+  });
+
+  it("prefers the request's own error over the engine-failed line", async () => {
+    await open(view(idle({ engine: "failed", error: "The worker ran out of memory." })));
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(screen.getByRole("alert")).toHaveTextContent("The worker ran out of memory.");
+  });
+
+  it("shows no engine-failed line for a stopped or ready engine", async () => {
+    await open(view(idle({ engine: "stopped" })));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("shows the sentence being spoken and a Stop button that stops", async () => {

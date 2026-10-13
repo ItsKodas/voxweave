@@ -56,11 +56,13 @@ type Props = {
   onDevicesRefreshed?: () => void;
   /** Changes when the voice library changed (a training run finished): the voice list reloads, nothing else. */
   voicesVersion?: number;
+  /** Called with the listen device chosen here, so the Speak tab can start on the same one. */
+  onMonitorChosen?: (index: number | null) => void;
   /** Speech is being made or played: starting live mode and refreshing devices would be refused. */
   speechActive?: boolean;
 };
 
-export function LivePanel({ stats, actionError = null, onDevicesRefreshed, voicesVersion = 0, speechActive = false }: Props) {
+export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMonitorChosen, voicesVersion = 0, speechActive = false }: Props) {
   const [devices, setDevices] = useState<Device[]>([]);
   const [virtualMic, setVirtualMic] = useState<number | null>(null);
   const [voices, setVoices] = useState<Voice[]>([]);
@@ -77,6 +79,10 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, voice
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    if (loaded) onMonitorChosen?.(monitor);
+  }, [loaded, monitor]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const inputs = useMemo(() => devices.filter((d) => d.max_input > 0), [devices]);
   const outputs = useMemo(() => devices.filter((d) => d.max_output > 0), [devices]);
