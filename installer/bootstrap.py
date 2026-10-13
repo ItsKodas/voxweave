@@ -15,10 +15,12 @@ Progress goes to standard output, one JSON object per line:
     {"step": "packages", "percent": 37, "message": "Installing the voice engine's packages"}
     {"done": true, "ok": false, "error": "..."}        (always the last line)
 
-Everything uv and the checks print is appended to <root>/runtime/setup.log.
+Everything uv and the checks print is appended to <root>/runtime/setup.log. The app starts that file afresh
+when it has grown large; this script only ever appends to it.
 """
 import argparse
 import contextlib
+import errno
 import hashlib
 import http.client
 import json
@@ -44,11 +46,14 @@ class ModelSpec:
     size: int
 
 
-# The ContentVec base speech model every voice needs (README, "Building from source"). The checksum is the one
-# Hugging Face publishes for the file and the one of the copy the app was developed with.
+# The ContentVec base speech model every voice needs (README, "Building from source"). The address names one
+# fixed revision of the repository (its commit of 2023-07-22, the newest when this was written), so what is
+# downloaded cannot change under it. The checksum is the one Hugging Face publishes for the file and the one of
+# the copy the app was developed with.
 MODEL_NAME = "vec-768-layer-12.onnx"
+MODEL_REVISION = "3ff2e37e161ebcb3c4711e7ec870472342260842"
 MODEL = ModelSpec(
-    "https://huggingface.co/NaruseMioShirakana/MoeSS-SUBModel/resolve/main/vec-768-layer-12.onnx",
+    f"https://huggingface.co/NaruseMioShirakana/MoeSS-SUBModel/resolve/{MODEL_REVISION}/vec-768-layer-12.onnx",
     "b3886e7dff1495cda514f94f4680a7b1261e05d6929f5c764cdb17934b413c2a",
     377_655_729,
 )
@@ -62,7 +67,8 @@ MIN_FREE_BYTES = 2_000_000_000
 DOWNLOAD_ATTEMPTS = 5
 CHUNK = 1 << 20
 TIMEOUT = 60.0
-LOG_LIMIT = 2_000_000
+# Windows error codes for a full disk (ERROR_HANDLE_DISK_FULL, ERROR_DISK_FULL), beside errno's ENOSPC.
+_DISK_FULL_WINERRORS = (39, 112)
 
 # Share of the progress bar each step ends at. The app shows 0 to PYTHON_DONE while uv fetches Python.
 PYTHON_DONE, ENVIRONMENT_DONE, PACKAGES_DONE, VERIFY_DONE, MODEL_DONE = 3, 6, 60, 62, 99
@@ -102,6 +108,7 @@ class Paths:
         self.cache = self.runtime / "uv-cache"
         self.pythons = self.runtime / "python"
         self.state = self.runtime / "setup.json"
+        self.failed_check = self.runtime / "check-failed"
         self.log = self.runtime / "setup.log"
         self.data = self.root / "data"
         self.model = self.data / "pretrained" / MODEL_NAME
@@ -122,6 +129,10 @@ def uv_environment(paths: Paths, base=None) -> dict:
         "UV_PYTHON_INSTALL_BIN": "0",
         "UV_NO_CONFIG": "1",
         "UV_NO_PROGRESS": "1",
+        # Python (this script's and the environment's) loads nothing from the user's own site-packages folder
+        # and nothing from whatever folder it happens to be started in.
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONSAFEPATH": "1",
     })
     return env
 
@@ -199,6 +210,14 @@ def _reason(exc: BaseException) -> str:
     return getattr(exc, "strerror", None) or str(exc) or type(exc).__name__
 
 
+def _disk_full(exc: OSError) -> bool:
+    return exc.errno == errno.ENOSPC or getattr(exc, "winerror", None) in _DISK_FULL_WINERRORS
+
+
+def _write_block(f, block: bytes) -> None:
+    f.write(block)
+
+
 def _megabytes(count: int) -> str:
     return f"{count / 1_000_000:.0f} MB"
 
@@ -260,8 +279,6 @@ class Bootstrap:
     def _log(self, text: str) -> None:
         try:
             self._paths.runtime.mkdir(parents=True, exist_ok=True)
-            if self._paths.log.is_file() and self._paths.log.stat().st_size > LOG_LIMIT:
-                self._paths.log.unlink()
             with open(self._paths.log, "a", encoding="utf-8", errors="replace") as f:
                 f.write(text if text.endswith("\n") else text + "\n")
         except OSError:
@@ -346,7 +363,7 @@ class Bootstrap:
             raise SetupError(f"Refusing to remove {folder}: it is not inside {self._paths.runtime}")
         shutil.rmtree(folder, ignore_errors=True)
         if folder.exists():
-            raise SetupError(f"The damaged Python environment at {folder} could not be removed. Close Voxweave "
+            raise SetupError(f"The folder {folder} could not be removed. Close Voxweave "
                              "completely (Quit in the tray menu), start it again and press Retry.")
 
     def _install_packages(self) -> None:
@@ -372,6 +389,34 @@ class Bootstrap:
         self._report("packages", PACKAGES_DONE, "The packages are installed")
 
     def _verify_runtime(self) -> None:
+        """Checks that the environment really works. One that does not is removed before the error is reported:
+        uv takes a package whose files are damaged or half unpacked for installed, so only a new environment
+        makes Retry worth pressing."""
+        paths = self._paths
+        try:
+            self._check_runtime()
+        except SetupError as failed:
+            again = "Retry builds the environment again from the start."
+            try:
+                self._remove_tree(paths.venv)
+                # The environment's files are links into uv's cache, so a damaged file there would come straight
+                # back. A second failure in a row therefore empties the cache as well; the first one keeps it,
+                # so that a retry after, say, installing a missing Windows component downloads nothing again.
+                if paths.failed_check.is_file() and paths.cache.exists():
+                    self._remove_tree(paths.cache)
+                    again = "Retry downloads the packages again and builds the environment from the start."
+                paths.failed_check.write_text("the last check of the environment failed\n", encoding="utf-8")
+            except SetupError as stuck:
+                again = str(stuck)
+            except OSError:
+                pass
+            raise SetupError(f"{failed} {again}") from None
+        try:
+            paths.failed_check.unlink()
+        except OSError:
+            pass
+
+    def _check_runtime(self) -> None:
         self._report("verify", PACKAGES_DONE, "Checking the installed packages")
         code, text = self._run([str(self._paths.python), "-c", _RUNTIME_CHECK])
         found = None
@@ -381,18 +426,16 @@ class Bootstrap:
             except (IndexError, ValueError):
                 found = None
         if not isinstance(found, dict):
-            raise SetupError("The installed packages do not load on this computer. If the message below names a "
-                             "missing DLL, install the Microsoft Visual C++ Redistributable (x64) from "
-                             "https://aka.ms/vs/17/release/vc_redist.x64.exe and press Retry. "
-                             f"Last output: {self._tail(text)}")
+            raise SetupError("The installed packages do not load on this computer. If the output names a missing "
+                             "DLL, first install the Microsoft Visual C++ Redistributable (x64) from "
+                             f"https://aka.ms/vs/17/release/vc_redist.x64.exe. Last output: {self._tail(text)}.")
         if found.get("plain") is not None:
             raise SetupError("The plain onnxruntime package is in the environment; it replaces the GPU runtime "
-                             "(onnxruntime-directml) and must not be installed. Press Retry to rebuild it.")
+                             "(onnxruntime-directml) and must not be installed.")
         if found.get("directml") is None:
-            raise SetupError("The GPU runtime onnxruntime-directml is missing from the environment. Press Retry.")
+            raise SetupError("The GPU runtime onnxruntime-directml is missing from the environment.")
         if "DmlExecutionProvider" not in (found.get("providers") or []):
-            raise SetupError("The installed GPU runtime does not offer DirectML, which live mode needs. "
-                             "Press Retry.")
+            raise SetupError("The installed GPU runtime does not offer DirectML, which live mode needs.")
         self._report("verify", VERIFY_DONE, "The packages work")
 
     # ---- the base model
@@ -455,7 +498,16 @@ class Bootstrap:
                     block = stream.read(CHUNK)
                     if not block:
                         break
-                    f.write(block)
+                    try:
+                        _write_block(f, block)
+                    except OSError as exc:  # the disk, not the network: trying again cannot help
+                        if _disk_full(exc):
+                            raise SetupError(
+                                f"The disk is full: the base speech model ({_megabytes(spec.size)}) does not fit "
+                                f"on the disk that holds {self._paths.root}. Free some space and press Retry; "
+                                "the download continues where it stopped.") from None
+                        raise SetupError(f"The base speech model could not be written to {part}: {_reason(exc)}. "
+                                         "Press Retry once that is put right.") from None
                     written += len(block)
                     if written > spec.size:
                         raise OSError("the server sent more data than the model has")

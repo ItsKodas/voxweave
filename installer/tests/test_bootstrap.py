@@ -1,14 +1,17 @@
 """Tests of installer/bootstrap.py with a fake uv and a fake downloader. Standard library only, so they run with
 any Python 3.12 (python -m unittest discover -s installer/tests) and under pytest alike."""
+import errno
 import hashlib
 import http.server
 import io
 import json
 import sys
 import tempfile
+import re
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -177,6 +180,12 @@ class BootstrapCase(unittest.TestCase):
             self.assertEqual(env["UV_PYTHON_INSTALL_REGISTRY"], "0")
             self.assertNotIn("VIRTUAL_ENV", env)
 
+    def test_python_ignores_the_users_site_packages_and_the_current_folder(self):
+        self.run_setup()
+        for env in self.uv.envs:
+            self.assertEqual(env["PYTHONNOUSERSITE"], "1")
+            self.assertEqual(env["PYTHONSAFEPATH"], "1")
+
     def test_an_environment_with_the_wrong_python_is_rebuilt(self):
         self.run_setup()
         (self.paths.venv / "leftover.txt").write_text("old")
@@ -251,6 +260,32 @@ class BootstrapCase(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(self.paths.model.read_bytes(), MODEL)
 
+    def test_a_full_disk_during_the_download_is_a_disk_problem_and_is_not_retried(self):
+        with mock.patch.object(bootstrap, "_write_block", side_effect=OSError(errno.ENOSPC, "No space left on device")):
+            code, lines = self.run_setup()
+        self.assertEqual(code, 1)
+        self.assertIn("disk is full", lines[-1]["error"])
+        self.assertNotIn("internet", lines[-1]["error"])
+        self.assertEqual(self.web.offsets, [0], "it is not tried five times like a network problem")
+        self.assertEqual(self.sleeps, [])
+        self.assertFalse(self.paths.state.exists())
+
+    def test_any_other_error_writing_the_file_is_reported_as_such_and_not_retried(self):
+        with mock.patch.object(bootstrap, "_write_block", side_effect=PermissionError(errno.EACCES, "Access is denied")):
+            code, lines = self.run_setup()
+        self.assertEqual(code, 1)
+        self.assertIn("could not be written", lines[-1]["error"])
+        self.assertIn("Access is denied", lines[-1]["error"])
+        self.assertEqual(self.web.offsets, [0])
+
+    def test_the_log_is_only_appended_to_never_started_afresh(self):
+        self.paths.runtime.mkdir(parents=True)
+        self.paths.log.write_text("earlier\n" + "x" * 3_000_000, encoding="utf-8")
+        self.run_setup()
+        text = self.paths.log.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("earlier\n"), "rotating the log is the app's job alone")
+        self.assertIn("pip", text)
+
     def test_a_longer_part_file_than_the_model_is_discarded(self):
         part = self.paths.model.with_name(self.paths.model.name + ".part")
         part.parent.mkdir(parents=True)
@@ -274,6 +309,60 @@ class BootstrapCase(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("onnxruntime", lines[-1]["error"])
         self.assertFalse(self.paths.state.exists())
+
+    def test_an_environment_that_fails_its_check_is_removed_so_that_retry_rebuilds_it(self):
+        good = dict(self.uv.runtime)
+        self.uv.runtime = {"broken": True}  # what a half-installed package looks like: the imports fail
+        original = self.uv.__call__
+
+        def failing_imports(argv, env, tick=None):
+            code, text = original(argv, env, tick)
+            if argv[0] == str(self.paths.python) and "sys.version_info" not in argv[-1]:
+                return 1, "ImportError: DLL load failed while importing onnxruntime_pybind11_state"
+            return code, text
+
+        code, lines = self.run_setup(run=failing_imports)
+        self.assertEqual(code, 1)
+        self.assertIn("DLL load failed", lines[-1]["error"])
+        self.assertIn("Retry builds the environment again", lines[-1]["error"])
+        self.assertFalse(self.paths.venv.exists(), "the environment that failed is gone")
+        self.assertFalse(self.paths.state.exists())
+
+        self.uv.runtime = good
+        self.uv.calls.clear()
+        code, _ = self.run_setup()
+        self.assertEqual(code, 0)
+        self.assertEqual(len(self.uv.uv_calls("venv")), 1, "the retry made a new environment")
+        self.assertEqual(len(self.uv.uv_calls("pip", "sync")), 1)
+
+    def test_a_second_failed_check_in_a_row_also_empties_the_download_cache(self):
+        """The environment's files are links into uv's cache, so a damaged file there would come straight back."""
+        self.uv.runtime = {**GOOD_RUNTIME, "directml": None}
+        cached = self.paths.cache / "archive-v0" / "numpy.whl"
+        cached.parent.mkdir(parents=True)
+        cached.write_bytes(b"damaged")
+        self.run_setup()
+        self.assertTrue(cached.exists(), "one failure keeps the cache: a retry should not download everything again")
+        code, lines = self.run_setup()
+        self.assertEqual(code, 1)
+        self.assertFalse(self.paths.cache.exists(), "the second failure in a row removes it")
+        self.assertIn("downloads the packages again", lines[-1]["error"])
+        self.uv.runtime = dict(GOOD_RUNTIME)
+        self.assertEqual(self.run_setup()[0], 0)
+        cached.parent.mkdir(parents=True)
+        cached.write_bytes(b"fine")
+        self.uv.runtime = {**GOOD_RUNTIME, "directml": None}
+        self.run_setup()
+        self.assertTrue(cached.exists(), "a success in between starts the count again")
+
+    def test_every_kind_of_failed_check_removes_the_environment(self):
+        for runtime in ({**GOOD_RUNTIME, "plain": "1.24.4"}, {**GOOD_RUNTIME, "directml": None},
+                        {**GOOD_RUNTIME, "providers": ["CPUExecutionProvider"]}):
+            self.uv.runtime = runtime
+            code, lines = self.run_setup()
+            self.assertEqual(code, 1)
+            self.assertIn("Retry", lines[-1]["error"])
+            self.assertFalse(self.paths.venv.exists(), runtime)
 
     def test_a_missing_directml_package_fails_the_setup(self):
         self.uv.runtime["directml"] = None
@@ -447,11 +536,51 @@ class OpenUrlCase(unittest.TestCase):
             self.assertEqual(_RangeHandler.seen, ["bytes=5000-"])
 
 
+class LockCase(unittest.TestCase):
+    """The committed installer/requirements.lock: what every installed app gets."""
+
+    def setUp(self):
+        text = (Path(__file__).resolve().parents[1] / "requirements.lock").read_text(encoding="utf-8")
+        self.entries = {}  # name -> (version, number of hashes)
+        name = None
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            pinned = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s\\]+)", line)
+            if pinned:
+                name = re.sub(r"[-_.]+", "-", pinned.group(1)).lower()
+                self.assertNotIn(name, self.entries, "a package is listed twice")
+                self.entries[name] = [pinned.group(2), 0]
+            else:
+                self.assertRegex(line, r"^--hash=sha256:[0-9a-f]{64}( \\)?$", "only pins and their hashes belong here")
+                self.assertIsNotNone(name)
+                self.entries[name][1] += 1
+
+    def test_every_package_is_pinned_with_at_least_one_hash(self):
+        self.assertGreater(len(self.entries), 30)
+        for name, (version, hashes) in self.entries.items():
+            self.assertTrue(version, name)
+            self.assertGreater(hashes, 0, f"{name} has no hash")
+
+    def test_the_plain_onnxruntime_is_not_in_the_lock_and_directml_is(self):
+        self.assertNotIn("onnxruntime", self.entries)
+        self.assertIn("onnxruntime-directml", self.entries)
+        self.assertIn("faster-whisper", self.entries)
+
+    def test_no_test_packages_are_installed(self):
+        for name in ("pytest", "httpx"):
+            self.assertNotIn(name, self.entries)
+
+
 class MainCase(unittest.TestCase):
     def test_the_committed_model_pin_is_complete(self):
         self.assertRegex(bootstrap.MODEL.sha256, r"^[0-9a-f]{64}$")
-        self.assertTrue(bootstrap.MODEL.url.startswith("https://"))
         self.assertGreater(bootstrap.MODEL.size, 100_000_000)
+
+    def test_the_model_is_downloaded_from_one_fixed_revision(self):
+        self.assertRegex(bootstrap.MODEL.url,
+                         r"^https://huggingface\.co/[^/]+/[^/]+/resolve/[0-9a-f]{40}/vec-768-layer-12\.onnx$")
 
     def test_arguments(self):
         args = bootstrap.parse_args(["--root", "C:/r", "--resources", "C:/app", "--app-version", "0.1.0"])
