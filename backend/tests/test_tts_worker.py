@@ -886,8 +886,16 @@ def chatter(where):
 class Noisy:
     def __init__(self, model_dir):
         self.model_dir = model_dir
+        if os.environ.get("TTS_TEST_FACTORY_ERROR"):
+            raise {"RuntimeError": RuntimeError, "KeyboardInterrupt": KeyboardInterrupt}[
+                os.environ["TTS_TEST_FACTORY_ERROR"]]("raised on purpose")
 
     def load(self):
+        if os.environ.get("TTS_TEST_LOAD_HANGS"):
+            import threading
+            sys.stderr.write("LOADING\n")
+            sys.stderr.flush()
+            threading.Event().wait()
         chatter("load")
         return {"device": "noisy", "model_dir": str(self.model_dir), "offline": os.environ.get("HF_HUB_OFFLINE")}
 
@@ -1069,29 +1077,56 @@ def test_a_broken_stdout_ends_the_worker_quietly(session):
     assert names(s.stdout.events) == ["ready"]
 
 
-def test_a_real_worker_ends_when_its_parent_process_is_gone(tmp_path):
-    """--parent-pid in a real process: stdin stays open the whole time, so only the watchdog can end it."""
+def start_with_a_parent(tmp_path, **env):
+    """A real worker (with the noisy engine) whose --parent-pid is a process that lives until its stdin closes."""
     driver = tmp_path / "driver.py"
     driver.write_text(NOISY_DRIVER, encoding="utf-8")
-    parent = subprocess.Popen([sys.executable, "-c", "pass"])
-    parent.wait(timeout=60)
-    with open(tmp_path / "stderr.log", "wb") as log:
-        process = subprocess.Popen([sys.executable, "-u", str(driver), str(MODULE), "--model-dir", str(tmp_path),
-                                    "--parent-pid", str(parent.pid)],
-                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log,
-                                   env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
-        try:
-            code = process.wait(timeout=120)
-            lines = process.stdout.read().splitlines()
-        finally:
-            if process.poll() is None:
-                process.kill()
-                process.wait(timeout=60)
-            process.stdin.close()
-            process.stdout.close()
-    assert code == 0
-    assert [json.loads(line)["event"] for line in lines] == ["ready"]
-    assert "the app is gone" in (tmp_path / "stderr.log").read_text(errors="replace")
+    parent = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"], stdin=subprocess.PIPE)
+    process = subprocess.Popen([sys.executable, "-u", str(driver), str(MODULE), "--model-dir", str(tmp_path),
+                                "--parent-pid", str(parent.pid)],
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1", **env))
+    guard = threading.Timer(120.0, process.kill)  # a hung worker fails the test instead of hanging it
+    guard.start()
+    return parent, process, guard
+
+
+def end_parent_and_wait(parent, process, guard):
+    """Let the parent end, and return (the worker's exit code, the rest of its stdout, the rest of its stderr)."""
+    try:
+        parent.stdin.close()
+        parent.wait(timeout=60)
+        code = process.wait(timeout=120)  # the worker's stdin is still open: only the watchdog can end it
+        return code, process.stdout.read(), process.stderr.read()
+    finally:
+        guard.cancel()
+        for one in (parent, process):
+            if one.poll() is None:
+                one.kill()
+                one.wait(timeout=60)
+        for stream in (process.stdin, process.stdout, process.stderr):
+            stream.close()
+
+
+def test_a_real_worker_ends_when_its_parent_process_is_gone(tmp_path):
+    parent, process, guard = start_with_a_parent(tmp_path)
+    ready = process.stdout.readline()
+    assert json.loads(ready)["event"] == "ready"
+    code, out, err = end_parent_and_wait(parent, process, guard)
+    assert code == 0 and out == b""
+    assert b"the app is gone, ending" in err
+
+
+def test_a_real_worker_whose_parent_goes_while_the_model_loads_ends_without_waiting_for_it(tmp_path):
+    parent, process, guard = start_with_a_parent(tmp_path, TTS_TEST_LOAD_HANGS="1")
+    while True:  # the engine says when its load (which never returns) has begun
+        line = process.stderr.readline()
+        assert line, "the worker ended before it began to load"
+        if b"LOADING" in line:
+            break
+    code, out, err = end_parent_and_wait(parent, process, guard)
+    assert code == 0 and out == b""
+    assert b"while the model was still loading" in err
 
 
 # ---------------------------------------------------------------- 10. one job at a time
@@ -1205,3 +1240,180 @@ def test_shims_stub_the_training_only_imports(fake_torch):
     stubs = {name: sys.modules[name] for name in shims.TRAINING_ONLY_MODULES}
     shims.apply()  # applying twice changes nothing
     assert {name: sys.modules[name] for name in shims.TRAINING_ONLY_MODULES} == stubs
+
+
+# ---------------------------------------------------------------- review fixes: nothing a request says ends the worker
+
+def test_a_speed_too_large_to_be_a_float_is_refused(session, tmp_path):
+    s = session()
+    s.reference(tmp_path)
+    s.stdin.write('{"cmd": "synthesize", "id": "huge", "pieces": ["One sentence."], "out_dir": %s, "nfe": 16, '
+                  '"speed": 1%s}\n' % (json.dumps(str(tmp_path / "out")), "0" * 400))
+    error = s.error("bad_request")
+    assert error["id"] == "huge" and "speed" in error["message"]
+    assert names(s.run_job(tmp_path, id="next")) == ["started", "audio", "done"]
+
+
+@pytest.mark.parametrize("more", [{"max_chars": 100}, {}], ids=["with max_chars", "without"])
+def test_a_piece_that_is_not_valid_unicode_is_refused(session, tmp_path, more):
+    s = session()
+    s.reference(tmp_path)
+    s.stdin.write(json.dumps(dict(cmd="synthesize", id="lone", pieces=["Fine.", "Half a pair: \ud800."],
+                                  out_dir=str(tmp_path / "out"), nfe=16, **more)) + "\n")
+    error = s.error("bad_request")
+    assert error["id"] == "lone" and "piece 1" in error["message"]
+    assert s.engine.calls == []
+    assert names(s.run_job(tmp_path, id="next")) == ["started", "audio", "done"]
+
+
+@pytest.mark.parametrize("field", ["wav", "text"])
+def test_a_reference_path_or_transcript_that_is_not_valid_unicode_is_refused(session, tmp_path, field):
+    s = session()
+    command = dict(cmd="set_reference", wav=str(make_wav(tmp_path / "clip.wav", 5.0)), text=TRANSCRIPT)
+    command[field] += "\udc80"
+    s.stdin.write(json.dumps(command) + "\n")
+    s.error("bad_request")
+    assert s.engine.references == []
+    s.reference(tmp_path)
+
+
+def test_an_unexpected_error_while_reading_a_command_is_internal_and_the_worker_goes_on(session, tmp_path, worker,
+                                                                                         monkeypatch):
+    s = session()
+    s.reference(tmp_path)
+    real_job_from = worker._job_from
+
+    def broken(request):
+        if request.get("id") == "boom":
+            raise OverflowError("something nobody thought of")
+        return real_job_from(request)
+
+    monkeypatch.setattr(worker, "_job_from", broken)
+    s.synthesize(tmp_path, id="boom")
+    error = s.error("internal")
+    assert error["id"] == "boom" and "something nobody thought of" in error["message"]
+    assert names(s.run_job(tmp_path, id="next")) == ["started", "audio", "done"]
+
+
+def test_an_unexpected_error_while_running_a_job_does_not_leave_the_worker_busy(session, tmp_path, worker,
+                                                                                 monkeypatch):
+    s = session()
+    s.reference(tmp_path)
+    real_run = worker._Server._run_job
+
+    def broken(self, job):
+        if job.id == "boom":
+            raise RuntimeError("a bug in the worker itself")
+        return real_run(self, job)
+
+    monkeypatch.setattr(worker._Server, "_run_job", broken)
+    s.synthesize(tmp_path, id="boom")
+    assert s.error("internal")["id"] == "boom"
+    assert names(s.run_job(tmp_path, id="next")) == ["started", "audio", "done"]
+
+
+def test_an_unknown_command_is_not_echoed_at_full_length(session):
+    s = session()
+    s.send(cmd="x" * 5000)
+    assert len(s.error("unknown_command")["message"]) < 200
+    s.send(cmd={"deep": ["y" * 5000]})
+    assert len(s.error("unknown_command")["message"]) < 200
+
+
+def test_a_reference_length_that_is_not_a_number_has_its_own_wording(session, tmp_path):
+    engine = FakeEngine()
+    engine.reference_seconds = float("nan")
+    s = session(engine)
+    s.send(cmd="set_reference", wav=str(make_wav(tmp_path / "clip.wav", 5.0)), text=TRANSCRIPT)
+    message = s.error("bad_request")["message"]
+    assert "too long" not in message and "too short" not in message and "nan" not in message.lower()
+    assert "length" in message and "clip.wav" in message
+
+
+def test_a_reference_too_quiet_to_copy_is_refused_by_level(worker):
+    """The engine lowers its output by as much as it raised a quiet reference, so below this level every piece
+    would come back near-silent and fail; the user is told about the clip instead."""
+    worker.check_reference_level(0.05, "clip.wav")
+    worker.check_reference_level(worker.MIN_REFERENCE_RMS, "clip.wav")
+    for rms in (0.0, 1e-4, 5e-4, worker.MIN_REFERENCE_RMS * 0.99, float("nan")):
+        with pytest.raises(worker.BadRequest, match="clip.wav is too quiet"):
+            worker.check_reference_level(rms, "clip.wav")
+    # a piece peaking at half scale at the model's own level, lowered for the quietest clip that is accepted,
+    # still clears the near-silence check
+    assert 0.5 * worker.MIN_REFERENCE_RMS / 0.1 > worker.SILENT_PEAK
+
+
+# ---------------------------------------------------------------- review fixes: the parent during loading
+
+def test_the_parent_disappearing_while_the_model_loads_abandons_the_worker(worker):
+    loading, let_go, abandoned = threading.Event(), threading.Event(), threading.Event()
+
+    class SlowEngine(FakeEngine):
+        def load(self):
+            loading.set()
+            assert let_go.wait(WAIT)
+            return super().load()
+
+    alive = threading.Event()
+    alive.set()
+
+    def abandon():  # the real one ends the process on the spot; here the load is let go instead
+        abandoned.set()
+        let_go.set()
+
+    s = Session(worker, SlowEngine(), start=False, parent_alive=alive.is_set, poll_seconds=0.001, abandon=abandon)
+    assert loading.wait(WAIT)
+    assert not abandoned.is_set()
+    alive.clear()
+    assert abandoned.wait(WAIT)
+    assert s.end(close=False) == 0
+    assert s.stdout.events == []  # and no `ready` for a parent that is not there
+    s.close()
+
+
+def test_the_load_watch_stops_once_the_model_is_loaded(session):
+    calls = []
+    alive = threading.Event()
+    alive.set()
+    s = session(parent_alive=alive.is_set, poll_seconds=0.001, abandon=lambda: calls.append("abandon"))
+    alive.clear()  # after `ready` the serving loop notices, and ends the worker the orderly way
+    assert s.end(close=False) == 0
+    assert calls == []
+
+
+# ---------------------------------------------------------------- review fixes: the process
+
+def run_driver(tmp_path, arguments, **env):
+    driver = tmp_path / "driver.py"
+    driver.write_text(NOISY_DRIVER, encoding="utf-8")
+    return subprocess.run([sys.executable, "-u", str(driver), str(MODULE)] + arguments, stdin=subprocess.PIPE,
+                          capture_output=True, timeout=120,
+                          env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1", **env))
+
+
+def test_bad_command_line_arguments_are_reported_as_a_json_line(tmp_path):
+    for arguments in ([], ["--model-dir", "m", "--parent-pid", "not-a-number"], ["--model-dir", "m", "--bogus"]):
+        result = run_driver(tmp_path, arguments)
+        lines = result.stdout.splitlines()
+        assert len(lines) == 1, (arguments, result.stdout, result.stderr)
+        event = json.loads(lines[0])
+        assert event["event"] == "error" and event["code"] == "internal" and "argument" in event["message"]
+        assert result.returncode == 2
+
+
+@pytest.mark.parametrize("error", ["RuntimeError", "KeyboardInterrupt"])
+def test_an_error_nothing_catches_still_ends_the_process_with_exit_code_1(tmp_path, error):
+    """Never through the ordinary interpreter exit, which crashes while the reader thread waits on stdin."""
+    result = run_driver(tmp_path, ["--model-dir", "m"], TTS_TEST_FACTORY_ERROR=error)
+    assert result.returncode == 1, (result.returncode, result.stderr)
+    assert result.stdout == b""
+    assert error.encode() in result.stderr
+
+
+def test_a_real_worker_started_for_a_parent_that_is_already_gone_ends_before_loading(tmp_path):
+    parent = subprocess.Popen([sys.executable, "-c", "pass"])
+    parent.wait(timeout=60)
+    result = run_driver(tmp_path, ["--model-dir", "m", "--parent-pid", str(parent.pid)])
+    assert result.returncode == 0, (result.returncode, result.stderr)
+    assert result.stdout == b""
+    assert b"the app is gone" in result.stderr and b"PRINT from load" not in result.stderr

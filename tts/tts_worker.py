@@ -67,6 +67,7 @@ MIN_SPEED, MAX_SPEED = 0.5, 2.0
 SHORT_PIECE_BYTES, SHORT_PIECE_SPEED = 10, 0.3  # the package's own rule for very short text
 MIN_PIECE_SECONDS = 0.1
 SILENT_PEAK = 0.005  # the level below which the backend calls a piece silent
+MIN_REFERENCE_RMS = 0.003  # about -50 dBFS: quieter than this a clip is room noise, and its pieces fail as silent
 POLL_SECONDS = 0.5  # how often the parent is checked while no command arrives
 STOP_GRACE_SECONDS = 5.0  # how long a running piece gets to notice that the worker is ending
 REPLACE_ATTEMPTS = 8
@@ -117,8 +118,29 @@ def generated_length(reference_length, reference_text, piece, speed):
     return reference_length / len(reference_text.encode("utf-8")) * piece_bytes / speed
 
 
+def check_reference_level(rms, name):
+    """Refuse a clip too quiet to copy. The engine raises a quiet reference to its working level and lowers what
+    it generates by as much, so below this level every piece would come back near-silent and fail."""
+    if not math.isfinite(rms) or rms < MIN_REFERENCE_RMS:
+        raise BadRequest(f"The reference clip {name} is too quiet to copy a voice from. Record it louder, or "
+                         "choose another clip")
+
+
+def is_text(value):
+    """A string that can be written as UTF-8 (JSON can smuggle in half of a surrogate pair, which cannot)."""
+    if not isinstance(value, str):
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def check_reference_seconds(seconds, name):
-    if not math.isfinite(seconds) or not MIN_REFERENCE_SECONDS <= seconds <= MAX_REFERENCE_SECONDS:
+    if not math.isfinite(seconds):
+        raise BadRequest(f"The length of the reference clip {name} could not be worked out")
+    if not MIN_REFERENCE_SECONDS <= seconds <= MAX_REFERENCE_SECONDS:
         problem = "too short" if seconds < MIN_REFERENCE_SECONDS else "too long"
         raise BadRequest(f"The reference clip {name} is {problem}: it is {seconds:.1f} seconds, and a reference "
                          f"must be {MIN_REFERENCE_SECONDS:g} to {MAX_REFERENCE_SECONDS:g} seconds")
@@ -211,17 +233,18 @@ def _job_from(request):
     if not isinstance(pieces, list) or not pieces:
         raise BadRequest("synthesize needs pieces: a list with at least one piece of text")
     for index, piece in enumerate(pieces):
-        if not isinstance(piece, str) or not piece.strip():
-            raise BadRequest(f"piece {index} is not text, or is empty")
+        if not is_text(piece) or not piece.strip():
+            raise BadRequest(f"piece {index} is not valid text, or is empty")
     out_dir = request.get("out_dir")
-    if not isinstance(out_dir, str) or not out_dir.strip():
+    if not is_text(out_dir) or not out_dir.strip():
         raise BadRequest("synthesize needs out_dir: the folder the pieces are written to")
     nfe = request.get("nfe")
     if not _whole_number(nfe) or nfe not in STEP_COUNTS:
         raise BadRequest("synthesize needs nfe: 8, 16 or 32")
     speed = request.get("speed", 1.0)
-    if (isinstance(speed, bool) or not isinstance(speed, (int, float)) or not math.isfinite(speed)
-            or not MIN_SPEED <= speed <= MAX_SPEED):
+    # Compared before anything else is done with it: JSON allows whole numbers too large to be a float.
+    if (isinstance(speed, bool) or not isinstance(speed, (int, float))
+            or not MIN_SPEED <= speed <= MAX_SPEED):  # NaN fails the comparison as well
         raise BadRequest(f"speed must be a number from {MIN_SPEED:g} to {MAX_SPEED:g}")
     seed = request.get("seed")
     if seed is None:
@@ -295,14 +318,17 @@ class _Server:
             id = None
         if command == "shutdown":
             return False
-        if command == "cancel":
-            self._cancel(id)
-        elif command == "set_reference":
-            self._accept_reference(request, id)
-        elif command == "synthesize":
-            self._accept_job(request, id)
-        else:
-            self.error("unknown_command", f"Unknown command: {command!r}", id)
+        try:
+            if command == "cancel":
+                self._cancel(id)
+            elif command == "set_reference":
+                self._accept_reference(request, id)
+            elif command == "synthesize":
+                self._accept_job(request, id)
+            else:
+                self.error("unknown_command", f"Unknown command: {repr(command)[:100]}", id)
+        except Exception as exc:  # noqa: BLE001 - no line of input, however odd, may end the worker
+            self.emit(self._error_from(exc, id))
         return True
 
     def _cancel(self, id):
@@ -315,7 +341,7 @@ class _Server:
     def _accept_reference(self, request, id):
         wav, text = request.get("wav"), request.get("text")
         with self._lock:
-            if not isinstance(wav, str) or not wav.strip() or not isinstance(text, str):
+            if not is_text(wav) or not wav.strip() or not is_text(text):
                 self.error("bad_request", "set_reference needs wav (a path) and text (the clip's transcript)", id)
             elif self._active is not None:
                 self.error("bad_request", f"The reference cannot change while {self._active.id} is being "
@@ -359,7 +385,11 @@ class _Server:
                 else:
                     self._run_job(payload)
             except Exception as exc:  # noqa: BLE001 - a bug here must not silently end the thread that does the work
-                self.emit(self._error_from(exc, None))
+                with self._lock:
+                    job = payload if kind == "job" else None
+                    if job is not None and self._active is job:
+                        self._active = None  # or every later request would be refused as "already synthesising"
+                    self.emit(self._error_from(exc, job.id if job is not None else None))
 
     def _set_reference(self, wav, text, id):
         self._reference = None  # a refused clip must not leave the previous voice in force
@@ -466,20 +496,40 @@ def _read_lines(stdin, commands):
         commands.put(None)  # end of input: the backend closed the pipe or went away
 
 
-def serve(stdin, stdout, engine, parent_alive=None, *, poll_seconds=POLL_SECONDS, stop_wait=None) -> int:
+def _watch_parent_while_loading(parent_alive, abandon, loaded, poll_seconds):
+    while not loaded.wait(poll_seconds):
+        if not parent_alive():
+            log("the app is gone, ending while the model was still loading")
+            abandon()
+            return
+
+
+def serve(stdin, stdout, engine, parent_alive=None, *, poll_seconds=POLL_SECONDS, stop_wait=None,
+          abandon=None) -> int:
     """Run the protocol until shutdown, end of input, a broken stdout, or parent_alive() answering False.
 
     `engine` has load() (may return a dict of facts for the `ready` event), set_reference(wav_path, text) -> the
     clip's seconds, and synthesize_piece(text, nfe, speed, seed, should_stop) -> (float audio, sample rate), which
     should raise Stopped as soon as should_stop() is true. `stop_wait(thread)` waits for the engine thread when
-    the worker ends (by default up to STOP_GRACE_SECONDS). Returns the process's exit code."""
+    the worker ends (by default up to STOP_GRACE_SECONDS). Loading cannot be interrupted, so if the parent goes
+    while the model loads, `abandon()` is called from another thread (the process uses it to end itself on the
+    spot). Returns the process's exit code."""
     server = _Server(stdout, engine)
+    loaded = threading.Event()
+    if parent_alive is not None and abandon is not None:
+        threading.Thread(target=_watch_parent_while_loading, args=(parent_alive, abandon, loaded, poll_seconds),
+                         name="tts-load-watch", daemon=True).start()
     try:
         facts = engine.load()
     except Exception as exc:  # noqa: BLE001 - whatever stopped the model loading is the answer to give
         log("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip())
         server.error("internal", f"The voice engine could not start. {type(exc).__name__}: {str(exc)[:1000]}")
         return 1
+    finally:
+        loaded.set()
+    if parent_alive is not None and not parent_alive():
+        log("the app is gone, ending")
+        return 0
     server.emit({"event": "ready", **{k: v for k, v in (facts if isinstance(facts, dict) else {}).items()
                                       if k != "event"}})
     commands = queue.Queue()
@@ -596,7 +646,9 @@ class F5Engine:
             noise = torch.randn(1, 3 * self.SAMPLE_RATE) * self.TARGET_RMS
             self._reference = {"audio": noise.to("cuda"), "text": "This is a warm up. ", "rms": self.TARGET_RMS,
                                "frames": noise.shape[-1] // self.HOP}
-            self.synthesize_piece("A short sentence to warm the engine up.", 8, 1.0, 0, lambda: False)
+            audio, _ = self.synthesize_piece("A short sentence to warm the engine up.", 8, 1.0, 0, lambda: False)
+            if not np.isfinite(audio).all():
+                log("the warm-up's audio was not finite (harmless: its reference is noise)")
         except Exception as exc:  # noqa: BLE001 - a failed warm-up costs the first request some seconds, no more
             if is_out_of_memory(exc):
                 raise
@@ -621,8 +673,7 @@ class F5Engine:
         try:
             audio = torch.from_numpy(data.mean(axis=1)[None].copy())  # mono, shaped 1 x samples
             rms = float(torch.sqrt(torch.mean(torch.square(audio))))
-            if not math.isfinite(rms) or rms < 1e-4:
-                raise BadRequest(f"The reference clip {name} is silent")
+            check_reference_level(rms, name)
             if rms < self.TARGET_RMS:
                 audio = audio * (self.TARGET_RMS / rms)
             if rate != self.SAMPLE_RATE:
@@ -740,36 +791,70 @@ def process_alive(pid):
     return kernel32.WaitForSingleObject(handle, 0) == wait_timeout
 
 
+class _Arguments(argparse.ArgumentParser):
+    def error(self, message):  # argparse would print to stderr and exit; the caller reports it as an event
+        raise BadRequest(message)
+
+
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="Text to speech with F5-TTS, driven by JSON lines on stdin.")
+    parser = _Arguments(description="Text to speech with F5-TTS, driven by JSON lines on stdin.")
     parser.add_argument("--model-dir", required=True, help="the folder tts/setup.sh downloads the models to")
     parser.add_argument("--parent-pid", type=int, default=None, help="end when this process is gone")
     return parser.parse_args(argv)
 
 
-def main(argv=None, engine_factory=F5Engine) -> int:
-    args = parse_args(argv)
-    protocol = take_over_stdout()  # before anything that could import a library
-    apply_environment(os.environ)
-    stdin = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="replace")
-    parent_alive = (lambda: process_alive(args.parent_pid)) if args.parent_pid else None
-    return serve(stdin, protocol, engine_factory(args.model_dir), parent_alive)
-
-
-def run(argv=None, engine_factory=F5Engine):
-    """main(), then end the process at once with its exit code. Never returns.
-
-    Not sys.exit(): the reader thread is still blocked reading stdin, which makes an ordinary interpreter shutdown
-    die with a fatal error (exit code 0xC0000005) when the worker ended for any reason but end of input; and if a
-    piece is still inside the GPU library, or that library's own shutdown hangs, an ordinary exit would leave
-    this process on the GPU. Every protocol line is already flushed when it is written."""
-    code = main(argv, engine_factory)
+def end_process(code):
+    """End this process now, with this exit code. Never returns."""
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.flush()
         except (OSError, ValueError, AttributeError):
             pass
     os._exit(code)
+
+
+def main(argv=None, engine_factory=F5Engine) -> int:
+    protocol = take_over_stdout()  # before anything else, so that whatever goes wrong is told as a JSON line
+    try:
+        args = parse_args(argv)
+    except BadRequest as exc:
+        protocol.write(json.dumps({"event": "error", "id": None, "code": "internal",
+                                   "message": f"The worker was started with a bad argument: {exc}"}) + "\n")
+        protocol.flush()
+        return 2
+    apply_environment(os.environ)
+    stdin = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="replace")
+    parent_alive = None
+    if args.parent_pid:
+        def parent_alive():
+            return process_alive(args.parent_pid)
+        # Asked once before the long load: this opens the parent's handle, so from here on the answer is about
+        # that very process, not about whichever process later gets its number.
+        if not parent_alive():
+            log("the app is gone, ending")
+            return 0
+    return serve(stdin, protocol, engine_factory(args.model_dir), parent_alive, abandon=lambda: end_process(0))
+
+
+def run(argv=None, engine_factory=F5Engine):
+    """main(), then end the process at once with its exit code (1 if anything escaped main). Never returns.
+
+    Never the ordinary interpreter exit: the reader thread is still blocked reading stdin, which makes an ordinary
+    shutdown die with a fatal error (exit code 0xC0000005) when the worker ended for any reason but end of input;
+    and if a piece is still inside the GPU library, or that library's own shutdown hangs, an ordinary exit would
+    leave this process on the GPU. Every protocol line is already flushed when it is written."""
+    code = 1
+    try:
+        code = main(argv, engine_factory)
+    except SystemExit as exc:  # argparse's --help
+        code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+    except BaseException as exc:  # noqa: BLE001 - including KeyboardInterrupt: the exit below is the only way out
+        try:
+            log("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip())
+        except Exception:  # noqa: BLE001
+            pass
+    finally:
+        end_process(code)
 
 
 if __name__ == "__main__":
