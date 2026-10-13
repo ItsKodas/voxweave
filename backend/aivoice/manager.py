@@ -45,14 +45,17 @@ def _check_gain(value: float) -> None:
 
 
 def default_engine_factory(data: Path) -> Callable[[PretrainedVoice], object]:
+    from aivoice.engine_guard import GuardedEngine
     from aivoice.engines.rvc import RvcEngine, make_session
 
     def build(voice: PretrainedVoice):
         # Read here, not at backend start: a bad settings.json must not stop the backend from
         # coming up, it has to surface as a Start error and in the setup check.
         device_id = dml_device_id(data)
-        return RvcEngine(voice.model_path, vec_model_path(data), voice.sample_rate, voice.index_path,
-                         session_factory=partial(make_session, device_id=device_id))
+        engine = RvcEngine(voice.model_path, vec_model_path(data), voice.sample_rate, voice.index_path,
+                           session_factory=partial(make_session, device_id=device_id))
+        # Live mode and text to speech both build their engine here, so neither can play a damaged model's noise.
+        return GuardedEngine(engine)
 
     return build
 
