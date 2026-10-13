@@ -3,7 +3,7 @@ import random
 import pytest
 
 from aivoice import tts_text
-from aivoice.tts_text import MAX_TEXT, clean, split
+from aivoice.tts_text import MAX_TEXT, clean, split, write_out_numbers
 
 
 def speakable(text: str) -> str:
@@ -216,3 +216,173 @@ def test_property_random_text():
                 split(text, max_chars)
             continue
         check_pieces(split(text, max_chars), max_chars, cleaned)
+
+
+# ---- numbers the model misreads (write_out_numbers; split(..., numbers=True) is what the manager uses) ----
+# Measured in the first real run: "1,200" was never read correctly and a phone number was garbled about half the
+# time, at every step count. Years, "3.5", "40" and "70 percent" were read correctly, so they are left alone.
+
+@pytest.mark.parametrize("written, said", [
+    ("1,200", "one thousand two hundred"),
+    ("1,000", "one thousand"),
+    ("1,001", "one thousand one"),
+    ("2,015", "two thousand fifteen"),
+    ("10,000", "ten thousand"),
+    ("12,345", "twelve thousand three hundred forty-five"),
+    ("999,999", "nine hundred ninety-nine thousand nine hundred ninety-nine"),
+    ("1,000,000", "one million"),
+    ("2,500,000", "two million five hundred thousand"),
+    ("1,000,000,000", "one billion"),
+    ("7,000,000,019", "seven billion nineteen"),
+    ("999,999,999,999", "nine hundred ninety-nine billion nine hundred ninety-nine million nine hundred "
+                        "ninety-nine thousand nine hundred ninety-nine"),
+    ("1,200.5", "one thousand two hundred point five"),
+    ("1,000.25", "one thousand point two five"),
+    ("3,400.007", "three thousand four hundred point zero zero seven"),
+])
+def test_integers_with_thousands_separators_are_written_out(written, said):
+    assert write_out_numbers(written) == said
+    assert write_out_numbers(f"It costs {written} dollars.") == f"It costs {said} dollars."
+    assert write_out_numbers(f"About {written}.") == f"About {said}."
+    assert write_out_numbers(f"({written})") == f"({said})"
+
+
+@pytest.mark.parametrize("text", [
+    "1,200,000,000,000",  # a trillion and beyond: not rewritten
+    "0,200", "01,200",  # not a number written that way
+    "1,20", "1,2000", "12,34,567", "1,200,5",  # not groups of three
+    "1.200,50",  # another country's way of writing it
+    "v1,200", "1,200th", "x1,200", "1,200x", "1,200.5.3", "1,200:30", "3/1,200", "1,200/3", "2.1,200",
+    "13, 2026", "1, 200",  # a comma between words
+    "1200", "40", "3.5", "1987", "2004", "70 percent", "1200000", "0.25", "12:30", "5:05 pm",
+    "2026-10-13", "13/10/2026", "13.10.2026", "October 13, 2026", "the 1990s", "100%", "No. 5", "v2.0.1",
+])
+def test_everything_else_with_digits_in_it_is_left_exactly_as_it_is(text):
+    assert write_out_numbers(text) == text
+    sentence = f"It says {text} here."
+    assert write_out_numbers(sentence) == sentence
+
+
+def test_a_currency_or_minus_sign_stays_where_it_is():
+    # only the number is rewritten; how the model reads the sign is not something this decides
+    assert write_out_numbers("$1,200") == "$one thousand two hundred"
+    assert write_out_numbers("-1,200") == "-one thousand two hundred"
+    assert write_out_numbers("1,000-2,000") == "one thousand-two thousand"
+
+
+@pytest.mark.parametrize("written, said", [
+    ("555 0142", "five five five, zero one four two"),  # the one measured
+    ("555-0142", "five five five, zero one four two"),
+    ("9555 0142", "nine five five five, zero one four two"),
+    ("555 123 4567", "five five five, one two three, four five six seven"),
+    ("555-123-4567", "five five five, one two three, four five six seven"),
+    ("555.123.4567", "five five five, one two three, four five six seven"),
+    ("1 800 555 0199", "one, eight zero zero, five five five, zero one nine nine"),
+    ("(555) 123-4567", "five five five, one two three, four five six seven"),
+    ("(02) 9555 0142", "zero two, nine five five five, zero one four two"),
+    ("0412 345 678", "zero four one two, three four five, six seven eight"),
+    ("0412345678", "zero four one two three four five six seven eight"),
+    ("01632 960123", "zero one six three two, nine six zero one two three"),
+    ("01 23 45 67 89", "zero one, two three, four five, six seven, eight nine"),
+    ("+61 412 345 678", "plus six one, four one two, three four five, six seven eight"),
+    ("+61412345678", "plus six one four one two three four five six seven eight"),
+    ("+1 (555) 123-4567", "plus one, five five five, one two three, four five six seven"),
+    ("+44 (0)20 7946 0958", "plus four four, zero, two zero, seven nine four six, zero nine five eight"),
+])
+def test_phone_numbers_are_read_digit_by_digit_with_a_pause_between_groups(written, said):
+    assert write_out_numbers(written) == said
+    assert write_out_numbers(f"Call {written} today.") == f"Call {said} today."
+    assert write_out_numbers(f"Call {written}.") == f"Call {said}."
+    assert write_out_numbers(f"(call {written})") == f"(call {said})"
+    assert "oh" not in said.replace(",", "").split() and "o" not in said.replace(",", "").split()
+
+
+@pytest.mark.parametrize("text", [
+    # plain integers, however long: only a leading zero or plus sign makes an unbroken run a phone number
+    "5550142", "1500000", "12345678901",
+    # fewer than seven digits, or more than fifteen
+    "555 014", "12 34 56", "1234 5678 9012 3456", "+1234567890123456",
+    # dates
+    "2026-10-13", "13-10-2026", "10-13-2026", "01-02-2026", "2026 10 13", "13 10 2026", "13.10.2026",
+    "2026.10.13",
+    # two years, a range of years, ranges and lists of round quantities
+    "1987 2004", "1987-2004", "1000-2000", "500-1000", "3000-5000", "250 1000",
+    # decimals, versions, addresses of machines
+    "555.0142", "1234.5678", "0.1234567", "3.14159265", "1.2.3.4567", "192.168.1.100", "10.0.0.1234",
+    # groups that are not a phone number's
+    "100 200 300", "1 200 000", "12 345 678", "555 0142 12", "12345 67890", "55 501 42", "1 2 3 4 5 6 7",
+    # stuck to something else
+    "x5550142", "0412345678x", "#0412345678", "$555 0142", "555 0142%", "12:30 555:0142", "0412/345/678",
+    "555 0142.5", "A-555 0142", "555) 0142 1234", "(555 0142) 1234",
+])
+def test_digits_that_are_not_clearly_a_phone_number_are_left_exactly_as_they_are(text):
+    assert write_out_numbers(text) == text
+    sentence = f"It says {text} here."
+    assert write_out_numbers(sentence) == sentence
+
+
+def test_a_phone_number_in_brackets_is_read_and_the_brackets_stay():
+    assert write_out_numbers("(555 0142)") == "(five five five, zero one four two)"
+    assert write_out_numbers("My number (0412 345 678) is new.") == (
+        "My number (zero four one two, three four five, six seven eight) is new.")
+
+
+def test_a_phone_number_next_to_a_time_is_still_found():
+    assert write_out_numbers("At 12:30 call 555 0142, or 1,200 times.") == (
+        "At 12:30 call five five five, zero one four two, or one thousand two hundred times.")
+
+
+def test_text_without_numbers_is_unchanged_byte_for_byte():
+    rng = random.Random(99)
+    alphabet = ["word", "a", "Hello", "e.g.", "Dr.", "é" * 5, "日本", "\U0001F600", ".", "!", "?", "...", ",", ";",
+                ":", '"', "(", ")", "-", "+", " ", "  ", "\n", "\n\n", "\t", "$", "%", "/"]
+    for _ in range(300):
+        text = "".join(rng.choice(alphabet) for _ in range(rng.randint(1, 80)))
+        assert write_out_numbers(text) == text
+        assert write_out_numbers(text).encode("utf-8") == text.encode("utf-8")
+    assert write_out_numbers("") == ""
+
+
+def test_the_numbers_that_were_read_correctly_are_unchanged_byte_for_byte():
+    text = "In 1987 it was 3.5 metres, 40 wide, 70 percent full, at 12:30 on 13/10/2026. Version 2.0.1, 1200 units."
+    assert write_out_numbers(text) == text
+
+
+def test_split_writes_numbers_out_only_when_asked():
+    text = "It costs 1,200 dollars. Call 555 0142."
+    assert split(text, 200) == ["It costs 1,200 dollars.", "Call 555 0142."]
+    assert split(text, 200, numbers=True) == ["It costs one thousand two hundred dollars.",
+                                              "Call five five five, zero one four two."]
+
+
+def test_the_length_limit_applies_to_the_text_as_typed_and_the_pieces_still_fit_the_byte_budget():
+    typed = ("999,999,999,999 " * 313)[:MAX_TEXT].strip()  # under 5000 characters that become about 38,000
+    assert len(typed) <= MAX_TEXT
+    for limit in (20, 80, 151):
+        pieces = split(typed, limit, numbers=True)
+        assert sum(len(p) for p in pieces) > 6 * MAX_TEXT
+        for piece in pieces:
+            assert piece == piece.strip() and piece
+            assert len(piece.encode("utf-8")) <= limit, piece
+            assert any(c.isalnum() for c in piece)
+        said = "".join(c for c in "".join(pieces) if c.isalnum())
+        assert said == "".join(c for c in write_out_numbers(typed) if c.isalnum())
+    with pytest.raises(ValueError, match="too long"):
+        split("1,200 " * 1000, 80, numbers=True)  # 5999 characters as typed: refused, whatever they become
+
+
+def test_property_random_text_with_numbers_written_out():
+    rng = random.Random(4321)
+    alphabet = ["word", "a", "Hello", "3.5", "1,000.25", "1,200", "555 0142", "+61 412 345 678", "e.g.", "Dr.",
+                "x" * 40, "é" * 15, "日本", "\U0001F600", ".", "!", "?", "...", ",", ";", ":", '"', "(", ")", "-", " ",
+                "  ", "\n", "\n\n", "\t"]
+    for _ in range(300):
+        text = "".join(rng.choice(alphabet) + rng.choice(["", " ", " "]) for _ in range(rng.randint(1, 60)))
+        max_chars = rng.choice([20, 21, 25, 40, 80, 178])
+        try:
+            cleaned = clean(text)
+        except ValueError:
+            with pytest.raises(ValueError):
+                split(text, max_chars, numbers=True)
+            continue
+        check_pieces(split(text, max_chars, numbers=True), max_chars, write_out_numbers(cleaned))
