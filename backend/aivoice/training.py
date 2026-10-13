@@ -69,7 +69,7 @@ NO_RESUME = "There is no interrupted training run to resume for this voice"
 # What the installed app answers instead of checking for a training environment it cannot have.
 NOT_IN_INSTALLED_APP = ("Training is not available in the installed app yet. It needs the source checkout of "
                         "Voxweave on a PC with an AMD GPU. A voice trained there can be brought to this PC as a "
-                        "voice pack (a .voxweave file).")
+                        "voice pack: export it there, then drop its .voxweave file on the Voices tab here.")
 CANCELLED_BEFORE_START = "Training was cancelled before it started"
 # Whether a stopped run can be resumed is the worker's call ("resumable" in its final line). This is its message
 # for a resume that can never work, used only when a final line carries no such field. A run refused because the

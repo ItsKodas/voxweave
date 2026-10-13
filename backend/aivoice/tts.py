@@ -91,8 +91,8 @@ JOB_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")  # the worker's rule: the id become
 ALREADY = "Already speaking. Stop it first."
 # What the installed app answers instead of checking for a text-to-speech environment it cannot have.
 NOT_IN_INSTALLED_APP = ("Text to speech is not available in the installed app yet. It needs the source checkout "
-                        "of Voxweave on a PC with an AMD GPU. Live mode works here with your voices, and a voice "
-                        "trained there can be brought to this PC as a voice pack (a .voxweave file).")
+                        "of Voxweave on a PC with an AMD GPU. Live mode works here, and a voice trained there "
+                        "can be brought to this PC as a voice pack: drop its .voxweave file on the Voices tab.")
 NOTHING_TO_SAY = "There is nothing to say in that text"
 NO_MODEL = ("Best needs this voice's trained model, and it has none. Train the voice first, or choose Fast or "
             "Balanced.")

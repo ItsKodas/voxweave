@@ -29,8 +29,8 @@ def _fixes(data: Path) -> dict:
         again = "Quit Voxweave from the tray menu and start Voxweave again: it repairs its own files."
         return {"directml": f"DirectML is not available. {again}",
                 "base_model": f"Base speech model is missing. {again}",
-                "voice": "No voice models yet. Bring in a trained voice as a voice pack (a .voxweave file). "
-                         "Training is not available in the installed app yet."}
+                "voice": "No voice models yet. Bring in a trained voice as a voice pack: drop its .voxweave "
+                         "file on the Voices tab. Training is not available in the installed app yet."}
     return {"directml": "DirectML is not available. Reinstall onnxruntime-directml in the backend environment.",
             "base_model": "Base speech model is missing. Download vec-768-layer-12.onnx into "
                           f"{vec_model_path(data).parent}.",
