@@ -282,3 +282,117 @@ def test_training_routes_exist_without_a_studio(tmp_path):
     assert client.get("/training/status").status_code == 200
     assert client.post("/training/start", json={"voice_id": voice}).status_code == 200
     assert client.post("/live/start", json=START).status_code == 400
+
+
+# Final review, F1 and F5: nothing that holds the audio lock or the voices lock ever performs a kill
+
+
+class BlockedKill:
+    """A training job whose kill is due, and whose kill would hang until released."""
+
+    def __init__(self, s):
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        assert s.start_training().status_code == 200
+        s.rig.manager.cancel()
+        s.rig.clock += 90  # the worker ignored the cancel: whoever services the job next has to kill it
+        self.handle = s.rig.handles[0]
+        self.handle.on_kill = self.hang
+
+    def hang(self):
+        self.entered.set()
+        assert self.release.wait(10)
+
+
+def test_live_start_recording_and_delete_never_wait_for_a_kill_nor_start_one(s):
+    blocked = BlockedKill(s)
+    other = s.rig.voice("Other")
+    record = {"voice_id": s.voice, "input_device": 1, "prompt": 0}
+    answers = {}
+
+    def ask():
+        answers["live"] = s.client.post("/live/start", json=START)
+        answers["record"] = s.client.post("/library/record/start", json=record)
+        answers["delete"] = s.client.delete(f"/library/voices/{s.voice}")
+        answers["other"] = s.client.delete(f"/library/voices/{other}")
+        answers["refresh"] = s.client.post("/devices/refresh")
+
+    thread = threading.Thread(target=ask, daemon=True)
+    thread.start()
+    try:
+        thread.join(5)
+        assert not thread.is_alive(), "a route is waiting for the kill"
+    finally:
+        blocked.release.set()
+        thread.join(10)
+    assert blocked.handle.kills == 0 and not blocked.entered.is_set()
+    assert (answers["live"].status_code, answers["live"].json()["detail"]) == (400, LIVE_REFUSED)
+    assert (answers["record"].status_code, answers["record"].json()["detail"]) == (400, RECORD_REFUSED)
+    assert answers["delete"].json()["detail"] == "Stop training before deleting this voice"
+    assert answers["other"].json() == {"deleted": True} and answers["refresh"].status_code == 200
+    assert (s.data / "voices" / s.voice).is_dir() and s.live_streams.streams == [] and s.mic.streams == []
+    # The once-a-second status poll is where the kill happens.
+    assert s.client.get("/training/status").json()["state"] == "cancelled" and blocked.handle.kills == 1
+
+
+def test_the_routes_answer_while_the_status_poll_is_busy_killing(s):
+    blocked = BlockedKill(s)
+    poll = threading.Thread(target=lambda: s.client.get("/training/status"), daemon=True)
+    poll.start()
+    try:
+        assert blocked.entered.wait(10)
+        res = s.client.post("/live/start", json=START)
+        assert (res.status_code, res.json()["detail"]) == (400, LIVE_REFUSED)
+        res = s.client.delete(f"/library/voices/{s.voice}")
+        assert res.json()["detail"] == "Stop training before deleting this voice"
+        assert s.client.delete(f"/library/voices/{s.rig.voice('Other')}").json() == {"deleted": True}
+    finally:
+        blocked.release.set()
+        poll.join(10)
+    assert blocked.handle.kills == 1
+
+
+def test_delete_of_the_training_voice_is_refused_even_when_status_cannot_be_worked_out(s):
+    s.start_training()
+
+    def broken():
+        raise RuntimeError("status is broken")
+
+    s.rig.manager._service = broken
+    assert s.rig.manager.status(s.voice)["state"] == "idle"  # status swallows the error: it must not be the guard
+    res = s.client.delete(f"/library/voices/{s.voice}")
+    assert res.status_code == 400 and res.json()["detail"] == "Stop training before deleting this voice"
+    assert (s.data / "voices" / s.voice).is_dir()
+
+
+# Final review, F8: the full environment check starts a GPU process, so it never runs beside live mode or a job
+
+
+def test_environment_is_not_probed_while_live_mode_runs(s):
+    assert s.client.post("/live/start", json=START).status_code == 200
+    report = s.client.get("/training/environment").json()
+    assert report == {"ok": False, "ready": False, "unknown": True, "checks": [], "checked_while_live": True}
+    assert s.client.get("/training/environment?refresh=true").json()["unknown"] is True
+    assert s.rig.verify_calls == []
+    res = s.start_training()  # and a start is refused before its own check would run
+    assert res.status_code == 400 and res.json()["detail"] == "Stop live mode before training"
+    assert s.rig.verify_calls == [] and s.rig.launches == []
+
+    s.client.post("/live/stop")
+    assert s.client.get("/training/environment").json() == {**PASS, "ready": True}
+    assert s.rig.verify_calls == [False]
+    assert s.client.post("/live/start", json=START).status_code == 200
+    s.rig.report = FAIL
+    report = s.client.get("/training/environment?refresh=true").json()  # the last known report, and it is kept
+    assert report == {**PASS, "ready": True, "checked_while_live": True}
+    assert s.rig.verify_calls == [False]
+    s.client.post("/live/stop")
+    assert s.client.get("/training/environment").json()["ready"] is True and s.rig.verify_calls == [False]
+
+
+def test_a_failing_report_is_what_is_known_while_live_mode_runs(s):
+    s.rig.report = FAIL
+    assert s.client.get("/training/environment").json()["ready"] is False
+    assert s.client.post("/live/start", json=START).status_code == 200
+    report = s.client.get("/training/environment").json()
+    assert report == {**FAIL, "ready": False, "checked_while_live": True} and s.rig.verify_calls == [False]

@@ -96,8 +96,9 @@ def library_router(studio: Studio, library: Library, importer: Importer, live_ru
             job = importer.status()
             if job["active"] and job["voice_id"] == voice_id:
                 raise ValueError("Wait for the import to finish before deleting this voice")
-            if training is not None and training.status(voice_id)["state"] in ("running", "cancelling"):
-                raise ValueError("Stop training before deleting this voice")
+            if training is not None:
+                # Reads only: neither this nor forget below ever ends a process while the voices lock is held.
+                training.require_not_training(voice_id)
             library.delete(voice_id)
             if training is not None:
                 try:
@@ -132,7 +133,7 @@ def library_router(studio: Studio, library: Library, importer: Importer, live_ru
         with exclusive:
             if live_running():
                 raise ValueError("Stop live mode before recording")
-            if training is not None and training.running:
+            if training is not None and training.is_active():  # a read only: never a kill under the audio lock
                 raise ValueError("Training is running. Wait for it to finish or cancel it before recording")
             with voices_lock:  # so a delete cannot check "not recording" and then lose the voice to a new take
                 studio.start_recording(body.voice_id, body.input_device, body.prompt)

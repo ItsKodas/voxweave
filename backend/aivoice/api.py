@@ -73,8 +73,9 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
     async def lifespan(_: FastAPI):
         yield
         if training is not None:
-            # Stops a running worker so a normal exit leaves nothing for the watchdog. Not waited for long: the
-            # worker also ends itself once this process is gone.
+            # Stops a running worker so a normal exit leaves nothing for the watchdog: it is asked to stop, given
+            # 5 seconds to reach a safe point, then killed. Not waited for longer than SHUTDOWN_WAIT: the worker
+            # also ends itself once this process is gone.
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(asyncio.shield(asyncio.to_thread(training.shutdown)), SHUTDOWN_WAIT)
 
@@ -148,7 +149,7 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
         with audio_state:
             if studio is not None and studio.recording:
                 raise ValueError("Stop recording before starting live mode")
-            if training is not None and training.running:
+            if training is not None and training.is_active():  # a read only: never a kill under the audio lock
                 raise ValueError("Training is running. Wait for it to finish or cancel it before starting live mode")
             manager.start(StartConfig(**body.model_dump()))
         return manager.stats()

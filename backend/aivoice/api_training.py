@@ -30,17 +30,24 @@ def training_router(training: TrainingManager, studio: Studio | None, live_runni
 
     @router.get("/environment")
     def environment(refresh: bool = False) -> dict:
-        if training.running:  # a GPU probe beside a training run could disturb it: report what is known
-            return {**training.environment(False), "checked_while_training": True}
+        # The full check starts a GPU process. Beside a training run or live mode it could disturb them, so
+        # then the answer is what is already known (the manager itself also never probes beside a job).
+        if training.is_active():
+            return {**training.environment(probe=False), "checked_while_training": True}
+        if live_running():
+            return {**training.environment(probe=False), "checked_while_live": True}
         return training.environment(refresh)
 
     @router.post("/start")
     def start(body: TrainBody) -> dict:
         if not training.running:
+            if live_running():  # asked again under the audio lock below; here it keeps the check off the GPU
+                raise ValueError("Stop live mode before training")
             # The check is a slow subprocess: run it before any lock is taken. A passing report is remembered, so
             # the manager's own check inside start is then the quick one. (While training runs, start is refused.)
             report = training.environment()
-            if not report["ok"]:
+            # "unknown" means another start got in first: the manager's own refusal below says so.
+            if not report["ok"] and not report.get("unknown"):
                 failing = "; ".join(c["message"] for c in report["checks"] if not c["ok"])
                 raise ValueError(f"Training is not set up: {failing}")
         with exclusive:

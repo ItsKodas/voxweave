@@ -8,6 +8,10 @@ A job is only ever called stopped once its processes are known to be gone. Every
 list of the worker's processes taken beforehand, runs outside the manager's lock, and is tried again later if
 anything survived. That also holds after a normal exit: the job is settled only when nothing on the list is alive.
 
+Kills are performed by whoever brings the job up to date: status (the screen's once-a-second poll), running,
+start, cancel and shutdown. is_active, active_voice, require_not_training and forget never do, so they are
+what the routes call while they hold the audio lock or the voices lock.
+
 How long a kill can hold up the one caller that performs it (everyone else returns at once): taskkill has
 TASKKILL_TIMEOUT seconds, the processes then get TASKKILL_GRACE seconds to disappear, the stragglers are killed
 directly and given KILL_WAIT seconds, and the manager's own list is swept with another KILL_WAIT: at worst
@@ -35,8 +39,15 @@ BATCH_SIZES = (4, 8, 16)
 DEFAULT_EPOCHS, DEFAULT_BATCH_SIZE = 200, 8
 SAVE_EVERY = 5
 STAGES = 7
-CANCEL_TIMEOUT = 90.0  # the worker gives the trainer 60 seconds to reach a safe moment; after this we stop waiting
+# After a cancel the worker lets the trainer reach the end of its epoch: for 60 seconds, or longer when the epochs
+# are long (it says how long in its "grace_seconds" progress field, never more than 15 minutes). The manager
+# stops waiting, and kills, CANCEL_MARGIN seconds after that.
+CANCEL_TIMEOUT = 90.0
+CANCEL_MARGIN = 30.0
+MAX_WORKER_GRACE = 900.0
 EXIT_GRACE = 30.0  # how long a worker may linger after writing its final progress line
+SHUTDOWN_GRACE = 5.0  # how long the backend's own exit waits for the worker to stop at a safe point by itself
+SHUTDOWN_POLL = 0.1
 KILL_RETRY = 5.0  # a kill that left something running is tried again no sooner than this
 TREE_REFRESH = 10.0  # how often the list of the worker's processes is renewed while it runs
 TASKKILL_TIMEOUT = 10  # seconds taskkill itself may take
@@ -44,6 +55,8 @@ TASKKILL_GRACE = 3.0  # seconds given to the processes to disappear after a succ
 KILL_WAIT = 5.0  # and after killing the stragglers one by one
 TAIL_BYTES = 65536
 CHECKPOINTS = ("G_2333333.pth", "D_2333333.pth")  # RVC's fixed names with -l 1; the worker keeps a .bak pair
+STAGE_RECORD = "stages.json"  # the worker's note of the stages it finished, in the experiment folder
+MIN_MODEL_BYTES = 1024 * 1024  # an exported model.onnx is far larger; anything up to this is not a model
 # The worker's stdout and stderr go here. worker.log is written by the worker alone: two writers corrupt it.
 OUTPUT_LOG = "worker.out.log"
 
@@ -54,7 +67,7 @@ STOPPED_UNEXPECTEDLY = ("The training process stopped unexpectedly. "
                         "See training/worker.log and training/worker.out.log.")
 NO_RESUME = "There is no interrupted training run to resume for this voice"
 CANCELLED_BEFORE_START = "Training was cancelled before it started"
-# Whether a failed run is worth resuming is the worker's call ("resumable" in its final line). These are its
+# Whether a stopped run can be resumed is the worker's call ("resumable" in its final line). These are its
 # messages for a resume that cannot work, used only when a final line carries no such field.
 NEVER_RESUMABLE = ("The clips changed since this training run started", "The saved training state could not be read")
 
@@ -242,7 +255,7 @@ def _clean_report(raw) -> dict:
 def _idle(voice_id=None) -> dict:
     return {"state": "idle", "voice_id": voice_id, "stage": None, "stage_index": None, "stages": STAGES,
             "epoch": None, "epochs": None, "percent": 0.0, "eta_seconds": None, "message": None, "error": None,
-            "started": None, "finished": None, "can_resume": False}
+            "started": None, "finished": None, "can_resume": False, "has_checkpoint": False}
 
 
 def _no_progress() -> dict:
@@ -263,7 +276,9 @@ class _Job:
         self.final: dict | None = None  # the worker's last line of this run, once seen
         self.final_at: float | None = None
         self.cancel_at: float | None = None
+        self.cancel_timeout = CANCEL_TIMEOUT  # longer once the worker has said how long it will wait for an epoch
         self.forced: tuple[str, str | None] | None = None  # must be stopped now, and how the job then ends
+        self.interrupting = False  # the backend is shutting down and has asked the worker to stop
         self.tree: list = []  # the worker's processes as last seen, so none is lost if the worker dies first
         self.tree_at: float | None = None
         self.killing = False  # a kill is in progress outside the lock; nobody else touches the job meanwhile
@@ -295,6 +310,9 @@ class _Job:
             p["eta_seconds"] = line["eta_seconds"]
         if isinstance(line.get("message"), str):
             p["message"] = line["message"]
+        if _number(line.get("grace_seconds")):
+            grace = min(float(line["grace_seconds"]), MAX_WORKER_GRACE)
+            self.cancel_timeout = max(CANCEL_TIMEOUT, grace + CANCEL_MARGIN)
         if line.get("done") is True:
             self.final = line
 
@@ -336,10 +354,11 @@ class _Job:
 
 class TrainingManager:
     def __init__(self, data: Path, library: Library, trainer_root: Path, launch=None, verify=None, pid_alive=None,
-                 now=time.time, is_worker=None, kill_pid=None, processes=None):
+                 now=time.time, is_worker=None, kill_pid=None, processes=None, sleep=time.sleep):
         """launch(argv, log_path) -> handle with pid, poll() and kill_tree(); verify(fast) -> the verify.py report;
         pid_alive(pid) -> bool; is_worker(pid, experiment) -> whether that pid really is a worker for that
-        experiment; kill_pid(pid) ends a process tree and raises if it could not; processes is a ProcessTools."""
+        experiment; kill_pid(pid) ends a process tree and raises if it could not; processes is a ProcessTools;
+        sleep(seconds) is how shutdown waits for the worker."""
         self._voices = Path(data) / "voices"
         self._library = library
         self._trainer = Path(trainer_root)
@@ -351,6 +370,7 @@ class TrainingManager:
         self._is_worker = is_worker or (lambda pid, experiment: _is_worker_process(pid, experiment, self._worker))
         self._kill_pid = kill_pid or (lambda pid: _kill_tree(pid, self._tools))
         self._now = now
+        self._sleep = sleep
         self._lock = threading.RLock()  # guards everything below; never held while a process is being killed
         self._jobs: dict[str, _Job] = {}  # the latest job of each voice
         self._active: str | None = None  # the voice whose worker is running
@@ -358,6 +378,7 @@ class TrainingManager:
         self._start_cancelled = False  # cancel or shutdown arrived during that wait
         self._forgetting: dict[str, int] = {}  # voices whose training files are being deleted, per running call
         self._passed: dict | None = None  # the last full environment report, kept only if it passed
+        self._last_report: dict | None = None  # the last full or failing report, for when no check may run
         self.status_failures = 0  # errors status() swallowed; anything but 0 is a bug worth a look at the log
         self._recover()
 
@@ -392,16 +413,26 @@ class TrainingManager:
             log.exception("The training environment check raised")
             return _failed_report(f"The training environment check could not be run: {_reason(exc)}")
 
-    def environment(self, refresh: bool = False) -> dict:
-        """The verify report plus "ready". Only a passing report is remembered, so a fixed setup shows at once."""
+    def environment(self, refresh: bool = False, probe: bool = True) -> dict:
+        """The verify report plus "ready". Only a passing report is remembered, so a fixed setup shows at once.
+
+        The full check starts a GPU process, so it never runs while a job is active or starting, nor when the
+        caller says not to probe (live mode is running). The answer is then the last report there is, unchanged
+        by refresh, or one marked "unknown" when this backend has not checked yet."""
         with self._lock:
-            if refresh:
+            quiet = not probe or self._active is not None or self._starting is not None
+            if refresh and not quiet:
                 self._passed = None
             report = self._passed
+            if report is None and quiet:
+                report = self._last_report
         if report is None:
+            if quiet:
+                return {"ok": False, "ready": False, "unknown": True, "checks": []}
             report = self._check(fast=False)  # several seconds; never under the lock
-            if report["ok"]:
-                with self._lock:
+            with self._lock:
+                self._last_report = report
+                if report["ok"]:
                     self._passed = report
         return {**report, "ready": report["ok"]}
 
@@ -413,8 +444,9 @@ class TrainingManager:
         with self._lock:
             if not report["ok"]:
                 self._passed = None
+                self._last_report = report
             elif not passed:
-                self._passed = report
+                self._passed = self._last_report = report
         if not report["ok"]:
             failing = "; ".join(c["message"] for c in report["checks"] if not c["ok"])
             raise TrainingError(f"Training is not set up: {failing}")
@@ -446,6 +478,33 @@ class TrainingManager:
                 self._recover_voice(folder)
             except Exception:  # noqa: BLE001 - one voice's damaged files must not stop the backend starting
                 log.exception("Could not read the training record in %s", folder.name)
+            try:  # after a leftover worker of this voice was stopped, so no swap is still in progress
+                self._repair_model_swap(folder)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Could not put back the trained model of %s parked in models/rvc.old: %s",
+                            folder.name, _reason(exc))
+
+    @staticmethod
+    def _repair_model_swap(folder: Path) -> None:
+        """The worker replaces a trained model with two renames (rvc -> rvc.old, rvc.new -> rvc). Killed between
+        them, it leaves the model in use parked as rvc.old and the voice without a model until the next training
+        run. If the parked folder is a whole model it is renamed back. Nothing else is ever touched."""
+        models = folder / "models"
+        live, old = models / "rvc", models / "rvc.old"
+        if not ID_RE.match(folder.name) or not old.is_dir() or os.path.lexists(live):
+            return
+        try:
+            whole = (old / "model.onnx").stat().st_size > MIN_MODEL_BYTES
+            whole = whole and isinstance(json.loads((old / "voice.json").read_text(encoding="utf-8")), dict)
+        except (OSError, ValueError):
+            whole = False
+        if not whole:
+            log.warning("%s was left by an interrupted training export but is not a complete model; it was left "
+                        "alone, and the voice has no trained model until it is trained again.", old)
+            return
+        os.rename(old, live)
+        log.warning("%s was left by an interrupted training export; it was put back as the voice's trained model.",
+                    old)
 
     def _recover_voice(self, folder: Path) -> None:
         voice_id = folder.name
@@ -511,18 +570,24 @@ class TrainingManager:
         except OSError:
             return False
 
-    def _resume_possible(self, job: _Job | None) -> bool:
-        """The hard rule, which gates start(resume=True): a stopped run with a checkpoint."""
-        return job is not None and job.record["state"] in RESUMABLE and self._has_checkpoint(job.voice_id)
+    def _has_stage_record(self, voice_id: str) -> bool:
+        try:
+            return (self._experiment_dir(voice_id) / STAGE_RECORD).is_file()
+        except OSError:
+            return False
 
     def _can_resume(self, job: _Job | None) -> bool:
-        """What the screen offers: the hard rule, unless the worker said this run is not worth resuming as it is."""
-        if not self._resume_possible(job):
+        """One rule for what the screen offers and for what start(resume=True) accepts: a stopped run whose
+        experiment folder still holds what the worker resumes from (its stage record, written once the clips are
+        sliced, or a checkpoint pair), unless the worker said this outcome cannot be resumed. The worker still
+        makes its own check that the clips are unchanged. Before any checkpoint a resume keeps the prepared
+        audio and trains from the first epoch."""
+        if job is None or job.record["state"] not in RESUMABLE:
             return False
         hint = job.record.get("resumable")
-        if hint is not None:
-            return hint
-        return not (job.record["error"] or "").startswith(NEVER_RESUMABLE)
+        if hint is False or (hint is None and (job.record["error"] or "").startswith(NEVER_RESUMABLE)):
+            return False
+        return self._has_stage_record(job.voice_id) or self._has_checkpoint(job.voice_id)
 
     def _settle(self, job: _Job, state: str, error: str | None = None) -> None:
         hint = job.final.get("resumable") if job.final is not None else None
@@ -543,13 +608,15 @@ class TrainingManager:
             if final.get("ok") is True:
                 return "done", None
             if final.get("cancelled") is True:
-                return "cancelled", None
+                return ("interrupted" if job.interrupting else "cancelled"), None
             error = final.get("error")
             if not isinstance(error, str) or not error.strip():
                 error = "Training failed. See training/worker.log."
             return "failed", error
         if job.forced is not None:
             return job.forced
+        if job.interrupting:
+            return "interrupted", None  # the backend was closing, asked it to stop, and it is gone
         if job.cancel_at is not None:
             return "cancelled", None  # it was asked to stop and it is gone
         return "failed", STOPPED_UNEXPECTEDLY
@@ -585,7 +652,7 @@ class TrainingManager:
                 job.final_at = now
             overdue = (job.forced is not None or job.retry_at is not None
                        or (job.final_at is not None and now - job.final_at >= EXIT_GRACE)
-                       or (job.cancel_at is not None and now - job.cancel_at >= CANCEL_TIMEOUT))
+                       or (job.cancel_at is not None and now - job.cancel_at >= job.cancel_timeout))
             if not overdue:
                 return None
         else:
@@ -636,7 +703,7 @@ class TrainingManager:
         finally:  # also on KeyboardInterrupt or SystemExit: the job must never be left marked as being killed
             with self._lock:
                 job.killing = False
-                if self._active == job.voice_id and self._jobs.get(job.voice_id) is job:
+                if self._owns(job):
                     if verified:
                         self._settle(job, *self._result(job))
                     else:
@@ -671,17 +738,38 @@ class TrainingManager:
     def _snapshot(self, job: _Job | None, voice_id=None) -> dict:
         if job is None:
             return _idle(voice_id if isinstance(voice_id, str) else None)
+        can_resume = self._can_resume(job)
         return {"state": job.record["state"], "voice_id": job.voice_id, **job.progress,
                 "epochs": job.record["epochs"], "error": job.record["error"], "started": job.record["started"],
-                "finished": job.record["finished"], "can_resume": self._can_resume(job)}
+                "finished": job.record["finished"], "can_resume": can_resume,
+                "has_checkpoint": can_resume and self._has_checkpoint(job.voice_id)}
 
     # The public surface
 
-    @property
-    def running(self) -> bool:
-        self._service()
+    # Three reads that only take the manager's own lock and never look at, or end, a process. They are what a
+    # route may call while it holds the audio lock or the voices lock; a job whose worker has just ended still
+    # counts as active here until the next status call has settled it.
+
+    def is_active(self) -> bool:
+        """Whether a job is running, cancelling or starting."""
         with self._lock:
             return self._active is not None or self._starting is not None
+
+    def active_voice(self) -> str | None:
+        with self._lock:
+            return self._active if self._active is not None else self._starting
+
+    def require_not_training(self, voice_id: str) -> None:
+        with self._lock:
+            if voice_id is not None and voice_id in (self._active, self._starting):
+                raise TrainingError("Stop training before deleting this voice")
+
+    @property
+    def running(self) -> bool:
+        """Like is_active, but first brings the job up to date, which can mean ending its processes (seconds):
+        never call it while holding a lock other callers wait for."""
+        self._service()
+        return self.is_active()
 
     def status(self, voice_id: str | None = None) -> dict:
         """The latest job of that voice, or without one the running job, else the most recently finished one.
@@ -725,7 +813,7 @@ class TrainingManager:
             if voice_id in self._forgetting:
                 raise TrainingError("This voice's training files are being removed. Try again in a moment.")
             if resume:
-                if not self._resume_possible(previous):
+                if not self._can_resume(previous):
                     raise TrainingError(NO_RESUME)
                 if kept.get("batch_size") not in (None, batch_size):
                     raise TrainingError(f"A resumed run keeps its batch size ({kept['batch_size']}). "
@@ -795,8 +883,9 @@ class TrainingManager:
             raise TrainingError(error) from exc
 
     def cancel(self) -> dict:
-        """Asks the worker to stop at the next safe moment. If it has not exited 90 seconds later it is killed
-        (on a later status call). A start that is still checking the environment is called off instead."""
+        """Asks the worker to stop at the next safe moment. If it has not exited 90 seconds later (or 30 seconds
+        after the longer wait it announced for a long epoch) it is killed, on a later status call. A start that
+        is still checking the environment is called off instead."""
         self._service()
         with self._lock:
             job = self._jobs.get(self._active) if self._active is not None else None
@@ -809,30 +898,59 @@ class TrainingManager:
                 job.cancel_at = self._now()
                 try:
                     (job.dir / "cancel").touch()
-                except OSError as exc:  # the worker cannot be told; the 90 second kill still applies
+                except OSError as exc:  # the worker cannot be told; the kill after the timeout still applies
                     log.warning("Could not create the cancel file: %s", _reason(exc))
                 job.record["state"] = "cancelling"
                 self._save(job)
             return self._snapshot(job)
 
     def shutdown(self) -> None:
-        """For the backend's own exit: stops the worker now and leaves the job resumable. If the worker cannot
-        be stopped the job stays recorded as running, and the next backend deals with it when it starts."""
+        """For the backend's own exit: stops the worker and leaves the job resumable. The worker is first asked
+        to stop (the cancel file) and given SHUTDOWN_GRACE seconds to end at a safe point by itself; whatever
+        is still running after that is killed as a tree. If the worker cannot be stopped the job stays recorded
+        as running, and the next backend deals with it when it starts."""
         with self._lock:
             if self._starting is not None:
                 self._start_cancelled = True
             job = self._jobs.get(self._active) if self._active is not None else None
             if job is not None:
-                job.forced = ("interrupted", None)
-                job.retry_at = None
+                job.interrupting = True  # however the worker words its ending, this run was interrupted
+                try:
+                    (job.dir / "cancel").touch()
+                except OSError as exc:  # it cannot be asked; the kill below still applies
+                    log.warning("Could not create the cancel file: %s", _reason(exc))
+        if job is not None:
+            self._wait_for_exit(job)
+            with self._lock:
+                if self._owns(job):
+                    job.forced = ("interrupted", None)
+                    job.retry_at = None
         self._service()
+
+    def _owns(self, job: _Job) -> bool:
+        return self._active == job.voice_id and self._jobs.get(job.voice_id) is job
+
+    def _wait_for_exit(self, job: _Job) -> None:
+        """Waits, without the lock and for at most SHUTDOWN_GRACE seconds, until the worker has ended or the job
+        has been settled by someone else. Status calls made meanwhile do not kill it: nothing is forced yet."""
+        handle = job.handle
+        for _ in range(round(SHUTDOWN_GRACE / SHUTDOWN_POLL)):
+            with self._lock:
+                if not self._owns(job) or job.exited:
+                    return
+            try:
+                if handle is None or handle.poll() is not None:
+                    return
+            except Exception:  # noqa: BLE001 - it cannot be watched, so there is nothing to wait for
+                return
+            self._sleep(SHUTDOWN_POLL)
 
     def forget(self, voice_id: str) -> None:
         """Removes what training left under trainer/ for a voice (checkpoints and the small model). These are
-        derived files; nothing in the voice's own folder is touched."""
+        derived files; nothing in the voice's own folder is touched. Never ends a process (the delete route
+        calls this under the voices lock): a job that has ended but is not settled yet still counts as training."""
         if not isinstance(voice_id, str) or not ID_RE.match(voice_id):
             raise TrainingError("Unknown voice")
-        self._service()
         with self._lock:
             if voice_id in (self._active, self._starting):
                 raise TrainingError("This voice is training. Stop the training first.")

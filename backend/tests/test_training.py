@@ -106,7 +106,15 @@ class Rig:
         self.killed = []
         self.tools = FakeTools()
         self.clock = 1000.0
+        self.sleeps = []  # the manager never really sleeps in a test: each wait only moves the clock
+        self.on_sleep = None
         self.manager = None
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.clock += seconds
+        if self.on_sleep is not None:
+            self.on_sleep()
 
     def launch(self, argv, log_path):
         if self.launch_error is not None:
@@ -125,7 +133,7 @@ class Rig:
             self.data, self.library, self.trainer, launch=self.launch, verify=self.verify,
             pid_alive=lambda pid: pid in self.alive, now=lambda: self.clock,
             is_worker=lambda pid, experiment: self.workers.get(pid) == experiment, kill_pid=self.killed.append,
-            processes=self.tools)
+            processes=self.tools, sleep=self.sleep)
         return self.manager
 
     def voice(self, name="Narrator", minutes=6.0):
@@ -260,7 +268,8 @@ def test_start_launches_the_worker_and_writes_the_job_record(rig):
     assert status["epochs"] == 120 and status["percent"] == 0.0 and status["started"] == 1000.0
     assert rig.manager.running is True
     assert set(status) == {"state", "voice_id", "stage", "stage_index", "stages", "epoch", "epochs", "percent",
-                           "eta_seconds", "message", "error", "started", "finished", "can_resume"}
+                           "eta_seconds", "message", "error", "started", "finished", "can_resume",
+                           "has_checkpoint"}
 
 
 def test_defaults_are_200_epochs_and_batch_8(rig):
@@ -967,9 +976,11 @@ def test_the_worker_says_whether_a_failed_run_can_be_resumed(rig):
     rig.build()  # and it is remembered across a restart
     assert rig.manager.status(voice)["can_resume"] is False
 
-    # It is a hint for the screen, not a lock: once the user has put the clips back, the resume is theirs to try.
-    rig.manager.start(voice, resume=True)
-    assert "--resume" in rig.launches[-1][0]
+    # What the screen does not offer is not accepted either (final review, F4): only a new run follows.
+    with pytest.raises(TrainingError, match="no interrupted training run"):
+        rig.manager.start(voice, resume=True)
+    assert len(rig.launches) == 1
+    rig.manager.start(voice)
     rig.finish(voice, 1, error=CLIPS_CHANGED, resumable=True)
     assert rig.manager.status()["can_resume"] is True  # the worker's word beats the text of the error
     assert rig.record(voice)["resumable"] is True
@@ -986,8 +997,9 @@ def test_an_older_worker_that_gives_no_hint_is_judged_by_its_error(rig, error):
     s = rig.manager.status()
     assert (s["state"], s["error"], s["can_resume"]) == ("failed", error, False)
     assert rig.record(voice)["resumable"] is None
-    rig.manager.start(voice, resume=True)  # still allowed
-    assert len(rig.launches) == 2
+    with pytest.raises(TrainingError, match="no interrupted training run"):
+        rig.manager.start(voice, resume=True)  # not offered, so not accepted (final review, F4)
+    assert len(rig.launches) == 1
 
 
 def test_the_fallback_error_texts_are_the_workers_own():
@@ -1249,6 +1261,9 @@ def test_forget_removes_the_experiment_and_small_model_but_not_while_training(ri
     with pytest.raises(TrainingError, match="training"):
         rig.manager.forget(voice)
     rig.finish(voice, 2, cancelled=True)
+    with pytest.raises(TrainingError, match="training"):
+        rig.manager.forget(voice)  # forget never settles a job itself: that is the status poll's work
+    assert rig.manager.status()["state"] == "cancelled"
     rig.manager.forget(voice)
     assert not rig.experiment_dir(voice).exists() and not (weights / f"voice-{voice}.pth").exists()
     assert weights.is_dir() and (rig.data / "voices" / voice / "voice.json").is_file()
@@ -1319,10 +1334,68 @@ def test_forget_only_touches_experiment_folders_of_voice_ids(rig, bad):
 def test_shutdown_stops_the_worker_and_marks_the_job_interrupted(rig):
     voice = rig.voice()
     rig.manager.shutdown()  # nothing running: nothing happens
+    assert rig.sleeps == []
     rig.manager.start(voice)
     rig.manager.shutdown()
     assert rig.handles[0].kills == 1
     assert rig.record(voice)["state"] == "interrupted" and rig.manager.running is False
+
+
+def test_shutdown_first_asks_the_worker_to_stop_and_does_not_kill_one_that_does(rig):
+    voice = rig.voice()
+    rig.manager.start(voice)
+    handle, cancel_file, polls = rig.handles[0], rig.job_dir(voice) / "cancel", []
+
+    def poll():  # a worker that sees the cancel file, and has reached a safe point two looks later
+        polls.append(cancel_file.exists())
+        if handle.code is None and polls[-3:] == [True, True, True]:
+            rig.finish(voice, 2, cancelled=True, resumable=True)
+        return handle.code
+
+    handle.poll = poll
+    rig.manager.shutdown()
+    assert handle.kills == 0 and rig.tools.count("taskkill") == 0
+    assert 0 < sum(rig.sleeps) < training.SHUTDOWN_GRACE
+    s = rig.manager.status(voice)
+    assert (s["state"], s["error"]) == ("interrupted", None)  # the app closed: not something the user cancelled
+    assert rig.record(voice)["state"] == "interrupted" and not cancel_file.exists()
+    assert rig.manager.is_active() is False
+
+
+def test_shutdown_kills_a_worker_that_has_not_stopped_after_five_seconds(rig):
+    voice = rig.voice()
+    rig.manager.start(voice)
+    handle, cancel_file, during = rig.handles[0], rig.job_dir(voice) / "cancel", []
+
+    def status_poll():  # the screen keeps asking while the backend waits: that must not kill the worker early
+        during.append((rig.manager.status()["state"], handle.kills, cancel_file.exists()))
+
+    rig.on_sleep = status_poll
+    rig.manager.shutdown()
+    assert during and all(seen == ("running", 0, True) for seen in during)
+    assert sum(rig.sleeps) == pytest.approx(training.SHUTDOWN_GRACE) and training.SHUTDOWN_GRACE == 5.0
+    assert handle.kills == 1
+    assert rig.record(voice)["state"] == "interrupted" and not cancel_file.exists()
+
+
+def test_a_run_that_finishes_while_the_backend_shuts_down_is_done(rig):
+    voice = rig.voice()
+    rig.manager.start(voice)
+    rig.on_sleep = lambda: rig.handles[0].code is None and rig.finish(voice, 0, ok=True, percent=100.0)
+    rig.manager.shutdown()
+    assert rig.handles[0].kills == 0 and rig.record(voice)["state"] == "done"
+
+
+def test_shutdown_is_bounded_when_the_worker_cannot_even_be_asked(rig, monkeypatch):
+    voice = rig.voice()
+    rig.manager.start(voice)
+
+    def broken():
+        raise OSError("handle is invalid")
+
+    rig.handles[0].poll = broken
+    rig.manager.shutdown()  # cannot tell whether it stopped: no waiting, straight to the kill
+    assert rig.sleeps == [] and rig.handles[0].kills == 1
 
 
 # The real process helpers, without starting a real process
@@ -1433,3 +1506,237 @@ def test_the_real_process_checks_on_this_process():
     assert training._pid_alive(0) is False and training._pid_alive(-5) is False and training._pid_alive("12") is False
     worker = Path("D:/nowhere/trainer/worker.py")
     assert training._is_worker_process(os.getpid(), "voice-x", worker) is False  # pytest is not a worker
+
+
+# Final review, F1: reads that never service a kill
+
+
+def test_the_cheap_reads_say_what_is_active_without_touching_the_job(rig):
+    voice, other = rig.voice("a"), rig.voice("b")
+    m = rig.manager
+    assert m.is_active() is False and m.active_voice() is None
+    m.require_not_training(voice)
+
+    def verify(fast):  # a start that is still checking the environment already counts
+        assert m.is_active() is True and m.active_voice() == voice
+        with pytest.raises(TrainingError, match="Stop training before deleting this voice"):
+            m.require_not_training(voice)
+        m.require_not_training(other)
+        return PASS
+
+    m._verify = verify
+    m.start(voice)
+    m.cancel()
+    rig.clock += 90  # a kill is due
+    looked = list(rig.tools.calls)
+    assert m.is_active() is True and m.active_voice() == voice
+    with pytest.raises(TrainingError, match="Stop training before deleting this voice"):
+        m.require_not_training(voice)
+    m.require_not_training(other)
+    m.forget(other)
+    with pytest.raises(TrainingError, match="training"):
+        m.forget(voice)
+    assert rig.handles[0].kills == 0 and rig.tools.calls == looked  # none of them looked at, or ended, a process
+    assert m.status()["state"] == "cancelled" and rig.handles[0].kills == 1
+    assert m.is_active() is False and m.active_voice() is None
+    m.require_not_training(voice)
+
+
+# Final review, F8: no environment probe beside a job, even when nothing is remembered
+
+
+def test_the_manager_never_probes_the_environment_while_a_job_is_starting_or_active(rig):
+    voice = rig.voice()
+    m = rig.manager
+    seen = []
+
+    def verify(fast):
+        rig.verify_calls.append(fast)
+        if len(rig.verify_calls) == 1:  # the start's own check: nothing is remembered yet, and a start is under way
+            seen.append(m.environment())
+            seen.append(m.environment(refresh=True))
+        return PASS
+
+    m._verify = verify
+    m.start(voice)
+    unknown = {"ok": False, "ready": False, "unknown": True, "checks": []}
+    assert seen == [unknown, unknown] and rig.verify_calls == [False]
+    assert m.environment(refresh=True) == {**PASS, "ready": True}  # the job runs: what is known, and it is kept
+    assert m.environment() == {**PASS, "ready": True} and rig.verify_calls == [False]
+    rig.finish(voice, 0, ok=True)
+    m.status()
+    rig.report = FAIL
+    m._verify = rig.verify
+    assert m.environment(refresh=True)["ready"] is False and rig.verify_calls == [False, False]  # idle: it probes
+
+
+def test_environment_without_a_probe_answers_from_the_last_report(rig):
+    m = rig.manager
+    assert m.environment(probe=False) == {"ok": False, "ready": False, "unknown": True, "checks": []}
+    rig.report = FAIL
+    assert m.environment()["ready"] is False
+    assert m.environment(probe=False) == {**FAIL, "ready": False}
+    assert m.environment(refresh=True, probe=False) == {**FAIL, "ready": False}
+    assert rig.verify_calls == [False]
+
+
+# Final review, F4: Resume is offered wherever the worker can resume, and offered means accepted
+
+
+def stage_record(rig, voice_id, stages=None):
+    folder = rig.experiment_dir(voice_id)
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "stages.json").write_text(json.dumps(stages or {"preprocess": {"segments": 12}}), encoding="utf-8")
+
+
+@pytest.mark.parametrize("state", ["failed", "cancelled", "interrupted"])
+def test_a_run_stopped_before_its_first_checkpoint_can_be_resumed(rig, state):
+    voice = rig.voice()
+    rig.write_record(voice, state=state, epochs=300, batch_size=4)
+    stage_record(rig, voice)
+    rig.build()
+    s = rig.manager.status(voice)
+    assert (s["can_resume"], s["has_checkpoint"]) == (True, False)
+    rig.manager.start(voice, resume=True)
+    argv = rig.launches[0][0]
+    assert "--resume" in argv and argv[argv.index("--epochs") + 1] == "300"
+
+
+def test_status_says_whether_a_resume_continues_from_a_checkpoint(rig):
+    voice = rig.voice()
+    assert rig.manager.status(voice)["has_checkpoint"] is False  # idle
+    rig.write_record(voice, state="cancelled")
+    stage_record(rig, voice, {"preprocess": {"segments": 12}, "pitch": True, "checkpoint": {"epoch": 5}})
+    rig.checkpoint(voice, suffix=".bak")
+    rig.build()
+    s = rig.manager.status(voice)
+    assert (s["can_resume"], s["has_checkpoint"]) == (True, True)
+
+
+def test_a_run_cancelled_while_it_prepares_is_resumable_once_the_worker_has_its_stage_record(rig):
+    voice = rig.voice()
+    rig.manager.start(voice)
+    rig.manager.cancel()
+    rig.finish(voice, 2, cancelled=True, resumable=True)
+    assert rig.manager.status()["can_resume"] is False  # stopped during slicing: nothing is prepared yet
+    with pytest.raises(TrainingError, match="no interrupted training run"):
+        rig.manager.start(voice, resume=True)
+    stage_record(rig, voice)
+    assert rig.manager.status()["can_resume"] is True
+
+
+CASES = {  # name -> (record fields, has a stage record, has a checkpoint)
+    "stage record only": ({"state": "cancelled"}, True, False),
+    "checkpoint only": ({"state": "interrupted"}, False, True),
+    "both": ({"state": "failed", "error": "The GPU driver was reset"}, True, True),
+    "nothing prepared": ({"state": "cancelled"}, False, False),
+    "finished": ({"state": "done"}, True, True),
+    "worker said no": ({"state": "failed", "error": "x", "resumable": False}, True, True),
+    "worker said yes": ({"state": "failed", "error": CLIPS_CHANGED, "resumable": True}, True, True),
+    "old worker, clips changed": ({"state": "failed", "error": CLIPS_CHANGED}, True, True),
+    "old worker, other error": ({"state": "failed", "error": "Out of memory"}, True, False),
+}
+
+
+@pytest.mark.parametrize("case", sorted(CASES))
+def test_resume_is_offered_exactly_when_a_resume_would_be_accepted(rig, case):
+    fields, stages, checkpoint = CASES[case]
+    voice = rig.voice()
+    rig.write_record(voice, **fields)
+    if stages:
+        stage_record(rig, voice)
+    if checkpoint:
+        rig.checkpoint(voice)
+    rig.build()
+    offered = rig.manager.status(voice)["can_resume"]
+    assert offered is (case in ("stage record only", "checkpoint only", "both", "worker said yes",
+                                "old worker, other error"))
+    if offered:
+        rig.manager.start(voice, resume=True)
+        assert "--resume" in rig.launches[0][0]
+    else:
+        with pytest.raises(TrainingError, match="There is no interrupted training run to resume for this voice"):
+            rig.manager.start(voice, resume=True)
+        assert rig.launches == []
+
+
+# Final review, F12: a model swap cut off between its two renames is repaired when the backend starts
+
+
+def parked_model(rig, voice_id, model_bytes=training.MIN_MODEL_BYTES + 1, info='{"name": "V", "sample_rate": 40000}'):
+    old = rig.data / "voices" / voice_id / "models" / "rvc.old"
+    old.mkdir(parents=True)
+    with open(old / "model.onnx", "wb") as f:
+        f.truncate(model_bytes)
+    if info is not None:
+        (old / "voice.json").write_text(info, encoding="utf-8")
+    return old
+
+
+def test_a_model_parked_by_an_interrupted_swap_is_put_back_at_start_up(rig, caplog):
+    whole, small, unreadable, no_info, both = (rig.voice(n) for n in ("whole", "small", "unreadable", "noinfo", "both"))
+    parked_model(rig, whole)
+    (rig.data / "voices" / whole / "models" / "rvc.old" / "model.index").write_bytes(b"index")
+    parked_model(rig, small, model_bytes=training.MIN_MODEL_BYTES)
+    parked_model(rig, unreadable, info="{not json")
+    parked_model(rig, no_info, info=None)
+    parked_model(rig, both)
+    live = rig.data / "voices" / both / "models" / "rvc"
+    live.mkdir()
+    (live / "model.onnx").write_bytes(b"the model in use")
+    stray = rig.data / "voices" / "Not An Id" / "models"
+    parked = stray / "rvc.old"
+    parked.mkdir(parents=True)
+    with open(parked / "model.onnx", "wb") as f:
+        f.truncate(training.MIN_MODEL_BYTES + 1)
+    (parked / "voice.json").write_text("{}", encoding="utf-8")
+    rig.write_record(whole, state="running", worker_pid=None)  # with or without a training record
+    before = {p.relative_to(rig.data).as_posix() for p in rig.data.rglob("*")}
+
+    with caplog.at_level(logging.WARNING):
+        rig.build()
+
+    models = rig.data / "voices" / whole / "models"
+    assert (models / "rvc" / "model.onnx").stat().st_size == training.MIN_MODEL_BYTES + 1
+    assert (models / "rvc" / "model.index").read_bytes() == b"index" and not (models / "rvc.old").exists()
+    assert rig.library.get(whole).models == ["rvc"]
+    assert f"voices/{whole}/models/rvc.old" in caplog.text.replace("\\", "/") and "put back" in caplog.text
+    after = {p.relative_to(rig.data).as_posix() for p in rig.data.rglob("*")}
+    moved = {f"voices/{whole}/models/rvc.old/{n}" for n in ("model.onnx", "model.index", "voice.json")}
+    moved.add(f"voices/{whole}/models/rvc.old")
+    assert before - after == moved  # nothing else was touched
+    for voice in (small, unreadable, no_info):
+        assert not (rig.data / "voices" / voice / "models" / "rvc").exists()
+        assert (rig.data / "voices" / voice / "models" / "rvc.old" / "model.onnx").is_file()
+    assert (live / "model.onnx").read_bytes() == b"the model in use"
+    assert (rig.data / "voices" / both / "models" / "rvc.old").is_dir() and parked.is_dir() and not (stray / "rvc").exists()
+
+
+def test_a_repair_that_fails_does_not_stop_the_backend_starting(rig, monkeypatch, caplog):
+    voice = rig.voice()
+    old = parked_model(rig, voice)
+
+    def locked(source, target):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(training.os, "rename", locked)
+    with caplog.at_level(logging.WARNING):
+        rig.build()
+    assert old.is_dir() and "Access is denied" in caplog.text
+    assert rig.manager.status(voice)["state"] == "idle"
+
+
+# Final review, F10: the worker may wait up to 15 minutes for a long epoch to end; the manager waits with it
+
+
+@pytest.mark.parametrize("announced, limit", [(800.0, 830), (60.0, 90), (30, 90), (1e9, 930), (-5, 90),
+                                              ("soon", 90), (True, 90), (None, 90)])
+def test_the_cancel_timeout_follows_the_wait_the_worker_announces(rig, announced, limit):
+    voice = rig.voice()
+    rig.manager.start(voice)
+    rig.manager.cancel()
+    rig.progress(voice, {**line(message="Stopping after the current epoch"), "grace_seconds": announced})
+    rig.clock += limit - 1
+    assert rig.manager.status()["state"] == "cancelling" and rig.handles[0].kills == 0
+    rig.clock += 1
+    assert rig.manager.status()["state"] == "cancelled" and rig.handles[0].kills == 1
