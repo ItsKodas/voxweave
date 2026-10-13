@@ -35,8 +35,9 @@ jobs:
           cache: npm
           cache-dependency-path: app/package-lock.json
 
-      - name: Rust (stable, already on the runner through rustup)
-        run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+      - name: Rust (the version pinned in app/src-tauri/rust-toolchain.toml, through the runner's rustup)
+        working-directory: app/src-tauri
+        run: rustup toolchain install && rustc --version
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -67,7 +68,7 @@ jobs:
 
       - name: Rust tests
         working-directory: app/src-tauri
-        run: cargo test
+        run: cargo test --locked
 
       - name: First-run setup tests (standard library only)
         run: python -m unittest discover -s installer/tests -v

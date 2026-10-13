@@ -22,9 +22,14 @@ Invoke-Checked "Staging" { powershell -NoProfile -ExecutionPolicy Bypass -File (
 
 # The app must start on a PC without the Visual C++ runtime installed, so that runtime is linked into it.
 $env:RUSTFLAGS = "-C target-feature=+crt-static"
+# Compiled into the app: only a build made here is the installed app (src-tauri/src/lib.rs, INSTALLER_BUILD).
+# Files next to the program do not decide that, because Tauri leaves the resources of an earlier installer
+# build in target/release for every later build to find.
+$env:VOXWEAVE_INSTALLER = "1"
 Push-Location $App
 try {
-    Invoke-Checked "tauri build" { npm run tauri -- build --config src-tauri/tauri.installer.conf.json }
+    # --locked: exactly the crate versions in the committed Cargo.lock, or no build.
+    Invoke-Checked "tauri build" { npm run tauri -- build --config src-tauri/tauri.installer.conf.json -- --locked }
 }
 finally {
     Pop-Location

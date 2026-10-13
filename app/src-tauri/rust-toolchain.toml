@@ -1,0 +1,7 @@
+# The Rust version every build of the app uses, on a developer's PC and on GitHub alike, so that a release is
+# never built with whatever "stable" happens to be that day. rustup installs it on first use.
+# To move to a newer Rust: change the version, run the tests, build the installer.
+[toolchain]
+channel = "1.99.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
