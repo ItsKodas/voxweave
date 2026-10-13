@@ -24,10 +24,12 @@ def build_app():
 
     from aivoice.importer import Importer
     from aivoice.library import Library
+    from aivoice.playback import Player
     from aivoice.recorder import Recorder
     from aivoice.studio import Studio
     from aivoice.training import TrainingManager
     from aivoice.transcribe import WhisperTranscriber
+    from aivoice.tts import TtsManager
 
     data = config.data_dir()
     streams = SoundDeviceStreams()
@@ -37,9 +39,13 @@ def build_app():
     # The model name is read when an import first needs it, so a bad setting cannot stop startup.
     importer = Importer(library, WhisperTranscriber(lambda: config.whisper_model(data), data / "pretrained" / "whisper"))
     studio = Studio(library, Recorder(streams), importer, list_devices)
-    training = TrainingManager(data, library, Path(__file__).resolve().parents[2] / "trainer")
+    root = Path(__file__).resolve().parents[2]
+    training = TrainingManager(data, library, root / "trainer")
+    # Speech is played through the same stream factory as live mode. No stream is opened and no worker is
+    # started until something is spoken.
+    tts = TtsManager(data, library, root / "tts", Player(streams), list_devices)
     return create_app(manager, data, list_devices, ort.get_available_providers(), default_devices=default_devices,
-                      studio=studio, library=library, importer=importer, training=training)
+                      studio=studio, library=library, importer=importer, training=training, tts=tts)
 
 
 def main() -> None:

@@ -68,16 +68,21 @@ class SettingsBody(BaseModel):
 def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list[Device]],
                providers: list[str], default_devices: Callable[[], dict] | None = None,
                allowed_hosts: list[str] = ALLOWED_HOSTS, studio=None, library=None, importer=None,
-               training=None) -> FastAPI:
+               training=None, tts=None) -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI):
         yield
-        if training is not None:
-            # Stops a running worker so a normal exit leaves nothing for the watchdog: it is asked to stop, given
-            # 5 seconds to reach a safe point, then killed. Not waited for longer than SHUTDOWN_WAIT: the worker
-            # also ends itself once this process is gone.
+
+        async def bounded(shutdown) -> None:
+            # Not waited for longer than SHUTDOWN_WAIT: a worker also ends itself once this process is gone.
             with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(asyncio.shield(asyncio.to_thread(training.shutdown)), SHUTDOWN_WAIT)
+                await asyncio.wait_for(asyncio.shield(asyncio.to_thread(shutdown)), SHUTDOWN_WAIT)
+
+        # Stops the workers so a normal exit leaves nothing for the watchdog. Training's is asked to stop, given
+        # 5 seconds to reach a safe point, then killed; text to speech is silenced and its worker killed. The two
+        # share no lock and neither takes the audio lock or the voices lock, so they are stopped side by side
+        # and the exit still waits SHUTDOWN_WAIT at most.
+        await asyncio.gather(*(bounded(m.shutdown) for m in (tts, training) if m is not None))
 
     app = FastAPI(title="AI Voice", lifespan=lifespan)
     # Held while checking and then changing audio state, so recording and live mode cannot both win a race.
@@ -85,6 +90,9 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
     app.state.audio_state = audio_state
     # Taken after the audio lock; shared by the voice delete and training start so neither can pass the other's check.
     voices_lock = threading.Lock()
+    app.state.voices_lock = voices_lock
+    # Set, under the audio lock, while a training start is unloading the text-to-speech worker (see api_tts).
+    training_starting = threading.Event()
 
     # Middleware added later runs earlier: Host check, then CORS, then the Origin check below.
     @app.middleware("http")
@@ -129,6 +137,8 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
         with audio_state:
             if studio is not None and studio.recording:
                 raise ValueError("Stop recording before refreshing devices")
+            if tts is not None and tts.is_active():  # it would tear down the streams the speech is played on
+                raise ValueError("Stop the speech before refreshing devices")
             manager.refresh_devices()
         return device_payload()
 
@@ -151,6 +161,10 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
                 raise ValueError("Stop recording before starting live mode")
             if training is not None and training.is_active():  # a read only: never a kill under the audio lock
                 raise ValueError("Training is running. Wait for it to finish or cancel it before starting live mode")
+            # Also a read only. Speak makes the opposite check and starts under this same lock. A worker that is
+            # loaded but idle holds no sound device and is no obstacle.
+            if tts is not None and tts.is_active():
+                raise ValueError("Stop the speech before starting live mode")
             manager.start(StartConfig(**body.model_dump()))
         return manager.stats()
 
@@ -192,11 +206,16 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
         from aivoice.api_library import library_router
 
         app.include_router(library_router(studio, library, importer, lambda: bool(manager.stats()["running"]),
-                                          audio_state, ALLOWED_ORIGINS, training, voices_lock))
+                                          audio_state, ALLOWED_ORIGINS, training, voices_lock, tts))
     if training is not None:
         from aivoice.api_training import training_router
 
         app.include_router(training_router(training, studio, lambda: bool(manager.stats()["running"]),
-                                           audio_state, voices_lock, ALLOWED_ORIGINS))
+                                           audio_state, voices_lock, ALLOWED_ORIGINS, tts, training_starting))
+    if tts is not None:
+        from aivoice.api_tts import tts_router
+
+        app.include_router(tts_router(tts, library, studio, training, lambda: bool(manager.stats()["running"]),
+                                      audio_state, voices_lock, training_starting, ALLOWED_ORIGINS))
 
     return app

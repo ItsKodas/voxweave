@@ -72,7 +72,7 @@ def same_app_only_for(allowed_origins: list[str]) -> Callable[[Request], None]:
 
 def library_router(studio: Studio, library: Library, importer: Importer, live_running: Callable[[], bool],
                    exclusive: AbstractContextManager, allowed_origins: list[str], training=None,
-                   voices_lock: AbstractContextManager | None = None) -> APIRouter:
+                   voices_lock: AbstractContextManager | None = None, tts=None) -> APIRouter:
     """`exclusive` is the audio lock, shared with the live-start and device-refresh routes: checking
     "is live running?" and then starting a recording must not interleave with the reverse."""
 
@@ -99,6 +99,10 @@ def library_router(studio: Studio, library: Library, importer: Importer, live_ru
             if training is not None:
                 # Reads only: neither this nor forget below ever ends a process while the voices lock is held.
                 training.require_not_training(voice_id)
+            # Also a read only. Any voice, not just the one being spoken: the request reads its clip and its model
+            # as it goes, and speak starts under this same lock.
+            if tts is not None and tts.is_active():
+                raise ValueError("Stop the speech before deleting a voice")
             library.delete(voice_id)
             if training is not None:
                 try:
@@ -135,6 +139,8 @@ def library_router(studio: Studio, library: Library, importer: Importer, live_ru
                 raise ValueError("Stop live mode before recording")
             if training is not None and training.is_active():  # a read only: never a kill under the audio lock
                 raise ValueError("Training is running. Wait for it to finish or cancel it before recording")
+            if tts is not None and tts.is_active():  # also a read only; speak checks and starts under this lock
+                raise ValueError("Stop the speech before recording")
             with voices_lock:  # so a delete cannot check "not recording" and then lose the voice to a new take
                 studio.start_recording(body.voice_id, body.input_device, body.prompt)
         return studio.status()
