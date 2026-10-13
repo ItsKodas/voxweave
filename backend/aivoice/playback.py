@@ -9,6 +9,7 @@ from aivoice.audiofile import write_wav
 SAMPLE_RATE = 48000
 POLL_S = 0.1
 STALL_S = 5.0
+CLOSE_WAIT = 2.0  # how long stop() waits for streams another thread is in the middle of closing
 DISCONNECTED = "An audio device was disconnected"
 STALLED = "An audio device stopped responding"
 
@@ -78,6 +79,14 @@ class _Session:
         self._lock = threading.Lock()
         self._streams_lock = threading.Lock()
         self._wake = threading.Event()
+
+    def started(self) -> None:
+        """The streams are open and running: only from now on is an output that does not pull a stalled one.
+        Opening a device can take seconds, which must not count against it."""
+        with self._lock:
+            now = self._clock()
+            for out in self._outs.values():
+                out.last_pull = max(out.last_pull, now)
 
     # -- queue (non-audio threads)
 
@@ -208,10 +217,13 @@ class _Session:
             self._close()
 
     def stop(self) -> None:
+        """Silent from the first line on. Returns once the streams are closed, whichever thread closes them, so
+        that the device is free for the next session; a close that hangs is waited for CLOSE_WAIT seconds."""
         with self._lock:
             self._stopped = True
             self._segs.clear()
         self._close()
+        self.done.wait(CLOSE_WAIT)
 
     def watch(self) -> None:
         while not self.done.is_set():
@@ -267,6 +279,7 @@ class Player:
                     )
                 for stream in list(session.streams):
                     stream.start()
+                session.started()
             except Exception as exc:
                 session.stop()
                 raise ValueError(f"Could not open the audio output: {exc}") from exc

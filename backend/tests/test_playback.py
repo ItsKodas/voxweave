@@ -454,3 +454,101 @@ def test_late_audio_for_an_old_session_is_dropped():
     assert player.status()["queued_seconds"] == 0
     player.enqueue(ramp(1, 100), pause_ms=0, session=new)
     assert player.status()["queued_seconds"] == pytest.approx(100 / SR)
+
+
+def test_a_device_that_is_slow_to_open_is_not_taken_for_one_that_stopped_responding():
+    # The stall timer starts when the streams have been started, not when the session is created: opening a
+    # device can take seconds (and the computer can sleep in between).
+    now = [100.0]
+
+    class SlowStreams(CapturingStreams):
+        def output(self, device, samplerate, fill):
+            now[0] += 6.0
+            return super().output(device, samplerate, fill)
+
+    streams = SlowStreams()
+    player = Player(streams, clock=lambda: now[0])
+    player.start({"mic": 3, "monitor": 4})  # 12 seconds pass while the two devices open
+    st = player.status()
+    assert st["playing"] is True and st["error"] is None
+    now[0] += 4.9
+    assert player.status()["error"] is None
+    now[0] += 0.2
+    assert player.status()["error"] == "An audio device stopped responding"
+
+
+class WatchedEvent(threading.Event):
+    """An Event that shows when somebody has begun to wait for it."""
+
+    def __init__(self):
+        super().__init__()
+        self.awaited = threading.Event()
+
+    def wait(self, timeout=None):
+        self.awaited.set()
+        return super().wait(timeout)
+
+
+def closing_on_the_watcher(devices=None):
+    """A session whose watcher thread is held inside the close of its stream, as after playback has ended."""
+    player, streams = make(devices or {"mic": 3})
+    session = player._session
+    session.done = WatchedEvent()
+    gate = threading.Event()
+    streams.streams[0].close_gate = gate
+    player.finish()  # nothing queued: the watcher closes the stream, and is held inside close()
+    assert streams.streams[0].close_entered.wait(3)
+    return player, streams, session, gate
+
+
+def test_stop_waits_for_streams_another_thread_is_still_closing():
+    # stop() must not return, and so the next session must not open the device, before they are closed.
+    player, streams, session, gate = closing_on_the_watcher()
+    returned = threading.Event()
+    threading.Thread(target=lambda: (player.stop(), returned.set()), daemon=True).start()
+    try:
+        assert session.done.awaited.wait(3), "stop() returned without waiting for the close"
+        assert not returned.is_set() and not streams.streams[0].closed
+    finally:
+        gate.set()
+    assert returned.wait(3) and streams.streams[0].closed and session.done.is_set()
+
+
+def test_start_waits_for_the_previous_sessions_streams_to_be_closed():
+    player, streams, session, gate = closing_on_the_watcher()
+    first = streams.streams[0]
+    opened_while_open = []
+    real_output = streams.output
+
+    def output(device, samplerate, fill):
+        opened_while_open.append(not first.closed)
+        return real_output(device, samplerate, fill)
+
+    streams.output = output
+    starter = threading.Thread(target=lambda: player.start({"mic": 3}), daemon=True)
+    starter.start()
+    try:
+        assert session.done.awaited.wait(3), "start() did not wait for the old stream to be closed"
+        assert opened_while_open == []
+    finally:
+        gate.set()
+    starter.join(3)
+    assert not starter.is_alive() and opened_while_open == [False]
+    player.stop()
+
+
+def test_stop_does_not_wait_forever_for_a_close_that_hangs(monkeypatch):
+    from aivoice import playback
+
+    monkeypatch.setattr(playback, "CLOSE_WAIT", 0.0)
+    player, streams = make({"mic": 3})
+    gate = threading.Event()
+    streams.streams[0].close_gate = gate
+    player.finish()
+    assert streams.streams[0].close_entered.wait(3)
+    try:
+        player.stop()  # returns although the stream is still being closed
+        assert player.status()["playing"] is True
+    finally:
+        gate.set()
+    assert player.wait(3) is True
