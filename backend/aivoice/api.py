@@ -27,7 +27,10 @@ ALLOWED_ORIGINS = [
     "tauri://localhost",
     "http://localhost:1420",
 ]
-SHUTDOWN_WAIT = 10.0  # seconds the backend's exit waits for a training worker to be stopped
+# How long the app's shutdown waits for the training worker and the text-to-speech worker to be stopped before it
+# goes on. Not a hard limit on the exit: a stop still in progress then keeps running on its own thread, which the
+# interpreter waits for when it exits, so the real limits are the managers' own (see their shutdown methods).
+SHUTDOWN_WAIT = 10.0
 log = logging.getLogger(__name__)
 
 
@@ -74,14 +77,14 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
         yield
 
         async def bounded(shutdown) -> None:
-            # Not waited for longer than SHUTDOWN_WAIT: a worker also ends itself once this process is gone.
+            # The lifespan moves on after SHUTDOWN_WAIT, but the stop itself is not abandoned: it runs on in its
+            # thread until the manager's own limits end it. A worker also ends itself once this process is gone.
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(asyncio.shield(asyncio.to_thread(shutdown)), SHUTDOWN_WAIT)
 
-        # Stops the workers so a normal exit leaves nothing for the watchdog. Training's is asked to stop, given
+        # Stops both workers so a normal exit leaves nothing for the watchdog. Training's is asked to stop, given
         # 5 seconds to reach a safe point, then killed; text to speech is silenced and its worker killed. The two
-        # share no lock and neither takes the audio lock or the voices lock, so they are stopped side by side
-        # and the exit still waits SHUTDOWN_WAIT at most.
+        # share no lock and neither takes the audio lock or the voices lock, so they are stopped side by side.
         await asyncio.gather(*(bounded(m.shutdown) for m in (tts, training) if m is not None))
 
     app = FastAPI(title="AI Voice", lifespan=lifespan)
@@ -170,7 +173,12 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
 
     @app.post("/live/stop")
     def stop() -> dict:
-        manager.stop()
+        # Live mode reads "not running" from the moment the stop begins, up to two seconds before its devices
+        # are closed. Under the audio lock, nothing that checks "is live running?" (recording, training, text to
+        # speech, another live start) can act on that answer until the devices really are free. Nothing the stop
+        # calls, and nothing the live thread does on its way out, takes this lock.
+        with audio_state:
+            manager.stop()
         return manager.stats()
 
     @app.post("/live/mode")

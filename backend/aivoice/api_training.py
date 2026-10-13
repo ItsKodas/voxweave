@@ -38,6 +38,7 @@ def training_router(training: TrainingManager, studio: Studio | None, live_runni
             raise ValueError("Stop recording before training")
         if tts is not None and tts.is_active():
             raise ValueError("Stop the speech before training")
+
     router = APIRouter(prefix="/training", dependencies=[Depends(same_app_only_for(allowed_origins))])
 
     @router.get("/status")
@@ -70,11 +71,6 @@ def training_router(training: TrainingManager, studio: Studio | None, live_runni
             if not report["ok"] and not report.get("unknown"):
                 failing = "; ".join(c["message"] for c in report["checks"] if not c["ok"])
                 raise ValueError(f"Training is not set up: {failing}")
-        if tts is None:
-            with exclusive:
-                refuse_if_busy()
-                with voices_lock:  # so a delete of this voice cannot slip in between the check and the start
-                    return training.start(body.voice_id, body.epochs, body.batch_size, body.resume)
         # The text-to-speech worker holds GPU memory even when idle, so it is ended first. Ending a process can
         # take seconds and must not happen under the audio lock; instead the lock is taken twice, and in between
         # `training_starting` keeps anything from being spoken (which would load the worker again).
@@ -84,10 +80,11 @@ def training_router(training: TrainingManager, studio: Studio | None, live_runni
                 raise ValueError("Training is already starting")
             training_starting.set()
         try:
-            tts.unload()  # raises, with a message for the user, if a process could not be stopped
+            if tts is not None:
+                tts.unload()  # raises, with a message for the user, if a process could not be stopped
             with exclusive:
                 refuse_if_busy()  # live mode or a recording may have started meanwhile; speech cannot have
-                with voices_lock:
+                with voices_lock:  # so a delete of this voice cannot slip in between the check and the start
                     return training.start(body.voice_id, body.epochs, body.batch_size, body.resume)
         finally:
             training_starting.clear()

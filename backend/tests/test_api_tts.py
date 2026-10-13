@@ -107,6 +107,22 @@ def refused(res, status, detail):
     assert (res.status_code, res.json()) == (status, {"detail": detail})
 
 
+def in_thread(call):
+    result = {}
+    thread = threading.Thread(target=lambda: result.update(res=call()), daemon=True)
+    thread.start()
+    return thread, result
+
+
+def answered(call):
+    """The response to a request that must not wait for a lock the test is holding: made on another thread, so
+    that a route which does wait fails the test instead of hanging it."""
+    thread, result = in_thread(call)
+    thread.join(WAIT)
+    assert not thread.is_alive(), "the route is waiting for a lock"
+    return result["res"]
+
+
 # ---------------------------------------------------------------- the routes themselves
 
 def test_status_when_nothing_has_been_spoken(s):
@@ -135,6 +151,16 @@ def test_voices_lists_every_library_voice_with_its_model_and_reference_clip(s):
     assert listed[trained.id]["has_model"] is True and listed[trained.id]["reference"]["seconds"] == 5.0
     assert listed[empty.id] == {"id": empty.id, "name": "Empty", "has_model": False,
                                 "reference": {"ok": False, "seconds": None, "message": NO_CLIP}}
+
+
+def test_voices_does_not_offer_a_model_whose_file_is_gone(s):
+    trained = s.rig.voice("Trained", model=True)
+    assert {v["id"]: v["has_model"] for v in s.client.get("/tts/voices").json()}[trained.id] is True
+    (s.data / "voices" / trained.id / "models" / "rvc" / "model.onnx").unlink()
+    assert {v["id"]: v["has_model"] for v in s.client.get("/tts/voices").json()}[trained.id] is False
+    refused(s.speak(voice_id=trained.id, preset="best"), 400,
+            "Best needs this voice's trained model, and it has none. Train the voice first, or choose Fast or "
+            "Balanced.")
 
 
 def test_voices_does_not_call_a_voice_usable_when_its_reference_clip_lost_its_audio(s):
@@ -205,16 +231,24 @@ def test_stop_ends_the_request_and_keeps_the_worker(s):
     ({"preset": "turbo"}, "Unknown preset: turbo. Choose fast, balanced or best."),
     ({"preset": ["fast"]}, "Unknown preset. Choose fast, balanced or best."),
     ({"preset": None}, "Unknown preset. Choose fast, balanced or best."),
+    ({"mic_device": "3"}, "mic_device must be a device number"),
+    ({"monitor_device": True}, "monitor_device must be a device number"),
+    ({"monitor_device": 2.5}, "monitor_device must be a device number"),
+    ({"save": "yes"}, "save must be true or false"),
+])
+def test_what_needs_no_look_at_the_devices_is_refused_before_the_environment_is_checked(s, body, detail):
+    refused(s.speak(**body), 400, detail)
+    s.nothing_spoken()
+    assert s.rig.verify_calls == []  # the first check starts a GPU process: not for a request that cannot be done
+
+
+@pytest.mark.parametrize("body, detail", [
     ({"preset": "best"}, "Best needs this voice's trained model, and it has none. Train the voice first, or "
                          "choose Fast or Balanced."),
     ({"mic_device": None, "monitor_device": None}, "Choose a virtual mic or a listen device"),
     ({"mic_device": 2}, "Monitor and virtual mic must be different devices"),
     ({"mic_device": 1}, "Headset Mic is not an output device"),
     ({"mic_device": 99}, "Audio device 99 is no longer available"),
-    ({"mic_device": "3"}, "mic_device must be a device number"),
-    ({"monitor_device": True}, "monitor_device must be a device number"),
-    ({"monitor_device": 2.5}, "monitor_device must be a device number"),
-    ({"save": "yes"}, "save must be true or false"),
 ])
 def test_what_cannot_be_spoken_is_a_400_with_a_readable_message_and_starts_nothing(s, body, detail):
     refused(s.speak(**body), 400, detail)
@@ -227,7 +261,7 @@ def test_five_thousand_characters_are_accepted(s):
 
 def test_a_body_that_is_not_an_object_is_refused(s):
     assert s.client.post("/tts/speak", json=["x"]).status_code == 422
-    refused(s.client.post("/tts/speak", json={}), 400, "Unknown voice")
+    refused(s.client.post("/tts/speak", json={}), 400, "There is no text to speak.")  # judged in the manager's order
     s.nothing_spoken()
 
 
@@ -247,7 +281,7 @@ def test_the_request_is_started_under_the_audio_lock_and_the_voices_lock(s):
 def test_speak_is_refused_when_the_environment_is_not_set_up(s):
     s.rig.report = FAIL
     with s.app.state.audio_state:  # the check is made, and refused, before the audio lock is asked for
-        refused(s.speak(), 400, NOT_SET_UP)
+        refused(answered(s.speak), 400, NOT_SET_UP)
     s.nothing_spoken()
 
 
@@ -358,6 +392,103 @@ def test_a_reference_clip_deleted_between_requests_is_a_plain_refusal(s):
     assert not s.rig.manager.is_active() and s.client.get("/tts/status").json()["state"] == "idle"
 
 
+# ---------------------------------------------------------------- live mode that is still letting go of its devices
+
+class SlowLiveStop:
+    """Live mode running, with an output stream whose close hangs until released: POST /live/stop has made live
+    mode read "not running" and is still closing the devices."""
+
+    def __init__(self, s):
+        assert s.client.post("/live/start", json=START).status_code == 200
+        self.s = s
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.streams = list(s.live_streams.streams)
+        output = self.streams[-1]
+        closing = output.close
+
+        def close():
+            self.entered.set()
+            assert self.release.wait(WAIT)
+            closing()
+
+        output.close = close
+        self.thread, self.result = in_thread(lambda: s.client.post("/live/stop"))
+        assert self.entered.wait(WAIT)
+        assert s.client.get("/live/stats").json()["running"] is False  # which is all the busy checks can see
+
+    def all_closed(self):
+        return all(stream.closed for stream in self.streams)
+
+    def finish(self, *threads):
+        for thread in threads:
+            thread.join(0.2)  # time for a request that does not wait for the stop to get to the devices
+        self.release.set()
+        for thread in (self.thread, *threads):
+            thread.join(WAIT)
+            assert not thread.is_alive()
+        assert self.result["res"].status_code == 200
+
+
+def test_speak_arriving_while_live_mode_is_stopping_never_opens_the_output_beside_it(s):
+    stopping = SlowLiveStop(s)
+    opened_after_close = []
+    start = s.rig.player.start
+
+    def recorded(devices, gains=None):
+        opened_after_close.append(stopping.all_closed())
+        return start(devices, gains)
+
+    s.rig.player.start = recorded
+    thread, result = in_thread(s.speak)
+    stopping.finish(thread)
+    assert result["res"].status_code in (200, 409)  # held until live mode let go, or refused; never beside it
+    assert opened_after_close in ([True], [])
+    if result["res"].status_code == 409:
+        s.nothing_spoken()
+
+
+def test_recording_arriving_while_live_mode_is_stopping_never_opens_the_microphone_beside_it(s):
+    stopping = SlowLiveStop(s)
+    opened_after_close = []
+    opening = s.mic.input
+
+    def recorded(device, samplerate, on_audio):
+        opened_after_close.append(stopping.all_closed())
+        return opening(device, samplerate, on_audio)
+
+    s.mic.input = recorded
+    thread, result = in_thread(s.record)
+    stopping.finish(thread)
+    assert result["res"].status_code in (200, 400)
+    assert opened_after_close in ([True], [])
+
+
+def test_training_arriving_while_live_mode_is_stopping_never_starts_beside_it(s):
+    stopping = SlowLiveStop(s)
+    launched_after_close = []
+    launch = s.training.manager._launch
+
+    def recorded(argv, log_path):
+        launched_after_close.append(stopping.all_closed())
+        return launch(argv, log_path)
+
+    s.training.manager._launch = recorded
+    thread, result = in_thread(s.start_training)
+    stopping.finish(thread)
+    assert result["res"].status_code in (200, 400)
+    assert launched_after_close in ([True], [])
+
+
+def test_live_stop_still_answers_and_reports_idle(s):
+    assert s.client.post("/live/start", json=START).status_code == 200
+    res = s.client.post("/live/stop")
+    assert res.status_code == 200 and res.json()["running"] is False
+    assert all(stream.closed for stream in s.live_streams.streams)
+    assert s.client.post("/live/stop").status_code == 200  # harmless when it is not running
+    assert s.speak().status_code == 200
+
+
 # ---------------------------------------------------------------- training start and the loaded worker
 
 def test_training_start_unloads_an_idle_worker_first(s):
@@ -390,13 +521,6 @@ class HangingKill:
     def hang(self):
         self.entered.set()
         assert self.release.wait(WAIT)
-
-
-def in_thread(call):
-    result = {}
-    thread = threading.Thread(target=lambda: result.update(res=call()), daemon=True)
-    thread.start()
-    return thread, result
 
 
 def test_nothing_can_be_spoken_while_training_start_is_unloading_the_worker(s):
@@ -487,14 +611,14 @@ def test_status_voices_and_stop_never_wait_for_the_audio_lock(s):
     s.speaking()
     s.rig.auto = True
     with s.app.state.audio_state:
-        assert s.client.get("/tts/status").json()["state"] == "preparing"
-        assert s.client.get("/tts/voices").status_code == 200
-        assert s.client.get("/tts/environment").status_code == 200
+        assert answered(lambda: s.client.get("/tts/status")).json()["state"] == "preparing"
+        assert answered(lambda: s.client.get("/tts/voices")).status_code == 200
+        assert answered(lambda: s.client.get("/tts/environment")).status_code == 200
         thread, result = in_thread(lambda: s.client.post("/tts/stop"))
         assert s.rig.player.stopped.wait(WAIT)
         s.rig.workers[0].emit(event="reference", seconds=8.0)
         thread.join(WAIT)
-        assert result["res"].json()["state"] == "idle"
+        assert not thread.is_alive() and result["res"].json()["state"] == "idle"
 
 
 # ---------------------------------------------------------------- the GPU check never runs beside another activity
@@ -517,6 +641,21 @@ def test_the_environment_is_not_probed_while_training_runs(s):
     report = s.client.get("/tts/environment?refresh=true").json()
     assert report["unknown"] is True and report["checked_while_training"] is True
     assert s.rig.verify_calls == []
+
+
+def test_the_environment_is_not_probed_while_a_training_start_is_unloading_the_worker(s):
+    hanging = HangingKill(s)
+    thread, result = in_thread(s.start_training)
+    try:
+        assert hanging.entered.wait(WAIT)
+        calls = len(s.rig.verify_calls)
+        report = s.client.get("/tts/environment?refresh=true").json()
+        assert report["ok"] is True and report["checked_while_training"] is True
+        assert len(s.rig.verify_calls) == calls
+    finally:
+        hanging.release.set()
+        thread.join(WAIT)
+    assert result["res"].status_code == 200
 
 
 def test_the_training_environment_is_not_probed_while_speaking(s):

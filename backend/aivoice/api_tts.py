@@ -20,10 +20,10 @@ from typing import Callable
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from aivoice import tts_reference
+from aivoice import tts_reference, tts_text
 from aivoice.api_library import same_app_only_for
 from aivoice.library import ID_RE, Library, LibraryError
-from aivoice.tts import ALREADY, TtsManager
+from aivoice.tts import ALREADY, NOTHING_TO_SAY, STEPS, TtsManager
 
 SPEAK_WHILE_LIVE = "Stop live mode before speaking"
 SPEAK_WHILE_RECORDING = "Stop recording before speaking"
@@ -33,7 +33,8 @@ MISSING_AUDIO = "The audio of clip {}, this voice's reference clip, is missing. 
 
 class SpeakBody(BaseModel):
     # Left untyped on purpose: the route and the manager judge them, so a bad value is a 400 with a readable
-    # message, not a 422.
+    # message, not a 422. Fields that are not listed are ignored, as in every other body of this app; there is
+    # no speed setting (the manager speaks at one speed).
     voice_id: object = None
     text: object = None
     preset: object = None
@@ -79,7 +80,8 @@ def tts_router(tts: TtsManager, library: Library | None, studio, training, live_
     def environment(refresh: bool = False) -> dict:
         # The full check starts a GPU process. Beside a training run or live mode it could disturb them, so then
         # the answer is what is already known (the manager itself never probes beside its own request).
-        if training is not None and training.is_active():
+        # A training start that is unloading the worker is about to put training on the GPU: that counts too.
+        if training is not None and (training.is_active() or training_starting.is_set()):
             return {**tts.environment(probe=False), "checked_while_training": True}
         if live_running():
             return {**tts.environment(probe=False), "checked_while_live": True}
@@ -100,12 +102,28 @@ def tts_router(tts: TtsManager, library: Library | None, studio, training, live_
                            "reference": reference})
         return listed
 
-    @router.post("/speak")
-    def speak(body: SpeakBody) -> dict:
-        if not isinstance(body.voice_id, str) or not ID_RE.match(body.voice_id):
-            raise ValueError("Unknown voice")
+    def refuse_what_cannot_be_spoken(body: SpeakBody) -> None:
+        """The refusals that need no look at the GPU or the devices, in the manager's own words and before the
+        environment check can start a process for a request that could never be carried out. The manager judges
+        all of it again, and the rest (the reference clip, the model, the devices), when the request starts."""
+        text = tts_text.clean(body.text if isinstance(body.text, str) else "")
+        if not tts_text.split(text, 4 * tts_text.MAX_TEXT):
+            raise ValueError(NOTHING_TO_SAY)
         if not isinstance(body.preset, str):
             raise ValueError("Unknown preset. Choose fast, balanced or best.")
+        if body.preset not in STEPS:
+            raise ValueError(f"Unknown preset: {body.preset}. Choose fast, balanced or best.")
+        if not isinstance(body.voice_id, str) or not ID_RE.match(body.voice_id):
+            raise ValueError("Unknown voice")
+        if library is not None:
+            try:
+                library.get(body.voice_id)
+            except LibraryError:
+                raise ValueError("Unknown voice") from None
+
+    @router.post("/speak")
+    def speak(body: SpeakBody) -> dict:
+        refuse_what_cannot_be_spoken(body)
         mic = _device(body.mic_device, "mic_device")
         monitor = _device(body.monitor_device, "monitor_device")
         if not isinstance(body.save, bool):
