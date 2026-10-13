@@ -254,3 +254,42 @@ def test_start_accepts_a_trained_library_voice(tmp_path):
         assert [(v.id, v.name, v.sample_rate) for v in built] == [(voice.id, "Mine", 40000)]
     finally:
         manager.stop()
+
+
+# ---- the listen volume last set, for text to speech's listen device (final fix wave, B4) ----
+
+def test_the_listen_volume_is_one_until_live_mode_is_given_another(setup):
+    manager, _, _ = setup
+    assert manager.monitor_gain == 1.0
+    manager.start(cfg(monitor_device=2))
+    assert manager.monitor_gain == 1.0
+
+
+def test_the_listen_volume_live_mode_was_started_with_is_remembered_after_it_stops(setup):
+    manager, _, _ = setup
+    manager.start(cfg(monitor_device=2, monitor_gain=0.5))
+    assert manager.monitor_gain == 0.5
+    manager.stop()
+    assert manager.monitor_gain == 0.5
+
+
+def test_the_listen_volume_follows_the_slider_while_live_mode_runs(setup):
+    manager, _, _ = setup
+    manager.start(cfg(monitor_device=2, monitor_gain=0.5))
+    manager.update(monitor_gain=0.2)
+    assert manager.monitor_gain == 0.2
+    manager.update(pitch_shift=1)  # a change of something else leaves it
+    assert manager.monitor_gain == 0.2
+    with pytest.raises(ValueError, match="monitor_gain"):
+        manager.update(monitor_gain=9)
+    assert manager.monitor_gain == 0.2
+
+
+def test_a_start_that_is_refused_does_not_change_the_listen_volume(setup):
+    manager, _, _ = setup
+    manager.start(cfg(monitor_device=2, monitor_gain=0.5))
+    manager.stop()
+    for bad in (dict(monitor_gain=9), dict(monitor_gain=0.1, voice="nobody"), dict(monitor_gain=0.1, input_device=2)):
+        with pytest.raises(ValueError):
+            manager.start(cfg(**bad))
+    assert manager.monitor_gain == 0.5

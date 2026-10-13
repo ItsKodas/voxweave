@@ -7,7 +7,8 @@ Nothing from tts/ is ever imported here (the backend has no torch): the worker a
 only ever run as subprocesses.
 
 The worker. It is started on the first request, kept for later ones, and stopped after IDLE_UNLOAD seconds without
-a request, on unload() and on shutdown(). Its stdout carries the protocol and is read by one thread per worker,
+a request (by the manager's own housekeeping thread: nobody has to ask for the status), on unload() and on
+shutdown(). Its stdout carries the protocol and is read by one thread per worker,
 which turns lines into events on a queue; its stderr goes to data/tts/worker.log, never into the protocol and
 never into a pipe nobody reads. A worker is only ever called gone once its processes are known to be gone: the
 kill is stage 3's (aivoice.training: a list of the worker's processes taken beforehand, taskkill on the tree,
@@ -25,8 +26,15 @@ pass fails the request. A request's files live under data/tts/tmp/<job id>/ and 
 the request ends; whatever an earlier run left under data/tts/tmp is removed at start-up. Saved results
 (data/tts/*.wav) and the voices' own clips are only ever read.
 
-Kills are performed, outside the lock, by status (the screen's poll), speak, unload, shutdown and the request's
-own thread. is_active and busy only take the lock: they are what a route may call while it holds another lock.
+Kills are performed, outside the lock, by the housekeeping thread, status (the screen's poll), speak, unload,
+shutdown and the request's own thread. Whoever is about to kill a worker marks it as being killed under the lock
+first, so two of them never kill the same worker at once; unload and shutdown wait for a kill another thread
+has in progress. is_active and busy only take the lock: they are what a route may call while it holds another
+lock.
+
+The housekeeping thread is started with the first worker and runs until shutdown(). About every HOUSEKEEPING
+seconds it does what a status poll does (a worker that died while idle, the idle timeout, kills due another
+try) and nothing else: it never touches a request.
 """
 import json
 import logging
@@ -53,7 +61,7 @@ from aivoice.playback import save_wav
 # Stage 3's process handling, shared rather than copied: the windowless detached launch flags, the handle whose
 # kill_tree() lists the tree before killing it and checks the result, and the sweep that ends what is left.
 from aivoice.training import (KILL_RETRY, TREE_REFRESH, KillFailed, ProcessTools, _NEW_GROUP, _NO_WINDOW, _Worker,
-                              _end_survivors, _failed_report, _pids, _reason)
+                              _end_survivors, _failed_report, _kill_tree, _pids, _reason)
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +76,11 @@ PIECE_TIMEOUT = 60.0  # seconds the worker has for the next piece, or for loadin
 CANCEL_TIMEOUT = 10.0  # seconds it has to end a cancelled job (it takes milliseconds)
 STOP_WAIT = 15.0  # how long stop() waits for the request's thread to finish cleaning up
 IDLE_UNLOAD = 600.0  # the worker is stopped after this long without a request
+HOUSEKEEPING = 30.0  # how often the manager looks after its worker by itself, with nobody asking for the status
+VERIFY_TIMEOUT = 300.0  # seconds the full environment check may take (it starts the TTS Python twice)
+FAST_VERIFY_TIMEOUT = 20.0  # and the quick one, which a request runs while the audio and voices locks are held
+PIPE_WAIT = 2.0  # how long the output of a check that was ended is waited for
+MAX_MONITOR_GAIN = 2.0  # live mode's own limit for the listen volume
 TICK = 0.25  # how often a waiting request looks at the clock, the stop flag and the player
 TAIL_BYTES, TAIL_LINES, TAIL_CHARS = 4096, 6, 600
 KILL_PATIENCE = 30.0  # how long unload and shutdown wait for a kill another thread has in progress (at worst 23 s)
@@ -135,12 +148,62 @@ def _launch_worker(argv: list[str], log_path: Path, tools=None, cache: Path | No
     stdout (the worker sends everything its libraries print to stderr), and it must never fill up (the worker
     logs while holding its lock, so a full pipe would stall a cancel)."""
     env = worker_environment(cache)
-    with open(log_path, "wb") as err:
-        proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err, env=env,
-                                creationflags=_NO_WINDOW | _NEW_GROUP)
-    handle = _Worker(proc, tools or ProcessTools())
-    handle.stdin, handle.stdout = proc.stdin, proc.stdout
-    return handle
+    tools = tools or ProcessTools()
+    proc = None
+    try:
+        with open(log_path, "wb") as err:
+            proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err, env=env,
+                                    creationflags=_NO_WINDOW | _NEW_GROUP)
+        handle = _Worker(proc, tools)
+        handle.stdin, handle.stdout = proc.stdin, proc.stdout
+        return handle
+    except BaseException:
+        # The process exists but nobody will ever hold a handle to it: it is ended here, before the error goes on.
+        if proc is not None:
+            _end_process(proc, tools, "the voice engine that could not be taken into use")
+            _close_pipes(proc)  # nobody reads them; a worker that somehow lived would end at the end of its input
+        raise
+
+
+def _end_process(proc, tools, what: str) -> None:
+    """Ends a process this module started and everything it started, and checks it. Never raises: what could
+    not be ended is logged with its process number, which is all that is left to do."""
+    try:
+        _kill_tree(proc.pid, tools, gone=lambda: proc.poll() is not None)
+    except Exception as exc:  # noqa: BLE001
+        log.error("Could not stop %s (process %s); end it in Task Manager: %s", what, proc.pid, _reason(exc))
+    try:
+        proc.poll()  # collect the exit code
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _close_pipes(proc) -> None:
+    for pipe in (getattr(proc, "stdin", None), getattr(proc, "stdout", None)):
+        try:
+            if pipe is not None:
+                pipe.close()
+        except Exception:  # noqa: BLE001 - a pipe of a process that is gone
+            pass
+
+
+def _run_bounded(argv: list[str], timeout: float, tools) -> subprocess.CompletedProcess:
+    """subprocess.run for a check with a time limit that holds: when the time is up the whole process tree is
+    ended, not only the process that was started. (The Python of a virtual environment is a launcher with the
+    real interpreter as its child; subprocess.run would kill the launcher and then wait for the child's output
+    for as long as the child lives.) Raises subprocess.TimeoutExpired after that."""
+    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace", creationflags=_NO_WINDOW)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except BaseException:
+        _end_process(proc, tools, "the text-to-speech environment check")
+        try:
+            proc.communicate(timeout=PIPE_WAIT)  # lets go of its pipes; with the tree gone they have ended
+        except Exception:  # noqa: BLE001 - something still holds them: they are left to the threads reading them
+            pass
+        raise
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
 
 def _clean_report(raw) -> dict:
@@ -150,6 +213,21 @@ def _clean_report(raw) -> dict:
                     for c in raw["checks"])):
         return {"ok": raw["ok"] and all(c["ok"] for c in raw["checks"]), "checks": raw["checks"]}
     return _failed_report("The text-to-speech environment check gave no usable result")
+
+
+def _reference_refusal(message: str, file_name: str, clip_index: int) -> str:
+    """The worker's refusal of a reference clip in words the user can act on. The worker knows the clip as a
+    file; the Voices tab shows it as a numbered clip. The app picks the clip itself, so "choose another clip"
+    is advice nobody can follow: what can be done is to record a better one or delete this one. A refusal that
+    does not name the clip's file is about something else and is passed on as it is."""
+    if file_name not in message:
+        return message
+    if "too quiet" in message:
+        return tts_reference.too_quiet([clip_index])
+    clip = f"Clip {clip_index}, this voice's reference clip,"
+    text = message.strip().replace(f"The reference clip {file_name}", clip).replace(file_name, f"clip {clip_index}")
+    text = re.sub(r",?\s*or choose another clip", "", text).rstrip(". ")
+    return f"{text}. Delete that clip or record it again."
 
 
 def _sendable(text: str) -> str:
@@ -228,6 +306,7 @@ class _Job:
                  max_chars: int, pieces: list[str], save: bool, folder: Path, started: float):
         self.id, self.voice_id, self.preset, self.text = id, voice_id, preset, text
         self.wav, self.ref_text, self.max_chars, self.pieces = wav, ref_text, max_chars, pieces
+        self.clip_index = clip_index  # the number the Voices tab shows for the reference clip
         self.key = (voice_id, clip_index, ref_text)  # which reference clip this request needs loaded
         self.save, self.folder, self.started = save, folder, started
         self.state = "preparing"
@@ -247,6 +326,14 @@ class _Job:
                 "started": self.started}
 
 
+class _Probe:
+    """A full environment check in progress: whoever asks meanwhile waits for it and takes its report."""
+
+    def __init__(self):
+        self.done = threading.Event()
+        self.report: dict | None = None
+
+
 def _nothing() -> dict:
     return {"state": "idle", "voice_id": None, "preset": None, "piece": 0, "pieces": 0, "error": None,
             "saved_path": None, "started": None}
@@ -254,11 +341,13 @@ def _nothing() -> dict:
 
 class TtsManager:
     def __init__(self, data: Path, library: Library, tts_root: Path, player, list_devices, launch=None, verify=None,
-                 rvc_factory=None, now=time.time, processes=None, tick: float = TICK):
+                 rvc_factory=None, now=time.time, processes=None, tick: float = TICK, pacer=None):
         """player is an aivoice.playback.Player; list_devices() -> the audio devices; launch(argv, log_path) -> a
         handle with pid, poll(), kill_tree(), stdin (bytes) and stdout (lines of bytes); verify(fast) -> the
         tts/verify.py report; rvc_factory(voice_id) -> an object whose convert(piece) takes and returns mono
-        float32 at 48 kHz; processes is training's ProcessTools; tick is how often a waiting request looks up."""
+        float32 at 48 kHz; processes is training's ProcessTools; tick is how often a waiting request looks up;
+        pacer is what the housekeeping thread waits on between its rounds and what shutdown sets to end it (a
+        threading.Event: wait(seconds), set(), is_set())."""
         self._data = Path(data)
         self._root = self._data / "tts"
         self._tmp = self._root / "tmp"
@@ -284,6 +373,10 @@ class TtsManager:
         self._closed = False
         self._passed: dict | None = None  # the last full environment report, kept only if it passed
         self._last_report: dict | None = None
+        self._probe: _Probe | None = None  # the full environment check in progress, if any
+        self._pacer = pacer or threading.Event()  # set by shutdown: the housekeeping thread ends
+        self._keeper: threading.Thread | None = None  # the housekeeping thread, from the first worker on
+        self.housekeeping_failures = 0  # errors a housekeeping round swallowed; like status_failures
         self.status_failures = 0  # errors status() swallowed; anything but 0 is a bug worth a look at the log
         self._sweep_tmp()
 
@@ -325,9 +418,14 @@ class TtsManager:
 
     def _run_verify(self, fast: bool) -> dict:
         argv = [sys.executable, str(self._tts / "verify.py")] + (["--fast"] if fast else [])
+        # The quick check is run by a request while the audio and voices locks are held: it gets seconds, not
+        # minutes. Either way the time limit ends the check's whole process tree.
+        limit = FAST_VERIFY_TIMEOUT if fast else VERIFY_TIMEOUT
         try:
-            done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8",
-                                  errors="replace", timeout=300, creationflags=_NO_WINDOW)
+            done = _run_bounded(argv, limit, self._tools)
+        except subprocess.TimeoutExpired:
+            return _failed_report(f"The text-to-speech environment check did not finish within {limit:g} seconds "
+                                  "and was stopped. Try again; if it keeps happening, restart the app.")
         except (OSError, subprocess.SubprocessError) as exc:
             return _failed_report(f"The text-to-speech environment check could not be run: {_reason(exc)}")
         lines = (done.stdout or "").strip().splitlines()
@@ -360,24 +458,45 @@ class TtsManager:
         if report is None:
             if quiet:
                 return {"ok": False, "ready": False, "unknown": True, "checks": []}
-            report = self._check_environment(fast=False)  # several seconds; never under the lock
+            report = self._full_check()
+        return {**report, "ready": report["ok"]}
+
+    def _full_check(self) -> dict:
+        """The full environment check, several seconds long and never under the lock. Only one runs at a time:
+        it starts a GPU process, so whoever asks while one is in progress waits for it and takes its result."""
+        with self._lock:
+            probe, mine = self._probe, False
+            if probe is None:
+                probe, mine = _Probe(), True
+                self._probe = probe
+        if not mine:
+            probe.done.wait()  # set whatever happens to the check: see the finally below
+            if probe.report is not None:
+                return probe.report
+            return _failed_report("The text-to-speech environment check could not be run")
+        try:
+            report = self._check_environment(fast=False)
             with self._lock:
                 self._last_report = report
-                if report["ok"]:
-                    self._passed = report
-        return {**report, "ready": report["ok"]}
+                self._passed = report if report["ok"] else None
+            probe.report = report
+            return report
+        finally:
+            with self._lock:
+                self._probe = None
+            probe.done.set()
 
     def _require_environment(self) -> None:
         with self._lock:
             passed = self._passed is not None
-        # Once the full check has passed, each later request only repeats the quick file checks.
-        report = self._check_environment(fast=passed)
-        with self._lock:
+        if not passed:
+            report = self._full_check()
+        else:  # once the full check has passed, each later request only repeats the quick file checks
+            report = self._check_environment(fast=True)
             if not report["ok"]:
-                self._passed = None
-                self._last_report = report
-            elif not passed:
-                self._passed = self._last_report = report
+                with self._lock:
+                    self._passed = None
+                    self._last_report = report
         if not report["ok"]:
             failing = "; ".join(c["message"] for c in report["checks"] if not c["ok"])
             raise TtsError(f"Text to speech is not set up: {failing}")
@@ -479,8 +598,9 @@ class TtsManager:
         self._engine_failed = failed
 
     def _service(self) -> None:
-        """What the screen's poll keeps in order: a worker that died while idle, the idle timeout, and kills that
-        are due another try. The decisions are made under the lock, the kills after it is released."""
+        """What the housekeeping thread and the screen's poll keep in order: a worker that died while idle, the
+        idle timeout, and kills that are due another try. The decisions are made under the lock, the kills after
+        it is released."""
         with self._lock:
             engine = self._engine
             if engine is not None and self._job is None:
@@ -494,6 +614,49 @@ class TtsManager:
                 elif self._now() - self._last_used >= IDLE_UNLOAD:
                     self._doom(engine, failed=False)
         self._reap_doomed()
+
+    def _start_keeper(self) -> None:
+        """Lock held, a worker is about to exist. Starts the housekeeping thread unless it is running or the
+        app is closing: shutdown reads the thread under this same lock, so none can be started behind it."""
+        if self._closed or (self._keeper is not None and self._keeper.is_alive()):
+            return
+        keeper = threading.Thread(target=self._keep, name="tts-housekeeping", daemon=True)
+        try:
+            keeper.start()
+        except Exception as exc:  # noqa: BLE001 - the screen's poll and the next request still look after it
+            log.warning("Could not start the text-to-speech housekeeping thread: %s", _reason(exc))
+            return
+        self._keeper = keeper
+
+    def _keep(self) -> None:
+        """The housekeeping thread: until shutdown, a round of _service about every HOUSEKEEPING seconds, and
+        sooner while a kill that left something running is due another try. Kills happen inside _service,
+        outside the lock, and only of workers this thread has marked as being killed under it."""
+        while not self._pacer.is_set():
+            try:
+                with self._lock:
+                    pause = KILL_RETRY if self._doomed else HOUSEKEEPING
+            except Exception:  # noqa: BLE001
+                pause = HOUSEKEEPING
+            if self._pacer.wait(pause) or self._pacer.is_set():
+                return
+            try:
+                self._service()
+            except Exception:  # noqa: BLE001 - the thread must outlive a bad round
+                self.housekeeping_failures += 1
+                if self.housekeeping_failures == 1:
+                    log.exception("Text-to-speech housekeeping failed")
+
+    def _stop_keeper(self) -> None:
+        """Ends the housekeeping thread and waits for it: a kill it has in progress is finished, not abandoned."""
+        self._pacer.set()
+        with self._lock:
+            keeper = self._keeper
+        if keeper is None or keeper is threading.current_thread():
+            return
+        keeper.join(KILL_PATIENCE)
+        if keeper.is_alive():
+            log.warning("The text-to-speech housekeeping thread is still ending a voice engine.")
 
     def _still_running(self) -> str:
         pids = sorted({pid for e in self._doomed for pid in (e.left or [e.pid])})
@@ -523,7 +686,10 @@ class TtsManager:
         elif self._launching:
             engine = "starting"
         else:
-            engine = "failed" if self._doomed or self._engine_failed else "stopped"
+            # "failed" is for the screen to report: a worker that died, hung or could not be started, or one
+            # that could not be ended. A worker being ended as planned (the idle timeout, unload) is stopped.
+            stuck = any(e.retry_at is not None for e in self._doomed)
+            engine = "failed" if stuck or self._engine_failed else "stopped"
         return {"engine": engine, **result}
 
     def status(self) -> dict:
@@ -562,9 +728,10 @@ class TtsManager:
         return outputs
 
     def speak(self, voice_id: str, text: str, preset: str, mic_device: int | None = None,
-              monitor_device: int | None = None, save: bool = False) -> dict:
+              monitor_device: int | None = None, save: bool = False, monitor_gain: float = 1.0) -> dict:
         """Starts speaking the text in that voice and returns the status at once; status() follows it from there.
-        Everything that can be refused is refused here, before anything is started."""
+        Everything that can be refused is refused here, before anything is started. monitor_gain is the volume
+        of the listen device only, as in live mode; the virtual mic always gets the speech as it is."""
         try:
             text = tts_text.clean(text) if isinstance(text, str) else tts_text.clean("")
             # Whether anything speakable is in it does not depend on the piece size, so this needs no clip yet.
@@ -576,7 +743,8 @@ class TtsManager:
                 voice = self._library.get(voice_id)
             except LibraryError:
                 raise TtsError("Unknown voice") from None
-            clip = tts_reference.choose(voice)
+            # The first clip in order of preference that is loud enough to copy: one file is read, as a rule.
+            clip = tts_reference.choose(voice, tts_reference.library_levels(self._library, voice.id))
             try:
                 wav = self._library.clip_audio_path(voice.id, clip.index)
             except LibraryError:
@@ -585,10 +753,14 @@ class TtsManager:
             ref_text = _sendable(clip.text).strip()
             # The transcript as stored: the worker adds a full stop and a space, which only raises the limit.
             max_chars = tts_audio.max_chars_for(ref_text, clip.seconds, SPEED)
-            pieces = tts_text.split(text, max_chars)
+            # The numbers the model misreads are written out here, after the length check on the text as typed.
+            pieces = tts_text.split(text, max_chars, numbers=True)
             if preset == "best" and voice.rvc_sample_rate is None:
                 raise TtsError(NO_MODEL)
             outputs = self._outputs(mic_device, monitor_device)
+            if not _is_number(monitor_gain) or not 0 <= monitor_gain <= MAX_MONITOR_GAIN:
+                raise TtsError(f"monitor_gain must be between 0 and {MAX_MONITOR_GAIN:g}")
+            gains = {"monitor": float(monitor_gain)} if "monitor" in outputs else {}
         except TtsError:
             raise
         except ValueError as exc:
@@ -611,7 +783,7 @@ class TtsManager:
             if not loaded:  # a running worker is the proof; the check would cost every request half a second
                 self._require_environment()
             try:
-                job.session = self._player.start(outputs)
+                job.session = self._player.start(outputs, gains)
             except ValueError as exc:
                 raise TtsError(str(exc)) from exc
             try:
@@ -663,15 +835,23 @@ class TtsManager:
                                "Close the app, or end it in Task Manager, before using the graphics card for "
                                "something else.")
             self._engine_failed = False
+            launching = self._launching
+        if launching:
+            # The request was told to stop but its thread is still inside the launch. Nothing can be ended yet:
+            # that thread ends the worker itself, and checks it, the moment the process exists.
+            log.warning("Text to speech was unloaded while a voice engine was still being started; the engine "
+                        "is stopped as soon as it exists.")
 
     def shutdown(self) -> None:
         """For the backend's own exit: no new request is accepted, and the request and the worker are stopped."""
         with self._lock:
-            self._closed = True
+            self._closed = True  # from here on no request is accepted and no housekeeping thread is started
+        self._pacer.set()  # no new housekeeping round; one in the middle of a kill is waited for below
         try:
             self.unload()
         except Exception as exc:  # noqa: BLE001 - the app is closing; the worker also ends when its parent is gone
             log.warning("Text to speech did not shut down cleanly: %s", _reason(exc))
+        self._stop_keeper()
 
     # ---- a request (its own thread)
 
@@ -873,6 +1053,7 @@ class TtsManager:
                     raise _Failed(f"The voice engine of an earlier request is still shutting down "
                                   f"({self._still_running()}). Try again in a moment.")
                 self._launching = True  # this request holds the only slot, so nobody else can be launching
+                self._start_keeper()  # a worker is about to exist: from now on it is looked after unasked
             else:
                 job.engine = engine
         if engine is None:
@@ -929,6 +1110,7 @@ class TtsManager:
         except Exception as exc:  # noqa: BLE001 - nobody would hear it: it does not get to run
             with self._lock:
                 self._doom(engine, failed=True)
+            self._remember_tree(engine)
             self._reap_doomed(force=True)
             raise _Failed(f"Could not start the voice engine: {_reason(exc)}") from exc
         if not wanted:
@@ -962,6 +1144,9 @@ class TtsManager:
         while job.awaiting is not None:
             event = self._next(job, engine, began, PIECE_TIMEOUT, "loading the reference clip")
             if event.get("event") == "error" and event.get("id") in (job.id, None):
+                if event.get("code") == "bad_request":  # the clip was refused: said in the Voices tab's terms
+                    message = str(event.get("message") or "it gave no details").strip()
+                    raise _Failed(_reference_refusal(message, job.wav.name, job.clip_index))
                 raise self._worker_error(engine, event)
         if engine.reference is None:
             raise self._broken(engine, "The voice engine gave no usable answer about the reference clip.")
@@ -972,7 +1157,7 @@ class TtsManager:
         try:
             max_chars = tts_audio.max_chars_for(job.ref_text, seconds, SPEED)
             if max_chars != job.max_chars:
-                pieces = tts_text.split(job.text, max_chars)
+                pieces = tts_text.split(job.text, max_chars, numbers=True)
                 with self._lock:
                     job.max_chars, job.pieces = max_chars, pieces
         except ValueError as exc:
@@ -1035,7 +1220,9 @@ class TtsManager:
                 raise _Failed(f"Voice conversion failed for sentence {number}: {_reason(exc)}") from exc
             if tts_audio.is_silent(audio, rate):
                 raise _Failed(f"Voice conversion produced no sound for sentence {number}")
-        audio = tts_audio.finish(audio, rate)
+        # Every piece at the same peak: the model's pieces differ by a few decibels, and by far more when the
+        # reference clip is quiet. Silence was refused above, so nothing is raised that is not speech.
+        audio = tts_audio.finish(audio, rate, level=tts_audio.PIECE_PEAK)
         self._watch(job)  # stopped meanwhile: nothing more is queued
         queued = self._now()
         self._player.enqueue(audio, session=job.session)

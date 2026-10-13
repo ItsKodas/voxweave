@@ -51,10 +51,12 @@ def _device(value, name: str) -> int | None:
 
 def tts_router(tts: TtsManager, library: Library | None, studio, training, live_running: Callable[[], bool],
                exclusive: AbstractContextManager, voices_lock: AbstractContextManager,
-               training_starting: threading.Event, allowed_origins: list[str]) -> APIRouter:
+               training_starting: threading.Event, allowed_origins: list[str],
+               monitor_gain: Callable[[], float] | None = None) -> APIRouter:
     """`exclusive` and `voices_lock` are the audio lock and the voices lock shared with /live, /library and
     /training, taken in that order and only by speak. `training_starting` is set, under the audio lock, while a
-    training start is unloading the text-to-speech worker: nothing may be spoken from then on."""
+    training start is unloading the text-to-speech worker: nothing may be spoken from then on. `monitor_gain()`
+    is the listen volume live mode was last given: speech is heard on the listen device at the same volume."""
     router = APIRouter(prefix="/tts", dependencies=[Depends(same_app_only_for(allowed_origins))])
 
     def refuse_if_busy() -> None:
@@ -91,7 +93,9 @@ def tts_router(tts: TtsManager, library: Library | None, studio, training, live_
     def voices() -> list[dict]:
         listed = []
         for voice in library.list() if library is not None else []:
-            found = tts_reference.describe(voice)
+            # The level of the clip counts: one too quiet to copy is passed over, and a voice with no other is
+            # not usable, with the reason. Reads a clip's audio once; after that only its size and date.
+            found = tts_reference.describe(voice, tts_reference.library_levels(library, voice.id))
             reference = {"ok": found["ok"], "seconds": found["seconds"], "message": found["message"]}
             if found["ok"]:
                 try:  # speak refuses a reference clip whose audio file is gone, so it is not called usable here
@@ -144,7 +148,7 @@ def tts_router(tts: TtsManager, library: Library | None, studio, training, live_
             refuse_if_busy()
             with voices_lock:  # so a delete of this voice cannot slip in between its check and the start
                 return tts.speak(body.voice_id, body.text, body.preset, mic_device=mic, monitor_device=monitor,
-                                 save=body.save)
+                                 save=body.save, monitor_gain=monitor_gain() if monitor_gain else 1.0)
 
     @router.post("/stop")
     def stop() -> dict:

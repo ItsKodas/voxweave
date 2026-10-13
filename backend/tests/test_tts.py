@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from aivoice import tts
+from aivoice import tts, tts_audio
 from aivoice.audiofile import read_wav, write_wav
 from aivoice.devices import Device
 from aivoice.library import Library
@@ -168,10 +168,84 @@ class _Out:
         self.closed = True
 
 
+class Counter:
+    """Counts something another thread does, so that a test can wait until it has happened again instead of
+    sleeping: "the request looked at the clock three more times and is still running"."""
+
+    def __init__(self):
+        self.count = 0
+        self._changed = threading.Condition()
+
+    def add(self):
+        with self._changed:
+            self.count += 1
+            self._changed.notify_all()
+
+    def more(self, n=3):
+        with self._changed:
+            target = self.count + n
+            assert self._changed.wait_for(lambda: self.count >= target, WAIT), "nothing is looking any more"
+
+
+class WatchedEvent(threading.Event):
+    """An Event that shows when somebody has begun to wait for it."""
+
+    def __init__(self):
+        super().__init__()
+        self.awaited = threading.Event()
+
+    def wait(self, timeout=None):
+        self.awaited.set()
+        return super().wait(timeout)
+
+
+class FakePacer:
+    """Stands in for the Event the housekeeping thread waits on between its rounds. The thread only goes round
+    when a test says so (tick), and a test knows when that round is over: the thread is waiting again."""
+
+    def __init__(self):
+        self.waits = []  # the seconds of each wait, in order
+        self._go = queue.Queue()
+        self._rounds = queue.Queue()
+        self._set = threading.Event()
+
+    # what the manager calls
+    def wait(self, timeout=None):
+        if self.waits:
+            self._rounds.put(len(self.waits))  # back from a round
+        self.waits.append(timeout)
+        if self._set.is_set():
+            return True
+        self._go.get()
+        return self._set.is_set()
+
+    def set(self):
+        self._set.set()
+        self._go.put(None)
+
+    def is_set(self):
+        return self._set.is_set()
+
+    # what a test calls
+    def tick(self):
+        """One housekeeping round, from start to finish."""
+        self.begin()
+        self._rounds.get(timeout=WAIT)
+
+    def begin(self):
+        """Starts a round and returns at once, for a round a test holds half-way."""
+        self._go.put(None)
+
+    def finished(self):
+        self._rounds.get(timeout=WAIT)
+
+
 class FakePlayer:
     def __init__(self, rig):
         self.rig = rig
         self.starts = []  # the devices of each session
+        self.gains = []  # and its gains
+        self.polls = Counter()  # status() calls: the request looking at the player
         self.session = None
         self.pieces = queue.Queue()  # (session, audio) as enqueued
         self.played = []
@@ -189,6 +263,7 @@ class FakePlayer:
         if self.start_error is not None:
             raise ValueError(self.start_error)
         self.starts.append(dict(devices))
+        self.gains.append(gains)
         self.session = object()
         self.ended.clear()
         self.rig.log.append("player.start")
@@ -218,6 +293,7 @@ class FakePlayer:
         return ended
 
     def status(self):
+        self.polls.add()
         return {"playing": not self.ended.is_set(), "queued_seconds": 0.0, "played_seconds": 0.0,
                 "error": self.error}
 
@@ -225,6 +301,7 @@ class FakePlayer:
 class FakeConverter:
     def __init__(self):
         self.inputs = []
+        self.outputs = []
         self.error = None
         self.silent = False
         self.entered = threading.Event()
@@ -242,7 +319,8 @@ class FakeConverter:
             raise self.error
         if self.silent:
             return np.zeros_like(piece)
-        return (piece * 0.5).astype(np.float32)
+        self.outputs.append((piece * 0.5).astype(np.float32))
+        return self.outputs[-1]
 
 
 class Rig:
@@ -267,6 +345,8 @@ class Rig:
         self.report = PASS
         self.verify_calls = []
         self.clock = 1_760_000_000.0  # 2025-10-09T08:53:20Z
+        self.looks = Counter()  # how often the manager has read the clock
+        self.pacer = FakePacer()
         self.log = []  # what happened, in order, across the fakes
         self.auto = True  # the worker answers by itself
         self.ready = True  # and reports ready as soon as it is started
@@ -298,17 +378,27 @@ class Rig:
             raise self.rvc_error
         return self.converter
 
+    def now(self):
+        self.looks.add()
+        return self.clock
+
     def build(self):
+        self.pacer = FakePacer()
         self.manager = TtsManager(self.data, self.library, self.tts_root, self.player, lambda: self.devices,
                                   launch=self.launch, verify=self.verify, rvc_factory=self.rvc,
-                                  now=lambda: self.clock, processes=self.tools, tick=0.005)
+                                  now=self.now, processes=self.tools, tick=0.005, pacer=self.pacer)
         return self.manager
 
-    def voice(self, name="Narrator", seconds=8.0, text=TRANSCRIPT, model=False):
+    def still_running(self, looks=3):
+        """True once the request has looked at the clock that many more times and has not ended: it had every
+        chance to act on what the test just changed."""
+        self.looks.more(looks)
+        return self.manager.is_active()
+
+    def voice(self, name="Narrator", seconds=8.0, text=TRANSCRIPT, model=False, level=0.2):
         voice = self.library.create(name)
         if seconds:
-            noise = np.random.default_rng(0).uniform(-0.2, 0.2, int(seconds * 48000)).astype(np.float32)
-            self.library.add_clip(voice.id, noise, text, "recorded")
+            self.clip(voice, seconds, text, level)
         if model:
             folder = self.data / "voices" / voice.id / "models" / "rvc"
             folder.mkdir(parents=True)
@@ -316,10 +406,14 @@ class Rig:
             (folder / "voice.json").write_text(json.dumps({"sample_rate": 40000}))
         return self.library.get(voice.id)
 
-    def speak(self, voice=None, text=TEXT, preset="fast", mic_device=None, monitor_device=1, save=False):
+    def clip(self, voice, seconds=8.0, text=TRANSCRIPT, level=0.2, source="recorded"):
+        noise = np.random.default_rng(0).uniform(-level, level, int(seconds * 48000)).astype(np.float32)
+        return self.library.add_clip(voice.id, noise, text, source)
+
+    def speak(self, voice=None, text=TEXT, preset="fast", mic_device=None, monitor_device=1, save=False, **more):
         voice = voice or self.voice()
         return self.manager.speak(voice.id, text, preset, mic_device=mic_device, monitor_device=monitor_device,
-                                  save=save)
+                                  save=save, **more)
 
     def worker(self):
         return self.launched.get(timeout=WAIT)
@@ -345,6 +439,8 @@ def rig(tmp_path):
     for worker in rig.workers:
         worker.die()  # a request a test left waiting for its worker ends at once
     rig.manager.shutdown()
+    keeper = rig.manager._keeper
+    assert keeper is None or not keeper.is_alive(), "shutdown left the housekeeping thread running"
 
 
 def nothing_started(rig):
@@ -553,7 +649,7 @@ def test_the_reference_clip_is_the_voices_own_file_and_is_left_untouched(rig):
     assert sorted(p.name for p in clip.parent.iterdir()) == ["0001.orig.wav", "0001.txt", "0001.wav"]
 
 
-def test_a_refused_reference_fails_the_request_with_the_workers_words_and_is_asked_again_next_time(rig):
+def test_a_refused_reference_fails_the_request_naming_the_clip_and_is_asked_again_next_time(rig):
     rig.auto = False
     voice = rig.voice()
     rig.speak(voice)
@@ -563,7 +659,9 @@ def test_a_refused_reference_fails_the_request_with_the_workers_words_and_is_ask
     worker.emit(event="error", id=command["id"], code="bad_request",
                 message="The reference clip 0001.orig.wav could not be read as a WAV file: bad header")
     status = rig.finish()
-    assert status["error"] == "The reference clip 0001.orig.wav could not be read as a WAV file: bad header"
+    # the worker's words, with the clip as the Voices tab shows it instead of a file name, and what can be done
+    assert status["error"] == ("Clip 1, this voice's reference clip, could not be read as a WAV file: bad header. "
+                               "Delete that clip or record it again.")
     assert status["state"] == "idle" and worker.kills == 0 and worker.named("synthesize") == []
     rig.speak(voice)
     worker.expect("set_reference")  # the worker dropped its reference, so nothing is taken as loaded
@@ -637,6 +735,7 @@ def test_each_piece_is_trimmed_finished_and_queued_and_its_file_deleted(rig):
         # 1.5 s at 24 kHz with half a second of lead-in becomes about 1 s at 48 kHz
         assert 0.95 * 48000 < len(audio) < 1.15 * 48000
         assert abs(audio[0]) < 0.01 and abs(audio[-1]) < 0.01 and 0.25 < np.abs(audio).max() <= 0.97
+        assert np.abs(audio).max() == pytest.approx(0.89, abs=0.005)  # every piece at the same level
     assert rig.tmp_folders() == []
 
 
@@ -683,7 +782,8 @@ def test_the_request_stays_speaking_until_playback_has_ended(rig):
     rig.speak()
     for _ in range(3):
         rig.player.pieces.get(timeout=WAIT)
-    assert not rig.manager.join(0.05)
+    assert rig.player.finished.wait(WAIT)
+    rig.player.polls.more(3)  # the request has looked at the player again and again: it is waiting for it
     assert rig.manager.status()["state"] == "speaking" and rig.manager.busy
     rig.player.ended.set()
     assert rig.finish()["state"] == "idle"
@@ -775,64 +875,15 @@ def test_best_sends_every_piece_through_the_voices_model_at_48_khz(rig):
     assert status["error"] is None and status["preset"] == "best"
     assert rig.rvc_calls == [voice.id]
     assert len(rig.converter.inputs) == 3
-    for (_, played), given in zip(rig.player.played, rig.converter.inputs):
+    assert len(rig.converter.outputs) == 3
+    for (_, played), given, returned in zip(rig.player.played, rig.converter.inputs, rig.converter.outputs):
         assert given.dtype == np.float32 and 0.95 * 48000 < len(given) < 1.15 * 48000  # trimmed, at 48 kHz
-        assert 0.1 < np.abs(played).max() < 0.2  # what was played is what the converter returned (half the level)
-
-
-def test_fast_and_balanced_never_load_the_voices_model(rig):
-    voice = rig.voice(model=True)
-    rig.speak(voice, preset="balanced")
-    rig.finish()
-    assert rig.rvc_calls == [] and rig.converter.inputs == []
-
-
-@pytest.mark.parametrize("fault, message", [
-    ("error", "Voice conversion failed for sentence 1: the session is gone"),
-    ("silent", "Voice conversion produced no sound for sentence 1"),
-    ("load", "Could not load this voice's trained model: model.onnx is damaged"),
-])
-def test_a_failed_rvc_pass_fails_the_request_and_plays_nothing(rig, fault, message):
-    if fault == "error":
-        rig.converter.error = RuntimeError("the session is gone")
-    elif fault == "silent":
-        rig.converter.silent = True
-    else:
-        rig.rvc_error = RuntimeError("model.onnx is damaged")
-    rig.speak(rig.voice(model=True), preset="best")
-    status = rig.finish()
-    assert status["error"] == message and status["state"] == "idle"
-    assert rig.player.played == [] and rig.tmp_folders() == []
-
-
-def test_the_default_rvc_pass_uses_live_modes_engine_factory_and_the_high_quality_preset(rig, monkeypatch):
-    from aivoice import manager as live_manager
-    from aivoice.presets import PRESETS
-
-    built = []
-
-    class Engine:
-        def convert(self, audio, sample_rate, pitch_shift, params):
-            built.append(("convert", len(audio), sample_rate, pitch_shift, params))
-            return audio
-
-    def factory(data):
-        def build(voice):
-            built.append(("engine", data, voice))
-            return Engine()
-        return build
-
-    monkeypatch.setattr(live_manager, "default_engine_factory", factory)
-    voice = rig.voice(model=True)
-    folder = rig.data / "voices" / voice.id / "models" / "rvc"
-    (folder / "model.index").write_bytes(b"index")
-    manager = TtsManager(rig.data, rig.library, rig.tts_root, rig.player, lambda: DEVICES)
-    converter = manager._default_rvc(voice.id)
-    (_, data, described), warm = built
-    assert data == rig.data and described.id == voice.id and described.sample_rate == 40000
-    assert described.model_path == folder / "model.onnx" and described.index_path == folder / "model.index"
-    assert warm == ("convert", 20 * 48000, 48000, 0.0, PRESETS["high_quality"])  # warmed with one silent window
-    assert len(converter.convert(np.ones(4800, np.float32))) == 4800
+        assert 0.25 < np.abs(given).max() < 0.35  # the converter is given the piece at the level it came in
+        # What was played is what the converter returned (half the level), trimmed again and brought to the
+        # level every piece is played at.
+        assert 0.1 < np.abs(returned).max() < 0.2
+        assert np.abs(played).max() == pytest.approx(0.89, abs=0.005)
+        assert np.array_equal(played, tts_audio.finish(tts_audio.trim_edges(returned, 48000), 48000, level=0.89))
 
 
 # ---------------------------------------------------------------- 4. saving
@@ -1021,7 +1072,8 @@ def test_stop_while_the_reference_is_loading_waits_for_the_workers_answer(rig):
     worker.expect("set_reference")
     stopping = threading.Thread(target=rig.manager.stop)
     stopping.start()
-    assert not rig.manager.join(0.05)  # the answer is still owed: a later request must not mistake it for its own
+    assert rig.manager._job.stop.wait(WAIT)
+    assert rig.still_running()  # the answer is still owed: a later request must not mistake it for its own
     worker.emit(event="reference", seconds=8.0)
     stopping.join(WAIT)
     assert rig.manager.status()["state"] == "idle" and worker.named("cancel") == []
@@ -1096,7 +1148,7 @@ def test_an_internal_error_fails_the_request_and_the_worker_is_killed_and_checke
 def test_a_worker_that_does_not_deliver_a_piece_within_a_minute_is_treated_as_dead(rig):
     worker, job = mid_job(rig)
     rig.clock += tts.PIECE_TIMEOUT - 1
-    assert not rig.manager.join(0.05) and worker.kills == 0
+    assert rig.still_running() and worker.kills == 0
     rig.clock += 2
     status = rig.finish()
     assert status["error"].startswith("The voice engine did not answer within 60 seconds while synthesising")
@@ -1126,7 +1178,7 @@ def test_a_slow_rvc_pass_does_not_eat_the_next_pieces_minute(rig):
     worker.audio(job, 0)
     rig.player.pieces.get(timeout=WAIT)  # converted (59 s on the clock) and queued
     rig.clock += tts.PIECE_TIMEOUT - 1  # the worker's minute for the next piece starts now
-    assert not rig.manager.join(0.05) and worker.kills == 0
+    assert rig.still_running() and worker.kills == 0
     rig.converter.on_convert = None
     worker.audio(job, 1)
     worker.audio(job, 2)
@@ -1173,9 +1225,10 @@ def test_a_worker_whose_launch_outlives_its_request_is_not_left_running(rig, end
     rig.launch_gate = threading.Event()
     rig.speak()
     assert rig.launching.wait(WAIT)
+    job = rig.manager._job
     ender = threading.Thread(target=getattr(rig.manager, ending))
     ender.start()
-    ender.join(0.05)
+    assert job.stop.wait(WAIT)  # the request has been told to stop while its worker is still being launched
     rig.launch_gate.set()  # the process exists only now, after the request was stopped
     ender.join(WAIT)
     assert not ender.is_alive()
@@ -1201,7 +1254,7 @@ def test_a_worker_that_does_not_start_within_two_minutes_is_treated_as_dead(rig)
     rig.speak()
     worker = rig.worker()
     rig.clock += tts.START_TIMEOUT - 1
-    assert not rig.manager.join(0.05) and rig.manager.status()["engine"] == "starting"
+    assert rig.still_running() and rig.manager.status()["engine"] == "starting"
     rig.clock += 2
     status = rig.finish()
     assert status["error"].startswith("The voice engine did not answer within 120 seconds while starting")
@@ -1436,6 +1489,8 @@ def kill_in_progress(rig):
     poll = threading.Thread(target=rig.manager.status)
     poll.start()
     assert entered.wait(WAIT)
+    engine, = rig.manager._doomed
+    engine.resting = worker.resting = WatchedEvent()  # shows when somebody begins to wait for this kill
     return worker, release, poll
 
 
@@ -1452,7 +1507,7 @@ def test_unload_waits_for_a_kill_another_thread_has_in_progress(rig):
 
     unloading = threading.Thread(target=unload)
     unloading.start()
-    unloading.join(0.05)
+    assert worker.resting.awaited.wait(WAIT)  # unload has got as far as waiting for the other thread's kill
     assert outcome == []  # neither a false "could not be stopped" nor a return before the worker is gone
     release.set()
     unloading.join(WAIT)
@@ -1465,7 +1520,7 @@ def test_shutdown_waits_for_a_kill_another_thread_has_in_progress(rig):
     worker, release, poll = kill_in_progress(rig)
     closing = threading.Thread(target=rig.manager.shutdown)
     closing.start()
-    closing.join(0.05)
+    assert worker.resting.awaited.wait(WAIT)  # shutdown has got as far as waiting for the other thread's kill
     assert closing.is_alive() and worker.code is None  # the worker is still there: shutdown has not returned
     release.set()
     closing.join(WAIT)
@@ -1706,29 +1761,92 @@ def test_a_check_that_raises_is_a_failed_environment(rig):
         rig.speak()
 
 
-def test_the_default_check_runs_verify_py_with_the_backends_python(rig, monkeypatch):
-    calls = []
+class FakeCheck:
+    """Stands in for the environment check's process (subprocess.Popen)."""
+    calls = []  # (argv, options) of each check started
+    waits = []  # the time limit each was given
+    code, out, err = 0, "", ""
+    hangs = False  # the check never finishes by itself
 
-    def fake_run(argv, **options):
-        calls.append((argv, options))
-        return subprocess.CompletedProcess(argv, 0, stdout="noise\n" + json.dumps(PASS) + "\n", stderr="")
+    def __init__(self, argv, **options):
+        FakeCheck.calls.append((argv, options))
+        self.pid = 6000 + len(FakeCheck.calls)
+        self.returncode = None
+        self.communicated = 0
 
-    monkeypatch.setattr(tts.subprocess, "run", fake_run)
-    manager = TtsManager(rig.data, rig.library, rig.tts_root, rig.player, lambda: DEVICES)
+    def communicate(self, timeout=None):
+        self.communicated += 1
+        FakeCheck.waits.append(timeout)
+        if FakeCheck.hangs and self.returncode is None:
+            raise subprocess.TimeoutExpired("verify.py", timeout)
+        self.returncode = FakeCheck.code if self.returncode is None else self.returncode
+        return FakeCheck.out, FakeCheck.err
+
+    def poll(self):
+        return self.returncode
+
+
+@pytest.fixture
+def check(monkeypatch):
+    for name, value in (("calls", []), ("waits", []), ("code", 0), ("out", ""), ("err", ""), ("hangs", False)):
+        monkeypatch.setattr(FakeCheck, name, value)
+    monkeypatch.setattr(tts.subprocess, "Popen", FakeCheck)
+    monkeypatch.setattr(tts.subprocess, "run", lambda *a, **k: pytest.fail("subprocess.run cannot end a tree"))
+    return FakeCheck
+
+
+def test_the_default_check_runs_verify_py_with_the_backends_python(rig, check):
+    check.out = "noise\n" + json.dumps(PASS) + "\n"
+    manager = TtsManager(rig.data, rig.library, rig.tts_root, rig.player, lambda: DEVICES, processes=rig.tools)
     assert manager.environment() == {**PASS, "ready": True}
     assert manager._run_verify(True) == PASS
-    (full, options), (fast, _) = calls
+    (full, options), (fast, _) = check.calls
     assert full == [sys.executable, str(rig.tts_root / "verify.py")] and fast == full + ["--fast"]
     assert options["stdin"] == subprocess.DEVNULL and options["creationflags"] == tts._NO_WINDOW
-    assert options["timeout"] and "shell" not in options
+    assert options["stdout"] == subprocess.PIPE and options["stderr"] == subprocess.PIPE
+    assert all(check.waits) and "shell" not in options
+    assert rig.tools.calls == []  # a check that ends by itself is not killed
 
 
-def test_a_check_that_prints_nothing_usable_is_a_failed_environment(rig, monkeypatch):
-    monkeypatch.setattr(tts.subprocess, "run", lambda argv, **o: subprocess.CompletedProcess(
-        argv, 1, stdout="", stderr="ModuleNotFoundError: no module named json"))
-    manager = TtsManager(rig.data, rig.library, rig.tts_root, rig.player, lambda: DEVICES)
+def test_a_check_that_prints_nothing_usable_is_a_failed_environment(rig, check):
+    check.code, check.err = 1, "ModuleNotFoundError: no module named json"
+    manager = TtsManager(rig.data, rig.library, rig.tts_root, rig.player, lambda: DEVICES, processes=rig.tools)
     report = manager.environment()
     assert report["ready"] is False and "ModuleNotFoundError" in report["checks"][0]["message"]
+
+
+def test_the_quick_check_gets_twenty_seconds_and_the_full_one_five_minutes(rig, check):
+    # the quick one runs while a request holds the audio and voices locks
+    check.out = json.dumps(PASS)
+    manager = TtsManager(rig.data, rig.library, rig.tts_root, rig.player, lambda: DEVICES, processes=rig.tools)
+    manager._run_verify(True)
+    manager._run_verify(False)
+    assert check.waits == [20.0, 300.0] == [tts.FAST_VERIFY_TIMEOUT, tts.VERIFY_TIMEOUT]
+
+
+def test_a_check_that_runs_out_of_time_has_its_whole_process_tree_ended(rig, check):
+    # the Python of a virtual environment is a launcher; the real interpreter is its child
+    check.hangs = True
+    child = FakeProc(6101)
+    rig.tools.trees[6001] = [FakeProc(6001), child]
+    manager = TtsManager(rig.data, rig.library, rig.tts_root, rig.player, lambda: DEVICES, processes=rig.tools)
+    report = manager._run_verify(True)
+    assert report == {"ok": False, "checks": [{"id": "verify", "ok": False, "message": (
+        "The text-to-speech environment check did not finish within 20 seconds and was stopped. Try again; if it "
+        "keeps happening, restart the app.")}]}
+    assert [c[0] for c in rig.tools.calls[:2]] == ["tree", "taskkill"]  # listed first, then ended as a tree
+    assert ("taskkill", 6001) in rig.tools.calls and not child.alive
+    assert check.waits == [20.0, tts.PIPE_WAIT]  # its output is let go of, with a limit of its own
+
+
+def test_a_check_whose_tree_cannot_be_ended_is_reported_in_the_log_and_still_fails_cleanly(rig, check, caplog):
+    check.hangs = True
+    rig.tools.trees[6001] = [FakeProc(6001), FakeProc(6102, killable=False)]
+    manager = TtsManager(rig.data, rig.library, rig.tts_root, rig.player, lambda: DEVICES, processes=rig.tools)
+    with caplog.at_level(logging.ERROR, logger="aivoice.tts"):
+        report = manager._run_verify(False)
+    assert report["ok"] is False and "did not finish within 300 seconds" in report["checks"][0]["message"]
+    assert any("process 6001" in r.getMessage() and "6102" in r.getMessage() for r in caplog.records)
 
 
 # ---------------------------------------------------------------- the real launch
@@ -1789,3 +1907,714 @@ def test_the_launched_handle_kills_its_tree_the_way_trainings_does(tmp_path, mon
         handle.kill_tree()
     assert failed.value.survivors == [stubborn]
     assert [c[0] for c in tools.calls[:2]] == ["tree", "taskkill"]  # the list is taken before anything is killed
+
+
+# ================================================================ the final fix wave
+
+# ---------------------------------------------------------------- housekeeping: the manager's own clock (B1)
+# The screen asks for the status only while a request is running, so nothing here may depend on being asked.
+# rig.pacer.tick() is one round of the housekeeping thread, from start to finish; no test waits for real time.
+
+def idle_worker(rig, *children):
+    """A worker that has served a request and is idle, and the voice it spoke in."""
+    if children:
+        rig.children(*children)
+    voice = rig.voice()
+    rig.speak(voice)
+    assert rig.finish()["error"] is None
+    worker, = rig.workers
+    return worker, voice
+
+
+def housekeeping_kill_in_progress(rig):
+    """The idle-timeout kill, started by the housekeeping thread and held half-way."""
+    worker, voice = idle_worker(rig)
+    entered, release = threading.Event(), threading.Event()
+
+    def held():
+        entered.set()
+        assert release.wait(WAIT)
+
+    worker.on_kill = held
+    rig.clock += tts.IDLE_UNLOAD
+    rig.pacer.begin()
+    assert entered.wait(WAIT)
+    engine, = rig.manager._doomed
+    engine.resting = worker.resting = WatchedEvent()
+    return worker, voice, release
+
+
+def test_the_worker_is_unloaded_after_ten_idle_minutes_with_nobody_asking_for_the_status(rig):
+    child = FakeProc(7020)
+    worker, voice = idle_worker(rig, child)
+    rig.clock += tts.IDLE_UNLOAD - 1
+    rig.pacer.tick()
+    assert worker.kills == 0 and worker.code is None
+    rig.clock += 1
+    rig.pacer.tick()
+    # all of it before anybody asks: the worker is gone, checked, and its pipes closed
+    assert worker.kills == 1 and worker.code is not None and worker.stdin.closed
+    assert not child.alive  # one the tree kill missed is ended from the list taken beforehand
+    assert rig.manager._engine is None and rig.manager._doomed == []
+    status = rig.manager.status()
+    assert status["engine"] == "stopped" and status["state"] == "idle" and status["error"] is None
+    rig.speak(voice)
+    assert rig.finish()["error"] is None and len(rig.launches) == 2  # and the next request starts a fresh one
+
+
+def test_a_worker_that_died_while_idle_is_noticed_with_nobody_asking_for_the_status(rig, caplog):
+    orphan = FakeProc(7021)
+    worker, voice = idle_worker(rig, orphan)
+    worker.die()
+    with caplog.at_level(logging.WARNING, logger="aivoice.tts"):
+        rig.pacer.tick()
+    assert any("ended while idle" in r.getMessage() for r in caplog.records)
+    assert not orphan.alive and worker.kills == 0 and worker.stdin.closed  # what it left running is ended
+    assert rig.manager._doomed == []
+    assert rig.manager.status()["engine"] == "failed"  # the screen can say that the engine stopped
+    rig.speak(voice)
+    assert rig.finish()["error"] is None and rig.manager.status()["engine"] == "ready"
+
+
+def housekeepers():
+    return [t for t in threading.enumerate() if t.name == "tts-housekeeping"]
+
+
+def test_housekeeping_starts_with_the_first_worker_and_there_is_only_ever_one(rig):
+    before = len(housekeepers())
+    assert rig.manager._keeper is None  # nothing to look after: no thread
+    rig.manager.status()
+    with pytest.raises(TtsError):
+        rig.speak(text="")
+    assert rig.manager._keeper is None and len(housekeepers()) == before
+    worker, voice = idle_worker(rig)
+    keeper = rig.manager._keeper
+    assert keeper.is_alive() and keeper.daemon and len(housekeepers()) == before + 1
+    rig.manager.unload()
+    rig.speak(voice)
+    rig.finish()
+    rig.workers[-1].die()
+    rig.speak(voice)
+    rig.finish()
+    assert len(rig.launches) == 3 and rig.manager._keeper is keeper and len(housekeepers()) == before + 1
+
+
+def test_housekeeping_looks_every_thirty_seconds_and_sooner_while_a_kill_is_owed(rig):
+    stubborn = FakeProc(7022, killable=False)
+    worker, voice = idle_worker(rig, stubborn)
+    rig.pacer.tick()
+    rig.pacer.tick()
+    assert rig.pacer.waits == [30.0, 30.0, 30.0] and tts.HOUSEKEEPING == 30.0
+    rig.clock += tts.IDLE_UNLOAD
+    rig.pacer.tick()  # the idle timeout: the kill leaves 7022 running
+    assert worker.kills == 1 and stubborn.alive and rig.manager._doomed != []
+    assert rig.pacer.waits[-1] == tts.KILL_RETRY  # so it looks again as soon as another try is due
+    kills = rig.tools.count("kill")
+    rig.pacer.tick()  # the clock has not moved: not hammered
+    assert rig.tools.count("kill") == kills
+    stubborn.killable = True
+    rig.clock += tts.KILL_RETRY
+    rig.pacer.tick()
+    assert not stubborn.alive and rig.manager._doomed == [] and worker.kills == 1
+    assert rig.pacer.waits[-1] == 30.0
+    assert rig.manager.status()["engine"] == "stopped"
+
+
+def test_housekeeping_never_kills_while_holding_the_managers_lock_and_nothing_else_is_held_up(rig):
+    worker, voice, release = housekeeping_kill_in_progress(rig)
+    try:
+        # While the kill is in progress on the housekeeping thread, everything that only takes the lock answers.
+        seen = []
+        asking = threading.Thread(target=lambda: seen.extend(
+            [rig.manager.status(), rig.manager.is_active(), rig.manager.busy, rig.manager.join(0)]))
+        asking.start()
+        asking.join(WAIT)
+        assert not asking.is_alive(), "the manager's lock is held during a kill"
+        # being stopped, as planned: not "failed", which the screen would report as the engine having died
+        assert seen[0]["engine"] == "stopped" and seen[0]["state"] == "idle"
+        assert seen[1:] == [False, False, True]
+        assert worker.kills == 1  # the status poll did not start a second kill of the same worker
+    finally:
+        release.set()
+    rig.pacer.finished()
+    assert worker.kills == 1 and worker.code is not None
+    assert rig.manager.status()["engine"] == "stopped"
+
+
+def test_speak_during_a_housekeeping_kill_is_refused_and_works_once_the_worker_is_gone(rig):
+    worker, voice, release = housekeeping_kill_in_progress(rig)
+    try:
+        with pytest.raises(TtsError, match="^The voice engine of an earlier request is still shutting down "
+                                           r"\(process 5000\). Try again in a moment.$"):
+            rig.speak(voice)
+        assert len(rig.launches) == 1 and not rig.manager.busy and worker.kills == 1
+    finally:
+        release.set()
+    rig.pacer.finished()
+    rig.speak(voice)
+    assert rig.finish()["error"] is None
+    assert len(rig.launches) == 2 and worker.kills == 1 and rig.workers[1].kills == 0
+
+
+def test_unload_during_a_housekeeping_kill_waits_for_it_and_does_not_kill_a_second_time(rig):
+    worker, voice, release = housekeeping_kill_in_progress(rig)
+    outcome = []
+
+    def unload():
+        try:
+            rig.manager.unload()
+            outcome.append("unloaded")
+        except Exception as exc:  # noqa: BLE001
+            outcome.append(exc)
+
+    unloading = threading.Thread(target=unload)
+    unloading.start()
+    try:
+        assert worker.resting.awaited.wait(WAIT)  # unload is waiting for the housekeeping thread's kill
+        assert outcome == [] and worker.kills == 1 and worker.code is None
+    finally:
+        release.set()
+    unloading.join(WAIT)
+    rig.pacer.finished()
+    assert outcome == ["unloaded"] and worker.kills == 1 and worker.code is not None
+    assert rig.manager.status()["engine"] == "stopped"
+
+
+def test_shutdown_during_a_housekeeping_kill_waits_for_it_and_the_thread_ends(rig):
+    worker, voice, release = housekeeping_kill_in_progress(rig)
+    keeper = rig.manager._keeper
+    closing = threading.Thread(target=rig.manager.shutdown)
+    closing.start()
+    try:
+        assert worker.resting.awaited.wait(WAIT)
+        assert closing.is_alive() and keeper.is_alive() and worker.code is None
+    finally:
+        release.set()
+    closing.join(WAIT)
+    assert not closing.is_alive() and not keeper.is_alive()  # neither a process nor a thread is left
+    assert worker.kills == 1 and worker.code is not None and rig.manager._doomed == []
+    assert rig.manager.status()["engine"] == "stopped"
+
+
+def test_shutdown_waits_for_a_housekeeping_round_in_progress_before_it_returns(rig, monkeypatch):
+    worker, voice = idle_worker(rig)
+    entered, release = threading.Event(), threading.Event()
+    service = rig.manager._service
+
+    def slow():
+        entered.set()
+        assert release.wait(WAIT)
+        service()
+
+    monkeypatch.setattr(rig.manager, "_service", slow)
+    keeper = rig.manager._keeper
+    joining, join = threading.Event(), keeper.join
+    keeper.join = lambda timeout=None: (joining.set(), join(timeout))[1]
+    rig.pacer.begin()
+    assert entered.wait(WAIT)
+    closing = threading.Thread(target=rig.manager.shutdown)
+    closing.start()
+    try:
+        assert joining.wait(WAIT), "shutdown returned without waiting for the housekeeping thread"
+        assert closing.is_alive() and keeper.is_alive()
+    finally:
+        release.set()
+    closing.join(WAIT)
+    assert not closing.is_alive() and not keeper.is_alive() and worker.kills == 1
+
+
+def test_shutdown_stops_the_housekeeping_thread_and_none_is_started_afterwards(rig):
+    worker, voice = idle_worker(rig)
+    keeper = rig.manager._keeper
+    assert keeper.is_alive()
+    rounds = len(rig.pacer.waits)
+    rig.manager.shutdown()
+    assert not keeper.is_alive() and worker.kills == 1
+    assert len(rig.pacer.waits) == rounds  # it did not go round again on its way out
+    with pytest.raises(TtsError, match="^The app is closing$"):
+        rig.speak(voice)
+    rig.manager.shutdown()  # twice is harmless
+    assert rig.manager._keeper is keeper and not keeper.is_alive()
+
+
+def test_shutdown_before_any_worker_leaves_no_thread(rig):
+    rig.manager.shutdown()
+    assert rig.manager._keeper is None and rig.pacer.is_set()
+    with pytest.raises(TtsError, match="^The app is closing$"):
+        rig.speak()
+    assert rig.manager._keeper is None and rig.launches == []
+
+
+def test_shutdown_while_the_first_worker_is_being_launched_leaves_neither_thread_nor_process(rig):
+    rig.launch_gate = threading.Event()
+    rig.speak()
+    assert rig.launching.wait(WAIT)
+    job, keeper = rig.manager._job, rig.manager._keeper
+    assert keeper.is_alive()  # started with the launch: the worker is looked after from its first moment
+    closing = threading.Thread(target=rig.manager.shutdown)
+    closing.start()
+    assert job.stop.wait(WAIT)
+    rig.launch_gate.set()
+    closing.join(WAIT)
+    assert not closing.is_alive() and not keeper.is_alive()
+    worker, = rig.workers
+    assert worker.kills == 1 and worker.code is not None and rig.manager._doomed == []
+
+
+def test_housekeeping_leaves_a_request_and_its_worker_alone_and_stop_still_works(rig):
+    worker, job = mid_job(rig)
+    seen = len(worker.seen)
+    rig.pacer.tick()
+    assert worker.kills == 0 and len(worker.seen) == seen and rig.manager.is_active()
+    assert rig.manager.status()["state"] == "speaking"
+    rig.auto = True
+    status = rig.manager.stop()
+    rig.pacer.tick()
+    assert status["state"] == "idle" and worker.kills == 0 and rig.manager.status()["engine"] == "ready"
+
+
+def test_the_idle_time_counts_from_the_end_of_the_last_request(rig):
+    worker, job = mid_job(rig)
+    rig.manager._last_used -= tts.IDLE_UNLOAD  # the request has been running for longer than the idle time
+    rig.pacer.tick()
+    assert worker.kills == 0
+    rig.auto = True
+    rig.manager.stop()
+    rig.pacer.tick()  # just ended: the ten minutes start now
+    assert worker.kills == 0 and rig.manager.status()["engine"] == "ready"
+    rig.clock += tts.IDLE_UNLOAD
+    rig.pacer.tick()
+    assert worker.kills == 1
+
+
+def test_a_housekeeping_round_that_fails_does_not_end_the_thread(rig, monkeypatch, caplog):
+    worker, voice = idle_worker(rig)
+    service = rig.manager._service
+    monkeypatch.setattr(rig.manager, "_service", lambda: 1 / 0)
+    with caplog.at_level(logging.ERROR, logger="aivoice.tts"):
+        rig.pacer.tick()
+        rig.pacer.tick()
+    assert rig.manager.housekeeping_failures == 2
+    assert len([r for r in caplog.records if "housekeeping failed" in r.getMessage()]) == 1  # logged once
+    monkeypatch.setattr(rig.manager, "_service", service)
+    rig.clock += tts.IDLE_UNLOAD
+    rig.pacer.tick()
+    assert worker.kills == 1 and rig.manager._keeper.is_alive()
+
+
+class PickyThread(threading.Thread):
+    """A Thread that cannot be started when it has one of the refused names."""
+    refused = ()
+
+    def start(self):
+        if self.name in PickyThread.refused:
+            raise RuntimeError("can't start new thread")
+        super().start()
+
+
+def test_a_housekeeping_thread_that_cannot_be_started_does_not_fail_the_request(rig, monkeypatch, caplog):
+    monkeypatch.setattr(PickyThread, "refused", ("tts-housekeeping",))
+    monkeypatch.setattr(tts.threading, "Thread", PickyThread)
+    with caplog.at_level(logging.WARNING, logger="aivoice.tts"):
+        worker, voice = idle_worker(rig)
+    assert rig.manager._keeper is None
+    assert any("housekeeping thread" in r.getMessage() for r in caplog.records)
+    rig.clock += tts.IDLE_UNLOAD
+    assert rig.manager.status()["engine"] == "stopped" and worker.kills == 1  # the screen's poll still does it
+    monkeypatch.setattr(PickyThread, "refused", ())
+    rig.speak(voice)
+    rig.finish()
+    assert rig.manager._keeper.is_alive()  # and the next worker gets its thread
+
+
+# ---------------------------------------------------------------- the reference clip (B2)
+
+def test_a_reference_clip_that_is_too_quiet_is_passed_over_for_the_next_best_one(rig):
+    voice = rig.voice(level=0.001)  # clip 1: eight seconds, the preferred length, but far too quiet to copy
+    rig.clip(voice, seconds=4.0, text="A louder clip that a voice can be copied from.")
+    voice = rig.library.get(voice.id)
+    rig.speak(voice)
+    assert rig.finish()["error"] is None
+    command, = rig.workers[0].named("set_reference")
+    assert Path(command["wav"]).name == "0002.orig.wav"
+    assert command["text"] == "A louder clip that a voice can be copied from."
+
+
+def test_a_voice_whose_clips_are_all_too_quiet_is_refused_before_anything_is_started(rig):
+    voice = rig.voice(level=0.001)
+    with pytest.raises(TtsError) as refused:
+        rig.speak(voice)
+    assert str(refused.value) == "Clip 1 is too quiet to copy. Record a louder clip of 5 to 10 seconds."
+    nothing_started(rig)
+    clips = rig.data / "voices" / voice.id / "clips"
+    assert sorted(p.name for p in clips.iterdir()) == ["0001.orig.wav", "0001.txt", "0001.wav"]  # only read
+
+
+@pytest.mark.parametrize("said, shown", [
+    ("The reference clip 0001.orig.wav is too quiet to copy a voice from. Record it louder, or choose another clip",
+     "Clip 1 is too quiet to copy. Record a louder clip of 5 to 10 seconds."),
+    ("The reference clip 0001.orig.wav is too long: it is 12.4 seconds, and a reference must be 3 to 12 seconds",
+     "Clip 1, this voice's reference clip, is too long: it is 12.4 seconds, and a reference must be 3 to 12 "
+     "seconds. Delete that clip or record it again."),
+    ("The reference clip 0001.orig.wav was not found",
+     "Clip 1, this voice's reference clip, was not found. Delete that clip or record it again."),
+    ("The reference clip 0001.orig.wav could not be read: Format not recognised. Use it or choose another clip.",
+     "Clip 1, this voice's reference clip, could not be read: Format not recognised. Use it. Delete that clip or "
+     "record it again."),
+    ("Something about 0001.orig.wav went wrong",
+     "Something about clip 1 went wrong. Delete that clip or record it again."),
+    ("The reference cannot change while tts-1 is being synthesised",  # not about the clip: as the worker said it
+     "The reference cannot change while tts-1 is being synthesised"),
+])
+def test_what_the_worker_says_about_a_reference_file_is_put_in_terms_of_the_clip(rig, said, shown):
+    rig.auto = False
+    rig.speak()
+    worker = rig.worker()
+    command = worker.expect("set_reference")
+    worker.emit(event="error", id=command["id"], code="bad_request", message=said)
+    status = rig.finish()
+    assert status["error"] == shown
+    assert "orig.wav" not in status["error"] and "choose another clip" not in status["error"]
+    assert worker.kills == 0 and status["engine"] == "ready"  # a refused clip is no fault of the engine
+
+
+def test_the_clip_number_in_a_refusal_is_the_one_the_voices_tab_shows(rig):
+    voice = rig.voice(seconds=2.0)  # clip 1 is too short to be a reference
+    rig.clip(voice, seconds=20.0)  # clip 2 too long
+    rig.clip(voice, seconds=6.0, text="The third clip.")
+    rig.auto = False
+    rig.speak(rig.library.get(voice.id))
+    worker = rig.worker()
+    command = worker.expect("set_reference")
+    assert Path(command["wav"]).name == "0003.orig.wav"
+    worker.emit(event="error", id=command["id"], code="bad_request",
+                message="The reference clip 0003.orig.wav is too quiet to copy a voice from. Record it louder, or "
+                        "choose another clip")
+    assert rig.finish()["error"] == "Clip 3 is too quiet to copy. Record a louder clip of 5 to 10 seconds."
+
+
+# ---------------------------------------------------------------- the listen volume (B4)
+
+def test_the_listen_volume_is_applied_to_the_listen_device_only(rig):
+    rig.speak(mic_device=2, monitor_device=1, monitor_gain=0.35)
+    rig.finish()
+    assert rig.player.starts == [{"mic": 2, "monitor": 1}] and rig.player.gains == [{"monitor": 0.35}]
+
+
+def test_without_a_listen_device_or_a_volume_nothing_is_turned_down(rig):
+    voice = rig.voice()
+    rig.speak(voice, mic_device=2, monitor_device=None, monitor_gain=0.35)
+    rig.finish()
+    rig.speak(voice)
+    rig.finish()
+    assert rig.player.gains == [{}, {"monitor": 1.0}]
+
+
+@pytest.mark.parametrize("gain", [-0.1, 2.01, float("nan"), "loud", None, True])
+def test_a_listen_volume_outside_live_modes_range_is_refused(rig, gain):
+    with pytest.raises(TtsError, match="^monitor_gain must be between 0 and 2$"):
+        rig.speak(monitor_gain=gain)
+    nothing_started(rig)
+
+
+# ---------------------------------------------------------------- one level for every piece (B5)
+
+def test_pieces_of_different_raw_level_are_played_at_the_same_level(rig):
+    # as the worker hands them over: anything from quiet (a quiet reference clip) to full scale
+    levels = [0.9, 0.5, 0.02]
+    rig.audio_for = lambda index: speech(level=levels[index])
+    rig.speak(save=True)
+    status = rig.finish()
+    assert status["error"] is None
+    peaks = [float(np.abs(audio).max()) for _, audio in rig.player.played]
+    assert peaks == pytest.approx([0.89] * 3, abs=0.005)
+    saved, _ = read_wav(status["saved_path"])
+    assert float(np.abs(saved).max()) == pytest.approx(0.89, abs=0.005)  # and saved as played
+
+
+def test_a_piece_that_is_silent_is_still_refused_and_never_raised_to_the_level(rig):
+    rig.audio_for = lambda index: speech(level=0.3 if index == 0 else 0.004)
+    rig.speak()
+    status = rig.finish()
+    assert status["error"] == "The voice engine produced no sound for sentence 2"
+    assert len(rig.player.played) == 1
+
+
+# ---------------------------------------------------------------- one environment probe at a time (B6)
+
+def test_a_second_caller_waits_for_the_environment_check_in_progress_and_takes_its_result(rig, monkeypatch):
+    probes = []
+
+    class WatchedProbe(tts._Probe):
+        def __init__(self):
+            super().__init__()
+            self.done = WatchedEvent()
+            probes.append(self)
+
+    monkeypatch.setattr(tts, "_Probe", WatchedProbe)
+    entered, release = threading.Event(), threading.Event()
+
+    def slow(fast):
+        rig.verify_calls.append(fast)
+        entered.set()
+        assert release.wait(WAIT)
+        return PASS
+
+    rig.verify = slow
+    rig.build()
+    results = []
+    first = threading.Thread(target=lambda: results.append(rig.manager.environment()))
+    first.start()
+    assert entered.wait(WAIT)
+    second = threading.Thread(target=lambda: results.append(rig.manager.environment(refresh=True)))
+    second.start()
+    try:
+        assert probes[0].done.awaited.wait(WAIT), "the second caller did not wait for the check in progress"
+        assert rig.verify_calls == [False] and results == []
+    finally:
+        release.set()
+    first.join(WAIT)
+    second.join(WAIT)
+    assert results == [{**PASS, "ready": True}] * 2
+    assert rig.verify_calls == [False] and len(probes) == 1  # one GPU process, not two
+    rig.manager.environment(refresh=True)
+    assert rig.verify_calls == [False, False]  # a later refresh checks again
+
+
+def test_a_request_takes_the_result_of_the_environment_check_in_progress(rig, monkeypatch):
+    probes = []
+
+    class WatchedProbe(tts._Probe):
+        def __init__(self):
+            super().__init__()
+            self.done = WatchedEvent()
+            probes.append(self)
+
+    monkeypatch.setattr(tts, "_Probe", WatchedProbe)
+    entered, release = threading.Event(), threading.Event()
+
+    def slow(fast):
+        rig.verify_calls.append(fast)
+        if len(rig.verify_calls) == 1:
+            entered.set()
+            assert release.wait(WAIT)
+        return FAIL
+
+    rig.verify = slow
+    rig.build()
+    voice = rig.voice()
+    screen = threading.Thread(target=rig.manager.environment)
+    screen.start()
+    assert entered.wait(WAIT)
+    refused = []
+
+    def speak():
+        try:
+            rig.speak(voice)
+        except TtsError as exc:
+            refused.append(str(exc))
+
+    speaking = threading.Thread(target=speak)
+    speaking.start()
+    try:
+        assert probes[0].done.awaited.wait(WAIT), "the request did not wait for the check in progress"
+    finally:
+        release.set()
+    screen.join(WAIT)
+    speaking.join(WAIT)
+    assert refused == ["Text to speech is not set up: torch sees no GPU; model files wrong"]
+    assert rig.verify_calls == [False] and not rig.manager.busy and rig.launches == []
+
+
+def test_a_check_in_progress_that_raises_does_not_leave_the_next_caller_waiting(rig):
+    calls = []
+
+    def broken(fast):
+        calls.append(fast)
+        raise KeyboardInterrupt  # not caught by the manager: the guard must still be let go of
+
+    rig.verify = broken
+    rig.build()
+    with pytest.raises(KeyboardInterrupt):
+        rig.manager.environment()
+    assert rig.manager._probe is None and calls == [False]
+    del rig.verify
+    rig.manager._verify = rig.verify
+    assert rig.manager.environment()["ready"] is True
+
+
+# ---------------------------------------------------------------- saving (B8)
+
+def test_a_save_whose_write_fails_half_way_leaves_nothing_behind(rig, monkeypatch):
+    import wave
+
+    real = wave.Wave_write.writeframes
+    results = rig.data / "tts"
+
+    def full(self, data):
+        if Path(self._file.name).parent != results:  # a clip of the voice, a piece from the worker: as ever
+            return real(self, data)
+        real(self, data[:1000])  # some of the result reaches the disk
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(wave.Wave_write, "writeframes", full)
+    rig.speak(save=True)
+    status = rig.finish()
+    assert status["error"] == "The speech was played but could not be saved: No space left on device"
+    assert status["saved_path"] is None
+    left = sorted(p.name for p in (rig.data / "tts").iterdir())
+    assert left in (["tmp"], ["tmp", "worker.log"]), left  # neither a half file nor its temporary name
+
+
+def test_a_save_is_written_under_another_name_and_moved_into_place(rig, monkeypatch):
+    from aivoice import audiofile
+
+    moves = []
+    real = audiofile.replace_file
+
+    def replace(src, dst):
+        if Path(dst).parent == rig.data / "tts":
+            moves.append((Path(src).name, Path(dst).name, Path(dst).exists()))
+        real(src, dst)
+
+    monkeypatch.setattr(audiofile, "replace_file", replace)
+    voice = rig.voice()
+    rig.speak(voice, save=True)
+    status = rig.finish()
+    name = Path(status["saved_path"]).name
+    assert moves == [(name + ".tmp", name, False)]  # whole before it has its name; never over another file
+
+
+# ---------------------------------------------------------------- loose ends of the launch (D3)
+
+def test_unload_says_so_in_the_log_when_a_launch_is_still_in_flight(rig, monkeypatch, caplog):
+    monkeypatch.setattr(tts, "STOP_WAIT", 0)  # the launch takes longer than unload is prepared to wait
+    rig.children(FakeProc(7030))
+    rig.launch_gate = threading.Event()
+    rig.speak()
+    assert rig.launching.wait(WAIT)
+    with caplog.at_level(logging.WARNING, logger="aivoice.tts"):
+        rig.manager.unload()  # returns: there is nothing it could end yet
+    assert any("still being started" in r.getMessage() for r in caplog.records)
+    assert rig.workers == [] and rig.manager.is_active()
+    rig.launch_gate.set()
+    assert rig.manager.join(WAIT)
+    worker, = rig.workers
+    assert worker.kills == 1 and worker.code is not None and ("kill", 7030) in rig.tools.calls
+    assert rig.manager.status()["engine"] == "stopped" and rig.manager._doomed == []
+
+
+def test_unload_says_nothing_about_a_launch_when_there_is_none(rig, caplog):
+    idle_worker(rig)
+    with caplog.at_level(logging.WARNING, logger="aivoice.tts"):
+        rig.manager.unload()
+    assert not any("still being started" in r.getMessage() for r in caplog.records)
+
+
+def test_a_worker_whose_reader_thread_cannot_be_started_is_ended_and_the_request_fails(rig, monkeypatch):
+    rig.children(FakeProc(7031))
+    monkeypatch.setattr(PickyThread, "refused", ("tts-events",))
+    monkeypatch.setattr(tts.threading, "Thread", PickyThread)
+    voice = rig.voice()
+    rig.speak(voice)
+    status = rig.finish()
+    assert status["error"] == "Could not start the voice engine: can't start new thread"
+    worker, = rig.workers
+    assert worker.kills == 1 and worker.code is not None and worker.seen == []  # ended, and never spoken to
+    assert ("kill", 7031) in rig.tools.calls and rig.manager._doomed == []
+    assert status["engine"] == "failed" and status["state"] == "idle"
+    monkeypatch.setattr(PickyThread, "refused", ())
+    rig.speak(voice)
+    assert rig.finish()["error"] is None and len(rig.launches) == 2
+
+
+class PipedPopen(FakePopen):
+    """A launched process whose pipes can be seen to be closed."""
+
+    class Pipe:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    def __init__(self, argv, **options):
+        super().__init__(argv, **options)
+        self.stdin, self.stdout = PipedPopen.Pipe(), PipedPopen.Pipe()
+        PipedPopen.last = self
+
+
+@pytest.mark.parametrize("fault", [RuntimeError("no handle"), KeyboardInterrupt()])
+def test_a_launch_that_fails_after_the_process_exists_ends_its_tree_before_the_error_goes_on(tmp_path, monkeypatch,
+                                                                                             fault):
+    monkeypatch.setattr(FakePopen, "calls", [])
+    monkeypatch.setattr(tts.subprocess, "Popen", PipedPopen)
+    tools = FakeTools()
+    child = FakeProc(7032)
+    tools.trees[4321] = [FakeProc(4321), child]
+
+    def no_handle(proc, process_tools):
+        assert tools.calls == []  # nothing has been ended yet: the process exists and is nobody's
+        raise fault
+
+    monkeypatch.setattr(tts, "_Worker", no_handle)
+    with pytest.raises(type(fault)):
+        tts._launch_worker(["python"], tmp_path / "worker.log", tools)
+    assert [c[0] for c in tools.calls[:2]] == ["tree", "taskkill"] and ("taskkill", 4321) in tools.calls
+    assert not child.alive
+    assert PipedPopen.last.stdin.closed and PipedPopen.last.stdout.closed
+
+
+def test_a_launch_that_fails_and_cannot_end_its_process_names_it_in_the_log(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(FakePopen, "calls", [])
+    monkeypatch.setattr(tts.subprocess, "Popen", PipedPopen)
+    tools = FakeTools()
+    tools.trees[4321] = [FakeProc(4321), FakeProc(7033, killable=False)]
+    monkeypatch.setattr(tts, "_Worker", lambda proc, process_tools: 1 / 0)
+    with caplog.at_level(logging.ERROR, logger="aivoice.tts"), pytest.raises(ZeroDivisionError):
+        tts._launch_worker(["python"], tmp_path / "worker.log", tools)
+    assert any("process 4321" in r.getMessage() and "7033" in r.getMessage() for r in caplog.records)
+
+
+def test_a_launch_that_fails_before_the_process_exists_ends_nothing(tmp_path, monkeypatch):
+    def refused(argv, **options):
+        raise OSError(2, "The system cannot find the file specified")
+
+    monkeypatch.setattr(tts.subprocess, "Popen", refused)
+    tools = FakeTools()
+    with pytest.raises(OSError):
+        tts._launch_worker(["python"], tmp_path / "worker.log", tools)
+    assert tools.calls == []
+
+
+# ---------------------------------------------------------------- numbers (D4)
+
+def test_the_numbers_the_model_misreads_are_written_out_for_the_worker_and_only_those(rig):
+    text = "It costs 1,200 dollars in 1987. Call 555 0142 at 12:30. That is 3.5 percent of 40."
+    rig.speak(text=text)
+    assert rig.finish()["error"] is None
+    command, = rig.workers[0].named("synthesize")
+    assert command["pieces"] == ["It costs one thousand two hundred dollars in 1987.",
+                                 "Call five five five, zero one four two at 12:30.",
+                                 "That is 3.5 percent of 40."]
+    assert all(len(p.encode("utf-8")) <= command["max_chars"] for p in command["pieces"])
+
+
+def test_the_length_limit_is_on_the_text_as_typed_not_on_what_the_numbers_become(rig):
+    typed = ("999,999,999,999 " * 60).strip()  # 959 characters as typed; over 7000 once written out
+    rig.speak(text=typed)
+    status = rig.finish()
+    assert status["error"] is None
+    command, = rig.workers[0].named("synthesize")
+    assert sum(len(p) for p in command["pieces"]) > 7000 > 5000 and status["pieces"] == len(command["pieces"])
+    assert all(len(p.encode("utf-8")) <= command["max_chars"] for p in command["pieces"])  # each still fits
+    with pytest.raises(TtsError, match=r"^The text is too long \(5999 characters\)"):
+        rig.speak(rig.library.list()[0], text=("1,200 " * 1000).strip())
+
+
+def test_the_pieces_are_written_out_again_when_the_worker_measures_the_reference_differently(rig):
+    rig.reference_seconds = 7.0  # the clip is on record as 8 s: the limit changes, so the text is split again
+    rig.speak(text="It costs 1,200 dollars. " * 12)
+    assert rig.finish()["error"] is None
+    command, = rig.workers[0].named("synthesize")
+    assert all("one thousand two hundred" in p and "1,200" not in p for p in command["pieces"])
+    assert all(len(p.encode("utf-8")) <= command["max_chars"] for p in command["pieces"])

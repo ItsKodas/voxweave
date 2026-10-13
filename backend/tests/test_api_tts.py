@@ -764,3 +764,42 @@ def test_shutting_the_app_down_stops_a_training_run_as_before(s):
         pass
     assert s.training.handles[0].kills == 1 and s.training.manager.status()["state"] == "interrupted"
     assert s.rig.manager.status()["engine"] == "stopped"
+
+
+# ---------------------------------------------------------------- the final fix wave
+
+def test_voices_says_why_a_voice_whose_only_reference_clip_is_too_quiet_cannot_be_used(s):
+    quiet = s.rig.voice("Whisper", level=0.001)
+    listed = {v["id"]: v for v in s.client.get("/tts/voices").json()}
+    message = "Clip 1 is too quiet to copy. Record a louder clip of 5 to 10 seconds."
+    assert listed[quiet.id]["reference"] == {"ok": False, "seconds": None, "message": message}
+    assert listed[s.voice]["reference"]["ok"] is True
+    refused(s.speak(voice_id=quiet.id), 400, message)  # the same words speak refuses with
+    s.nothing_spoken()
+
+
+def test_voices_offers_the_clip_that_is_loud_enough_when_the_preferred_one_is_too_quiet(s):
+    voice = s.rig.voice("Mixed", level=0.001)
+    s.rig.clip(voice, seconds=5.0, text="This clip is loud enough to copy a voice from.")
+    listed = {v["id"]: v for v in s.client.get("/tts/voices").json()}
+    assert listed[voice.id]["reference"] == {
+        "ok": True, "seconds": 5.0, "message": "Clip 2 (5.0 seconds) will be used as the reference."}
+    assert s.speak(voice_id=voice.id).status_code == 200
+    assert s.rig.finish()["error"] is None
+    command, = s.rig.workers[0].named("set_reference")
+    assert command["wav"].endswith("0002.orig.wav")
+
+
+def test_speech_is_heard_at_the_listen_volume_of_the_live_tab(s):
+    assert s.speak().status_code == 200
+    s.rig.finish()
+    assert s.rig.player.gains == [{"monitor": 1.0}]  # live mode has not been given a volume yet
+    assert s.client.post("/live/start", json={**START, "monitor_device": 2, "monitor_gain": 0.4}).status_code == 200
+    assert s.client.patch("/live/settings", json={"monitor_gain": 0.25}).status_code == 200
+    assert s.client.post("/live/stop").status_code == 200
+    assert s.speak().status_code == 200
+    s.rig.finish()
+    assert s.speak(monitor_device=None).status_code == 200
+    s.rig.finish()
+    assert s.rig.player.gains == [{"monitor": 1.0}, {"monitor": 0.25}, {}]
+    assert s.rig.player.starts[-1] == {"mic": 3}  # the virtual mic is never turned down

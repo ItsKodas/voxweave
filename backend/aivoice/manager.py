@@ -68,6 +68,9 @@ class LiveManager:
         self._lock = threading.Lock()
         self._session: LiveSession | None = None
         self._last_error: str | None = None
+        # The listen volume live mode was last given (at a start that succeeded, or by the slider while it ran).
+        # Kept after a stop: text to speech plays to the same listen device and uses the same volume.
+        self.monitor_gain = 1.0
 
     def start(self, cfg: StartConfig) -> None:
         with self._lock:
@@ -115,6 +118,7 @@ class LiveManager:
             except Exception as exc:  # noqa: BLE001
                 raise ValueError(f"Could not open audio devices: {exc}") from exc
             self._session = session
+            self.monitor_gain = float(cfg.monitor_gain)
 
     def _stop_locked(self) -> None:
         if self._session is not None:
@@ -159,6 +163,7 @@ class LiveManager:
             if monitor_gain is not None:
                 _check_gain(monitor_gain)
                 session.router.set_gain("monitor", monitor_gain)
+                self.monitor_gain = float(monitor_gain)
             if monitor_enabled is not None:
                 session.router.set_enabled("monitor", monitor_enabled)
 

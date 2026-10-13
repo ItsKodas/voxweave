@@ -224,6 +224,7 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
         from aivoice.api_tts import tts_router
 
         app.include_router(tts_router(tts, library, studio, training, lambda: bool(manager.stats()["running"]),
-                                      audio_state, voices_lock, training_starting, ALLOWED_ORIGINS))
+                                      audio_state, voices_lock, training_starting, ALLOWED_ORIGINS,
+                                      monitor_gain=lambda: manager.monitor_gain))
 
     return app
