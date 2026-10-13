@@ -230,7 +230,7 @@ Copied from the build ledger when the stage was merged. Each line ends with what
 
 ## Stage 4 (text to speech)
 
-Written 2026-10-13 at the end of the build, before the final whole-branch review. Sources: the build ledger (`.superpowers/sdd/2026-10-13-stage-4-text-to-speech/progress.md`) and the two real runs (`docs/superpowers/notes/2026-10-13-stage-4-first-real-run.md`).
+Written 2026-10-13 at the end of the build, before the final whole-branch review, and brought up to date after the final fix wave that followed it (the sections "Rulings of the final review", "Closed by the final fix wave" and "What the final fix wave changed for the user" are from that wave). Sources: the build ledger (`.superpowers/sdd/2026-10-13-stage-4-text-to-speech/progress.md`) and the two real runs (`docs/superpowers/notes/2026-10-13-stage-4-first-real-run.md`).
 
 ### Decisions made during the build
 
@@ -243,37 +243,83 @@ Each line ends with what it costs if wrong.
 - The F5-TTS weights' CC-BY-NC-4.0 licence (non-commercial) is accepted for this personal app and stated in the README and in the setup script's output. If wrong: the owner must not use the output commercially, or must swap the model.
 - The first five tasks were built in parallel by separate implementers on separate files. Why: time. If wrong: a git lock collision, retried.
 - The plan gave interfaces, behaviour and tests rather than complete code, as in stage 3. If wrong: more review rounds.
-- The process-ending and environment-check logic that `tts.py` shares with `training.py` (about 110 lines; `tts.py` imports training's private helpers) is to be moved into a shared module in the final fix wave, not earlier. Why: it touches stage 3's safety-critical code and other work was editing nearby files. If wrong: the duplication lives a few commits longer.
+- The process-ending and environment-check logic that `tts.py` has in common with `training.py` was first planned to move into a shared module in the final fix wave. It was not moved: see "Rulings of the final review".
 - A speak request refused because something else is active answers with HTTP 409, while the matching refusals on the other routes answer 400. Why: the screen shows the message for any failure, and changing the stage 3 routes would break their tests. If wrong: a one-line change.
 - Deleting any voice is refused while something is being spoken, not only the voice being spoken. Why: the simplest safe rule; requests last seconds. If wrong: add a way to ask which voice is active.
 - (From the real run.) The start of each piece is cut by rules measured on one reference clip: sound in the first 60 ms that ends within 0.4 s and is followed by 0.4 s of quiet is taken to be what is left of the reference clip, and removed with the pause after it. Why: without it, 74 percent of Fast pieces and a few Balanced ones kept a blip and a second of room tone before the sentence. If wrong: with another voice's clip a short first word followed by a long pause could be removed, or a blip could remain; the thresholds are parameters of `tts_audio.drop_reference_tail`.
 
+### Rulings of the final review
+
+Recorded with what each costs if wrong.
+
+- **The shared process and environment module was NOT extracted.** The verified-kill and environment-check logic of `training.py` stays duplicated in `tts.py` (about 110 lines: the list of a worker's processes, the kill that is checked, the retry, the environment report; `tts.py` also imports training's private helpers `_Worker`, `_kill_tree`, `_end_survivors` and others). Why: extracting it means editing the safety-critical code of stage 3 at the very end of the stage, and `tts.py` works as it is. Cost: a fix to one copy must be made in the other by hand.
+- **Refusal status codes stay mixed**: a speak request refused because something else is active answers 409, the matching refusals on the other routes answer 400. The screen shows the message for any failure. Cost if wrong: a one-line change.
+- **Deleting a voice is refused for any voice while something is being spoken**, not only for the voice being spoken. Cost if wrong: add a way to ask which voice is active.
+- **Fast is 10 sampling steps**, by measurement (see the decisions above). The plan's "8" is superseded.
+- **Model files are verified by size only when the app runs**; SHA-256 is checked once, when `tts/setup.sh` downloads them. The plan said "verified by SHA-256 before use". Why: the files are loaded as safetensors and with `torch.load(weights_only=True)`, which do not run code from the file, and hashing 1.4 GB on every start buys little. Cost if wrong: a file changed after download to another file of exactly the same size is not noticed; add a hash at backend start.
+- **The swappable `engines.tts` interface named in the design was not built.** The manager speaks the worker's protocol directly, and there is one engine. Cost if wrong: a second text-to-speech engine means a second manager or an extraction at that point.
+- **Number rewriting covers only the measured failures**: whole numbers with thousands separators and phone numbers. Plain integers, decimals, years, times and dates are left alone because the model read them correctly. Cost if wrong: extend `tts_text.write_out_numbers`.
+- **Text to speech needs the AMD ROCm PyTorch environment and has no DirectML or CPU fallback**, so the design's line "zero-shot TTS still works without ROCm" does not hold. Stated in the README.
+- **The reference clip is chosen automatically, with no manual override yet** (the design planned one). Stated in the README.
+
+### Closed by the final fix wave
+
+Each with the commit's test as its evidence; details in `.superpowers/sdd/2026-10-13-stage-4-text-to-speech/final-fix-backend-report.md`.
+
+- **The idle unload now happens with nobody asking.** It ran only inside the status poll, and the screen polls only while a request is active, so in the real app the engine was never unloaded. The manager now has its own housekeeping thread (started with the first worker, ended at shutdown) that looks every 30 seconds: idle timeout, a worker that died while idle, and kills due another try. Shown in the real run too: an idle worker was gone 12 seconds after the idle time was shortened, with no status call.
+- **A reference clip that is too quiet no longer blocks a voice**, and refusals are said in terms the user can act on: the clip's level is looked at when the clip is chosen (the worker's own floor, RMS 0.003), a louder clip is preferred, and a voice with none is listed as not usable with "Clip N is too quiet to copy. Record a louder clip of 5 to 10 seconds." Refusals from the worker name the clip number of the Voices tab instead of a file, and "choose another clip" (which the app cannot do) is gone.
+- The quick environment check is capped at 20 seconds (it ran with 300 while route locks were held), and a check that runs out of time has its whole process tree ended, in `tts.py` and for the probes inside `tts/verify.py`.
+- Speech on the listen device uses the Live tab's listen volume, as the backend last learned it.
+- Every piece is brought to one peak level (0.89) before it is played or saved; neighbours could differ by about 3 dB, and by far more with a quiet reference clip.
+- Only one full environment check runs at a time; a second caller waits for the first and takes its result.
+- **Numbers the model misreads are written out** (`tts_text.write_out_numbers`, applied when the text is split): whole numbers with thousands separators up to 999,999,999,999 with optional decimals, and phone numbers digit by digit. Measured afterwards with the real model at Balanced and the backend's speech recogniser: "1,200", "2,500,000", "555 0142" and "0412 345 678" were each heard correctly in 5 of 5 tries (before: "1,200" never, the phone number about half the time). What remains unhandled: negative numbers and currency signs (the sign stays where it is), ordinals such as "1,200th", a trillion and more, thousands grouped with spaces or dots, phone numbers written as one unbroken run without a leading 0 or plus sign, French-style dotted phone numbers, and every digit string that could be a date, a range, a decimal or a list, which is left alone on purpose.
+- Setup script: `-r requirements.lock` and `-r requirements.txt` are relative paths like the constraint file, pinned by a test; `curl` retries three times.
+- Playback: the "stopped responding" timer starts when the streams have been started; `stop()` returns only when the streams are closed (at most 2 seconds for a close that hangs).
+- Manager: a log line when unload or shutdown returns while a worker is still being launched; a test for the failure to start the reader thread (which now also lists the worker's processes before ending it); an error after the worker process was created but before a handle to it exists ends the process tree before the error goes on; the real 50 ms waits in the tests are gone.
+- The limits of the start-of-piece trimming are pinned by tests (below) and the real test's loose ends are tidied (worker_pids, no private helper, the timing in its header).
+- The worker's exit-code test now fails if `run()` falls back to the ordinary interpreter exit (it raises once the reader thread is running).
+- Checked and found already true: saving a result writes under another name (`<name>.wav.tmp`) and moves it into place, removing the temporary file on failure (the list asked for `.part`; the existing `.tmp` does the same job); `api_training.py` has no dead `if False` any more; the backend's 10 second shutdown wait being shorter than the manager's own waits is by design (the stop keeps running on its thread, see the comment at `SHUTDOWN_WAIT` in `api.py`).
+- Fixed by the frontend half of the wave: an engine that failed while idle is now shown on the Speak tab ("The voice engine stopped. It starts again the next time you speak."), and the Speak tab reloads its device list.
+
+### What the final fix wave changed for the user
+
+- The voice engine is unloaded after 10 to 10.5 idle minutes whichever tab is open; before, it stayed on the graphics card until training started or the app quit.
+- Pressing Speak in the second in which that unload is in progress is refused with "The voice engine of an earlier request is still shutting down ... Try again in a moment." (Before, the status poll or the request itself did the unload, so this could not be seen.)
+- While an idle engine is being stopped as planned the status says "stopped", not "failed": the screen's new "The voice engine stopped" message is only for an engine that died, hung, could not be started or could not be ended.
+- A voice whose only usable clips are too quiet is greyed out with the reason instead of failing when spoken; a voice with a quiet preferred clip and a louder other clip now speaks, from the louder clip.
+- Messages about a refused reference clip name "Clip N" and end with what can be done.
+- Speech is louder than before for most voices and equally loud from sentence to sentence (peak 0.89 for every piece; before, whatever the model produced, at most 0.97), and much louder for a voice with a quiet reference clip.
+- Speech on the listen device follows the Live tab's listen volume once live mode has been started (or its slider moved while live) since the app opened; the virtual mic is unaffected.
+- "1,200" is spoken as "one thousand two hundred" and phone numbers digit by digit; other numbers as before.
+- An environment check that hangs is given up after 20 seconds (quick) or 5 minutes (full) with a message, instead of holding Speak, live start, recording and training for up to 5 minutes.
+- Stopping speech can take up to 2 seconds longer to return in the rare case that an audio device hangs while closing (the sound itself still stops at once).
+
 ### Open items
 
-Scheduled for the final fix wave:
-
-- Setup script: pass `-r requirements.lock` as a relative path like the constraint file; add `--retry` to `curl`; pin the relative-path workaround with a test.
-- Playback: the "stopped responding" timer is started before the output streams are opened, so a device that takes over 5 seconds to open (or a system sleep) ends playback wrongly; `stop()` can return while the old streams are still being closed, so a new session can open the device too early.
-- Manager: the shared process and environment module (above); four tests assert "still waiting" with a real 50 ms wait; no log line when unload or shutdown returns while a worker is still being launched; no test for the failure to start the reader thread; an error after the worker process was created but before it was registered should end the process; the backend's 10 second shutdown wait is shorter than the manager's own waits (15 and 30 seconds); a dead `if False` in `api_training.py`.
-- Routes: the quick environment check can take up to 300 seconds while route locks are held; cap it.
-
-Still open, not scheduled:
-
+- The verified-kill and environment-check logic is duplicated between `training.py` and `tts.py` (ruling above).
 - Nothing detects a wrongly spoken sentence. After Fast was raised from 8 to 10 steps the measured rate of sentences with a wrong word is 2.8 percent at Fast and 1.7 percent at Balanced, with the model's own sample clip and a speech recogniser as the judge; a real voice's clip may give other figures.
-- **Numbers are read wrongly at every step count**: "1,200" was never read as twelve hundred (32 of 32 tries, 8 to 16 steps) and a phone number was garbled about half the time; years, "3.5" and "40" were fine. The remedy is on the text side (write numbers out before they reach the model, in `tts_text.py`); it was reported, not changed.
 - At 8 steps errors grew with the length of the piece (one long piece in ten lost three words or more); at 10 steps and above none did, so the piece limit was left as it is.
 - The model's pieces run to the very end of their allotted time; a last word was never lost in the checked pieces, but there is no margin.
 - At 8 steps about 4 percent of Fast pieces kept their full length because no pause could be found at their start (mostly the garbled ones); this was not counted again at 10 steps.
+- **The start-of-piece trimming has two known limits, pinned by tests and not hardened**: a real first word of under 0.4 seconds that begins the piece and is followed by a pause of 0.4 seconds or more is cut together with the pause (however long the pause is), and a first sound shorter than 60 ms followed by a gap is dropped. Hardening was considered (drop a lead-in only when the gap is much quieter than the sound, and only up to about 1.5 seconds) and rejected: the measured lead-ins are a sound 12 to 30 dB below the loudest frame followed by 0.4 to 1.2 seconds of room tone that is itself only 30 to 45 dB down (the spike saw up to 2 seconds of it), so either condition would leave the reference clip's tail in some real pieces. The thresholds rest on one reference clip.
 - Best loads the voice's RVC model again for every request (about 2 seconds before the first sound) and drops it afterwards.
-- `is_silent` looks at the peak only, so a single click counts as speech; a sentence cut hard at an over-long word can start a piece with punctuation.
+- `is_silent` looks at the peak only, so a single click counts as speech (and such a piece is now also raised to the common level); a sentence cut hard at an over-long word can start a piece with punctuation.
+- The level of a piece is set by its peak, not by its loudness, so a piece with one sharp peak is played quieter than its neighbours.
 - There is no speed control for speech (fixed at 1.0; the design does not ask for one).
+- The listen volume reaches the backend only when live mode is started or its slider is moved while live mode runs; a slider moved while live mode is off is not seen by text to speech, and the Speak tab has no volume control of its own. (The frontend was told not to add request fields in this wave; `speak` on the manager already takes a `monitor_gain`.)
+- Pressing Speak while the housekeeping thread is ending an idle engine is refused instead of waiting the fraction of a second the kill takes.
+- The level of a clip is measured once and remembered by the file's size and date; a voice with very many quiet clips makes the first listing of voices read each of them once.
+- A result that was being saved when the backend was killed can leave a `<name>.wav.tmp` under `data/tts/`; nothing removes it.
 - The uv package cache that `tts/.venv` and `trainer/.venv` hard-link into lives under `spike/stage3/cache/uv` on the development machine. Deleting that folder does not break the environments (hard links keep the files), but a later setup would download everything again.
-- The Speak tab learns that the voice engine failed while idle only when the tab is shown again. It polls the status on every tab while a request is active (the plan said only while visible), so that the other tabs know when speech ends.
+- The Speak tab polls the status on every tab while a request is active (the plan said only while visible), so that the other tabs know when speech ends.
 - Recording and training are not known to the Speak tab in advance: it shows the backend's refusal after Speak is pressed. Starting a recording is not disabled on the Voices tab while speech plays; the refusal message appears instead.
-- A voice whose reference clip's audio file is missing is refused when spoken ("The audio of clip N ... is missing"); it is not replaced by another clip.
+- A voice whose reference clip's audio file is missing is refused when spoken ("The audio of clip N ... is missing") unless another clip is known to be loud enough, which is then used.
 - A request stopped near its end saves nothing, even with "Keep as a WAV file" ticked.
 - The first speak request of a backend can take about 3 seconds to answer if the Speak tab's own environment check has not run yet.
-- Several tests are looser than their names (three in the reference and RVC tests, one in the text tests, one worker exit-code case); the worker real test builds its worker outside the fixture's clean-up block.
+- **A live session that fails by itself closes its streams outside the audio lock** (stage 1's `live.py`, a frozen file; found in the Task 7 review). The route-level stop is under the lock, but a session that ends on its own error is not, so for a moment another activity could open a device beside streams that are being closed. The devices are already dead at that point.
+- **The offline converter returns a view of the engine's array** (`tts_rvc.OfflineConverter.convert`, Task 4 review): a caller that changed the result in place would change the engine's own buffer. The manager copies before it changes anything (`trim_edges` and `finish` copy), so nothing goes wrong today.
+- **From the Task 2 review**: one assertion in the text tests is weaker than its name, and the worked example in `test_tts_audio.py` ("4.89 s ... gives 178") is a figure fitted to make the package's formula come out, not a measured clip length (the measured sample is 5.33 s).
+- Several other tests are looser than their names (three in the reference and RVC tests); the worker real test builds its worker outside the fixture's clean-up block.
 
 ### Not verified by a human
 
@@ -285,6 +331,10 @@ Everything in stage 4 was exercised by automated tests only: fakes for the app s
 - The whole "Stage 4 first run checklist" in `README.md` (10 steps).
 - `bash tts/setup.sh` on a machine that is not this one (clean caches, another driver), and the real download sizes there. Here the AMD wheels were already cached.
 - Reference clips other than the sample: a real room, a fast or slow speaker, a clip at the 3 or 12 second limits, an automatic transcript with mistakes.
-- Text other than plain English prose in the real model: numbers, abbreviations, names, very short pieces ("Hi."), a 5000 character text from start to end, other languages.
-- Long sessions: the engine being unloaded after 10 minutes idle and started again, many requests in a row, memory over time.
+- Text other than plain English prose in the real model: abbreviations, names, very short pieces ("Hi."), a 5000 character text from start to end, other languages. Numbers: the rewritten forms of four sentences were checked by a speech recogniser at Balanced (20 of 20 tries heard correctly); nobody has listened to them, and Fast and Best were not measured.
+- Long sessions: many requests in a row, memory over time. The idle unload was run for real only with the idle time shortened to 2 seconds (the engine was gone within one housekeeping round); the full 10 minutes in the running app, and Task Manager showing the engine gone while another tab is open, have not been watched by anyone.
+- **Everything the final fix wave changed in what is heard**: that sentences now sound equally loud and that the common level (peak 0.89) is comfortable, also at Best and with a quiet reference clip, where the gain is large and raises the clip's noise with the speech; that the Live tab's listen volume is the right volume for speech; how the model says the written-out numbers.
+- A real voice whose clip is too quiet: the greyed-out entry and its reason on the Speak tab, and the message for a clip the engine refuses, have been seen only in tests.
+- An environment check that really hangs (the 20 second limit and the ending of its processes were tested with fakes only).
+- Refreshing devices and then speaking, and the new first-start wording, on the real Speak tab (frontend half of the wave).
 - Other GPUs. Graphics memory was read from Windows on a 24 GB card (about 2.8 GB for the loaded engine, 5.3 GB with the RVC model beside it); a card with much less memory, or other programs using it, was not tried.
