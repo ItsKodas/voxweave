@@ -106,6 +106,14 @@ def test_prefers_main_voicemeeter_input_over_aux_regardless_of_order():
     assert find_virtual_mic(devices).index == 30
 
 
+def test_prefers_a_virtual_cable_over_voicemeeter():
+    devices = [
+        _out(30, "VoiceMeeter Input (VB-Audio VoiceMeeter VAIO)"),
+        _out(41, "CABLE Input (VB-Audio Virtual Cable)"),
+    ]
+    assert find_virtual_mic(devices).index == 41
+
+
 def test_falls_back_to_aux_when_only_aux_present():
     devices = [_out(26, "VoiceMeeter Aux Input (VB-Audio VoiceMeeter AUX VAIO)")]
     assert find_virtual_mic(devices).index == 26

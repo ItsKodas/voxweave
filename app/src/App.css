@@ -65,3 +65,7 @@ audio { width: 100%; margin: 6px 0; }
 
 .kind { display: flex; gap: 16px; margin: 8px 0; }
 .kind label { display: flex; align-items: center; gap: 6px; }
+.setup-mic { margin: 8px 0; padding: 8px 12px; border: 1px solid #343843; border-radius: 6px; }
+.setup-mic summary { cursor: pointer; }
+.setup-mic ol { padding-left: 20px; }
+.setup-mic li { margin: 6px 0; }

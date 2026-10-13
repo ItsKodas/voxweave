@@ -40,6 +40,9 @@ function chooseDevices(list: DeviceList, keep?: Selection & { hadVirtualMic: boo
   return { input, mic, monitor };
 }
 
+/** VB-Audio's own page for VB-CABLE, the virtual cable that gives the app a microphone other apps can choose. */
+const CABLE_PAGE = "https://vb-audio.com/Cable/";
+
 function Meter({ label, level }: { label: string; level: number }) {
   return (
     <label className="meter">
@@ -81,6 +84,7 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     if (loaded) onMonitorChosen?.(monitor);
@@ -161,6 +165,17 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
       onDevicesRefreshed?.();
     });
 
+  /** After installing a virtual cable: rescan, and move the virtual mic to the cable that has just appeared. */
+  const findCable = () =>
+    run(async () => {
+      const list = await api.refreshDevices();
+      const cable = list.devices.find((d) => d.max_output > 0 && /cable input/i.test(d.name));
+      const chosen = chooseDevices(list, { input, mic, monitor, hadVirtualMic: virtualMic !== null });
+      applyDevices(list, cable ? { ...chosen, mic: cable.index, monitor: chosen.monitor === cable.index ? null : chosen.monitor } : chosen);
+      onDevicesRefreshed?.();
+      if (!cable) setError("No virtual cable was found yet. Finish the installer, restart Windows if it asked, and try again.");
+    });
+
   const start = () =>
     run(() =>
       api.start({
@@ -200,6 +215,11 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
     return Object.keys(diff).length ? diff : null;
   };
 
+  const hasCable = outputs.some((d) => /cable input/i.test(d.name));
+  const copyCableLink = () => {
+    // The webview does not open outside links itself, so the address is put on the clipboard instead.
+    navigator.clipboard?.writeText(CABLE_PAGE).then(() => setCopied(true), () => undefined);
+  };
   const hasDestination = mic !== null || (monitorOn && monitor !== null);
   const canStart = !busy && !speechActive && input !== null && hasDestination && voice !== "";
   const shownError = error ?? actionError ?? stats.error;
@@ -234,6 +254,36 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
           running. You can still listen to the converted voice yourself.
         </p>
       )}
+      {loaded && (hasCable ? (
+        <p className="hint">
+          Other apps hear this app on the microphone called <strong>CABLE Output</strong>: choose it as the microphone
+          in Discord or wherever you talk. You can rename it (for example to "AI Voice Mic") in Windows Sound settings,
+          under Recording.
+        </p>
+      ) : (
+        <details className="setup-mic">
+          <summary>Set up a dedicated AI Voice microphone</summary>
+          <p>
+            Windows only lets a signed driver add a microphone, so this uses VB-CABLE, a free virtual cable from the
+            makers of VoiceMeeter. It adds one pair of devices that pass sound straight through.
+          </p>
+          <ol>
+            <li>
+              Open <code>{CABLE_PAGE}</code> in your browser and download the VB-CABLE driver pack.{" "}
+              <button className="secondary" onClick={copyCableLink}>{copied ? "Copied" : "Copy link"}</button>
+            </li>
+            <li>Unzip it, right-click <code>VBCABLE_Setup_x64.exe</code>, choose Run as administrator, and press Install Driver. Restart Windows if it asks.</li>
+            <li>
+              Come back here and press{" "}
+              <button className="secondary" onClick={findCable} disabled={busy || stats.running || speechActive}>
+                I have installed it
+              </button>
+              . "CABLE Input" is then chosen as the virtual mic above.
+            </li>
+            <li>In other apps, choose <strong>CABLE Output</strong> as the microphone. You can rename it to "AI Voice Mic" in Windows Sound settings.</li>
+          </ol>
+        </details>
+      ))}
       {loaded && !hasDestination && !stats.running && (
         <p className="hint">Choose a virtual mic or tick Listen to output to start.</p>
       )}

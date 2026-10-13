@@ -413,3 +413,42 @@ describe("LivePanel", () => {
     expect(screen.getByText(/Speech is playing. Stop it on the Speak tab/)).toBeInTheDocument();
   });
 });
+
+describe("dedicated microphone setup", () => {
+  const CABLE = { index: 41, name: "CABLE Input (VB-Audio Virtual Cable)", max_input: 0, max_output: 2 };
+
+  it("offers the VB-CABLE steps when no cable is installed, and finds the cable after it is", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    render(<LivePanel stats={IDLE} />);
+    await ready();
+    expect(screen.getByText("Set up a dedicated AI Voice microphone")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Copy link" }));
+    expect(writeText).toHaveBeenCalledWith("https://vb-audio.com/Cable/");
+    expect(await screen.findByRole("button", { name: "Copied" })).toBeInTheDocument();
+
+    vi.mocked(api.refreshDevices).mockResolvedValue({ ...DEVICES, devices: [...DEVICES.devices, CABLE], virtual_mic: 41 });
+    fireEvent.click(screen.getByRole("button", { name: "I have installed it" }));
+    await waitFor(() => expect(screen.queryByText("Set up a dedicated AI Voice microphone")).not.toBeInTheDocument());
+    expect(api.refreshDevices).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/microphone called/)).toHaveTextContent("CABLE Output");
+    expect(screen.getByLabelText("Virtual mic")).toHaveValue("41"); // moved from VoiceMeeter to the new cable
+  });
+
+  it("says so when the cable is not there yet", async () => {
+    render(<LivePanel stats={IDLE} />);
+    await ready();
+    fireEvent.click(screen.getByRole("button", { name: "I have installed it" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("No virtual cable was found yet");
+    expect(screen.getByLabelText("Virtual mic")).toHaveValue("3");
+  });
+
+  it("shows which microphone other apps should choose when a cable is already there", async () => {
+    vi.mocked(api.devices).mockResolvedValue({ ...DEVICES, devices: [...DEVICES.devices, CABLE], virtual_mic: 41 });
+    render(<LivePanel stats={IDLE} />);
+    await ready();
+    expect(screen.getByLabelText("Virtual mic")).toHaveValue("41");
+    expect(screen.getByText(/microphone called/)).toHaveTextContent("CABLE Output");
+    expect(screen.queryByText("Set up a dedicated AI Voice microphone")).not.toBeInTheDocument();
+  });
+});

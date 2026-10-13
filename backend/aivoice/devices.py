@@ -5,7 +5,9 @@ from typing import Callable
 
 import numpy as np
 
-VIRTUAL_MIC_NAMES = ("voicemeeter input", "voicemeeter aux input", "cable input")
+# A virtual cable (VB-CABLE) comes first: someone who installed one did it to have a microphone for this app,
+# and it leaves VoiceMeeter's own routing alone.
+VIRTUAL_MIC_NAMES = ("cable input", "voicemeeter input", "voicemeeter aux input")
 
 
 class DeviceError(ValueError):
