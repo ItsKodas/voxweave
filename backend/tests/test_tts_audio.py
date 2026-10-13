@@ -2,7 +2,8 @@ import numpy as np
 import pytest
 
 from aivoice import tts_audio
-from aivoice.tts_audio import SAMPLE_RATE, finish, is_silent, join, max_chars_for, trim_edges
+from aivoice.tts_audio import (SAMPLE_RATE, drop_reference_tail, finish, is_silent, join, max_chars_for,
+                                trim_edges)
 
 SR = SAMPLE_RATE
 
@@ -17,6 +18,85 @@ def noise(seconds, amp, sr=SR, seed=0):
     return (amp * rng.standard_normal(int(seconds * sr))).astype(np.float32)
 
 
+# ---- drop_reference_tail ----
+# The real model's piece begins where the reference clip ended. Measured on 282 pieces in the first real run of
+# the manager: about a second of the reference's room tone comes before the sentence, and in a third of the
+# pieces that second begins with sound, 60 to 300 ms long: the dying end of the reference's last word (12 to 30 dB
+# below the piece's loudest frame) or, at 8 steps, a stray word as loud as the sentence or louder.
+
+def piece_with(burst_seconds, burst_amp, gap_seconds=1.0, room=0.001, sentence=0.3):
+    return np.concatenate([tone(burst_seconds, burst_amp, freq=330.0), noise(gap_seconds, room),
+                           tone(1.0, sentence), noise(0.1, room, seed=1)])
+
+
+@pytest.mark.parametrize("burst_seconds, burst_amp, gap_seconds, room", [
+    (0.12, 0.075, 1.0, 0.001),  # the end of the reference's last word, 12 dB down
+    (0.30, 0.3, 1.0, 0.001),  # a stray word as loud as the sentence
+    (0.28, 0.3, 0.42, 0.001),  # and the shortest pause seen after one
+    (0.30, 0.9, 1.0, 0.012),  # a stray word louder than the sentence, before room tone 25 dB below the sentence
+])
+def test_sound_at_the_very_start_of_a_piece_and_the_pause_after_it_are_dropped(burst_seconds, burst_amp,
+                                                                               gap_seconds, room):
+    piece = piece_with(burst_seconds, burst_amp, gap_seconds, room)
+    assert len(trim_edges(piece, SR)) / SR > 1.0 + gap_seconds  # trimming alone keeps the sound and the pause
+    out = drop_reference_tail(piece, SR)
+    assert out.dtype == np.float32
+    cut = len(piece) - len(out)
+    sentence = round((burst_seconds + gap_seconds) * SR)
+    assert sentence - 0.05 * SR <= cut <= sentence  # cut just before the sentence
+    assert np.array_equal(out, piece[cut:])
+    assert 1.0 <= len(trim_edges(out, SR)) / SR <= 1.2
+
+
+def test_single_loud_frames_in_the_pause_do_not_hide_it():
+    piece = piece_with(0.12, 0.075)
+    at = int(0.6 * SR)
+    piece[at:at + SR // 50] = tone(0.02, 0.012)  # one 20 ms frame of room tone 28 dB below the sentence
+    assert 1.0 <= len(trim_edges(drop_reference_tail(piece, SR), SR)) / SR <= 1.2
+
+
+def test_a_piece_with_a_quiet_lead_in_is_left_as_it_is():
+    piece = np.concatenate([noise(1.0, 0.001), tone(1.0, 0.3)])
+    assert np.array_equal(drop_reference_tail(piece, SR), piece)
+
+
+@pytest.mark.parametrize("word, pause", [
+    (0.5, 1.0),  # a first word longer than any stray sound seen, then a long pause
+    (0.1, 0.3),  # a short first word and an ordinary pause
+    (0.1, 0.0),  # speech from the first sample on
+])
+def test_a_first_word_is_not_taken_for_a_stray_sound(word, pause):
+    piece = np.concatenate([tone(word, 0.2), noise(pause, 0.001), tone(1.0, 0.3)])
+    assert np.array_equal(drop_reference_tail(piece, SR), piece)
+
+
+def test_sound_that_starts_later_than_the_very_beginning_is_not_touched():
+    piece = np.concatenate([noise(0.2, 0.001), tone(0.1, 0.1), noise(1.0, 0.001, seed=1), tone(1.0, 0.3)])
+    assert np.array_equal(drop_reference_tail(piece, SR), piece)
+
+
+def test_sound_with_nothing_after_it_is_all_there_is_and_is_kept():
+    piece = np.concatenate([tone(0.1, 0.3), noise(1.0, 0.001)])
+    assert np.array_equal(drop_reference_tail(piece, SR), piece)
+
+
+def test_drop_reference_tail_copes_with_nothing_quiet_and_broken_audio():
+    assert len(drop_reference_tail(np.zeros(0, np.float32), SR)) == 0
+    assert len(drop_reference_tail(np.zeros(SR), SR)) == SR
+    assert len(drop_reference_tail(tone(0.01), SR)) == int(0.01 * SR)
+    broken = piece_with(0.1, 0.05)
+    broken[10] = np.nan
+    out = drop_reference_tail(broken, SR)
+    assert np.isfinite(out).all() and len(out) < len(broken)
+
+
+def test_drop_reference_tail_works_at_the_workers_sample_rate():
+    sr = 24000
+    piece = np.concatenate([tone(0.1, 0.05, sr=sr), noise(1.0, 0.001, sr=sr), tone(1.0, 0.3, sr=sr)])
+    out = drop_reference_tail(piece, sr)
+    assert 1.05 * sr <= len(piece) - len(out) <= 1.1 * sr
+
+
 # ---- trim_edges ----
 
 def test_trim_removes_room_tone_before_speech():
@@ -26,6 +106,27 @@ def test_trim_removes_room_tone_before_speech():
     out = trim_edges(np.concatenate([room, speech, tail]), SR)
     slack = 2 * (0.030 + 0.020)  # keep_ms on both sides plus up to one frame of slack
     assert 1.0 <= len(out) / SR <= 1.0 + slack
+
+
+def test_trim_does_not_start_at_a_single_loud_frame_of_room_tone():
+    # the real model's lead-in is room tone only about 30 dB below the speech: single frames reach the threshold
+    room = noise(1.0, 0.001)
+    for at in (0.1, 0.5):
+        room[int(at * SR):int(at * SR) + SR // 50] = tone(0.02, 0.012)  # 28 dB below the speech
+    out = trim_edges(np.concatenate([room, tone(1.0, 0.3), noise(0.2, 0.001, seed=1)]), SR)
+    assert 1.0 <= len(out) / SR <= 1.1
+
+
+def test_trim_keeps_a_short_last_sound():
+    # the release of a final consonant: 20 ms, a tenth of a second after the rest
+    x = np.concatenate([np.zeros(SR // 2), tone(1.0, 0.3), np.zeros(SR // 10), tone(0.02, 0.1), np.zeros(SR // 2)])
+    out = trim_edges(x, SR)
+    assert 1.12 <= len(out) / SR <= 1.2
+
+
+def test_trim_starts_at_the_first_loud_frame_when_nothing_lasts():
+    out = trim_edges(np.concatenate([np.zeros(SR // 2), tone(0.04, 0.3), np.zeros(SR // 2)]), SR)
+    assert 0.04 <= len(out) / SR <= 0.12
 
 
 def test_trim_keeps_quiet_speech_relative_to_loudest_frame():

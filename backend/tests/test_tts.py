@@ -639,6 +639,21 @@ def test_each_piece_is_trimmed_finished_and_queued_and_its_file_deleted(rig):
     assert rig.tmp_folders() == []
 
 
+def test_the_end_of_the_reference_and_the_pause_after_it_are_not_played(rig):
+    """The real model's piece often begins with the dying end of the reference clip's last word, then a second
+    of room tone, then the sentence (first real run of the manager). Neither the blip nor the wait is played."""
+    rate = 24000
+    blip = speech(0.1, lead=0.0, level=0.06)  # 14 dB below the sentence: above what trimming calls quiet
+    room = np.random.default_rng(1).uniform(-0.001, 0.001, rate).astype(np.float32)
+    rig.audio_for = lambda index: np.concatenate([blip, room, speech(1.0, lead=0.0)])
+    rig.speak()
+    assert rig.finish()["error"] is None
+    assert len(rig.player.played) == 3
+    for _, audio in rig.player.played:
+        assert 0.95 * 48000 < len(audio) < 1.15 * 48000  # the sentence alone, not 2.1 s
+        assert np.abs(audio[:4800]).max() > 0.25  # and it starts with the sentence
+
+
 def test_playback_of_the_first_piece_starts_before_later_pieces_are_synthesised(rig):
     rig.auto = False
     rig.speak()

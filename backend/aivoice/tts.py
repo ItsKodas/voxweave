@@ -1016,7 +1016,9 @@ class TtsManager:
                 raise ValueError("it has no sample rate")
         except ValueError as exc:
             raise _Failed(f"Sentence {number} from the voice engine could not be read: {exc}") from exc
-        audio = tts_audio.trim_edges(audio, rate)
+        # The piece continues the reference clip: what is left of the reference's last word goes first, then
+        # the pause before the sentence.
+        audio = tts_audio.trim_edges(tts_audio.drop_reference_tail(audio, rate), rate)
         if tts_audio.is_silent(audio, rate):
             raise _Failed(NO_SOUND.format(number))
         if converter is not None:

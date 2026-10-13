@@ -33,8 +33,25 @@ def _frame_db(audio: np.ndarray, frame: int) -> np.ndarray:
     return 10.0 * np.log10(np.maximum(sums / lengths, 1e-20))
 
 
-def trim_edges(audio, sr: int, rel_db: float = -30.0, frame_ms: int = 20, keep_ms: int = 30) -> np.ndarray:
-    """Cut leading and trailing frames more than rel_db below the loudest frame, keeping keep_ms of context."""
+def _sustained(loud: np.ndarray, frames: int) -> np.ndarray:
+    """The loud frames that belong to a run of at least `frames` loud frames in a row."""
+    out = np.zeros(len(loud), dtype=bool)
+    run = 0
+    for i, value in enumerate(loud):
+        run = run + 1 if value else 0
+        if run >= frames:
+            out[i - run + 1:i + 1] = True
+    return out
+
+
+def trim_edges(audio, sr: int, rel_db: float = -30.0, frame_ms: int = 20, keep_ms: int = 30,
+               onset_ms: int = 60) -> np.ndarray:
+    """Cut leading and trailing frames more than rel_db below the loudest frame, keeping keep_ms of context.
+
+    The start is where sound first lasts onset_ms: the model's lead-in is the reference clip's room tone, which
+    can be only 30 dB below the speech, so single frames of it reach the threshold (first real run). If nothing
+    lasts that long, the start is the first loud frame. The end is the last loud frame, however short: the
+    release of a final consonant is short and belongs to the word."""
     audio = _clean(audio)
     if len(audio) == 0:
         return audio
@@ -43,11 +60,51 @@ def trim_edges(audio, sr: int, rel_db: float = -30.0, frame_ms: int = 20, keep_m
     top = float(db.max())
     if top < MIN_LEVEL_DB:
         return audio[:0]
-    loud = np.flatnonzero(db >= top + rel_db)
+    loud = db >= top + rel_db
+    lasting = np.flatnonzero(_sustained(loud, -(-onset_ms // frame_ms)))
+    first = int(lasting[0]) if len(lasting) else int(np.argmax(loud))
+    last = int(np.flatnonzero(loud)[-1])
     keep = sr * keep_ms // 1000
-    start = max(0, int(loud[0]) * frame - keep)
-    end = min(len(audio), (int(loud[-1]) + 1) * frame + keep)
+    start = max(0, first * frame - keep)
+    end = min(len(audio), (last + 1) * frame + keep)
     return audio[start:end].copy()
+
+
+def drop_reference_tail(audio, sr: int, rel_db: float = -30.0, frame_ms: int = 20, keep_ms: int = 30,
+                        onset_ms: int = 60, start_ms: int = 60, burst_ms: int = 400,
+                        gap_ms: int = 400) -> np.ndarray:
+    """Cut what the model said of the reference clip off the start of a piece as the model made it.
+
+    A piece continues the reference clip. Its start can hold the dying end of the reference's last word, or, at
+    few sampling steps, a word said at full level that is not in the text; then comes the pause before the
+    sentence. trim_edges would keep both the sound and the pause. The sound is recognised by all of: it begins
+    within the first start_ms and lasts at least onset_ms, it has ended within burst_ms, at least gap_ms without
+    lasting sound follow, and lasting sound comes after that. Everything before that later sound is cut, bar
+    keep_ms of context: the stray word can be the loudest thing in the piece, so trim_edges, measuring what is
+    left against a quieter peak, could no longer tell the pause from speech. Anything else is returned whole.
+    Only for a piece straight from the model: a sentence that really begins with a word shorter than burst_ms
+    followed by a pause longer than gap_ms would lose that word."""
+    audio = _clean(audio)
+    frame = max(1, sr * frame_ms // 1000)
+    if len(audio) < frame:
+        return audio
+    db = _frame_db(audio, frame)
+    top = float(db.max())
+    if top < MIN_LEVEL_DB:
+        return audio
+    lasting = _sustained(db >= top + rel_db, -(-onset_ms // frame_ms))
+    if not lasting.any() or int(np.argmax(lasting)) * frame_ms > start_ms:
+        return audio
+    gap = -(-gap_ms // frame_ms)
+    quiet_run = 0
+    for i in range(int(np.argmax(lasting)), min(len(lasting), burst_ms // frame_ms + gap + 1)):
+        quiet_run = 0 if lasting[i] else quiet_run + 1
+        if quiet_run == gap:
+            if not lasting[i:].any():
+                return audio
+            sentence = i + int(np.argmax(lasting[i:]))
+            return audio[max(0, sentence * frame - sr * keep_ms // 1000):]
+    return audio
 
 
 def finish(audio, sr: int, fade_ms: int = 10, peak: float = 0.97) -> np.ndarray:
