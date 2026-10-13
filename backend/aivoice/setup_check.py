@@ -26,9 +26,16 @@ def _fixes(data: Path) -> dict:
     """How to fix each failing check. The installed app has no README, tools or backend folder to point to: its
     environment and base model are put right by the setup that runs when the app starts."""
     if installed_app():
-        again = "Quit Voxweave from the tray menu and start Voxweave again: it repairs its own files."
-        return {"directml": f"DirectML is not available. {again}",
-                "base_model": f"Base speech model is missing. {again}",
+        # The app's setup runs again by itself only when the environment or the base model is gone, so that is
+        # what each message asks for. Nothing here can give a graphics card DirectX 12.
+        runtime = data.parent / "runtime"
+        return {"directml": "DirectML is not available in the voice engine's packages. Quit Voxweave from the tray "
+                            f"menu, delete the folder {runtime} and start Voxweave again: it then builds that "
+                            "folder anew (your voices are not in it). If live mode still does not start after "
+                            "that, the graphics card or its driver does not support DirectX 12, which no repair "
+                            "can change: update the graphics driver.",
+                "base_model": "Base speech model is missing. Quit Voxweave from the tray menu and start Voxweave "
+                              "again: it downloads the model again when it starts.",
                 "voice": "No voice models yet. Bring in a trained voice as a voice pack: drop its .voxweave "
                          "file on the Voices tab. Training is not available in the installed app yet."}
     return {"directml": "DirectML is not available. Reinstall onnxruntime-directml in the backend environment.",

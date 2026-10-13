@@ -100,8 +100,21 @@ def test_the_setup_check_of_the_installed_app_points_to_voice_packs_not_to_tools
     assert "voice pack" in messages["voice"] and ".voxweave" in messages["voice"]
     for word in ("tools/", "README", "Train one"):
         assert word not in messages["voice"]
+    # A missing base model is put back by the setup, which the app runs at its next start when the file is gone.
     assert "start Voxweave again" in messages["base_model"] and "Download" not in messages["base_model"]
-    assert "backend environment" not in messages["directml"] and "start Voxweave again" in messages["directml"]
+
+
+def test_the_installed_apps_directml_message_promises_only_what_helps(tmp_path, monkeypatch):
+    monkeypatch.setenv("AIVOICE_INSTALLED", "1")
+    data = tmp_path / "Voxweave" / "data"
+    data.mkdir(parents=True)
+    message = {c.id: c.message for c in run_checks(data, [MIC], [])}["directml"]
+    assert "backend environment" not in message and "Reinstall" not in message
+    # A restart alone does not rebuild the engine's packages; deleting the runtime folder does.
+    assert "it repairs its own files" not in message
+    assert str(tmp_path / "Voxweave" / "runtime") in message and "delete" in message.lower()
+    # And no rebuild helps a graphics card or driver without DirectX 12.
+    assert "DirectX 12" in message and "driver" in message
 
 
 def test_the_setup_check_of_the_source_checkout_is_unchanged(tmp_path, monkeypatch):
