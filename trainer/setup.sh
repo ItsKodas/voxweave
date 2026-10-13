@@ -92,7 +92,7 @@ else
 fi
 
 # ---- 5. patches (each applied once) ----
-for name in rvc_rocm_dilated_conv rvc_preprocess_keep_all_tails; do
+for name in rvc_rocm_dilated_conv rvc_preprocess_keep_all_tails rvc_train_fp32_env; do
   patch="$T/patches/$name.patch"
   if git -C "$RVC" apply --reverse --check "$patch" 2>/dev/null; then
     say "patch: $name already applied"

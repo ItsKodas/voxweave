@@ -62,7 +62,7 @@ def test_verify_uses_only_the_standard_library():
 
 # ---- a healthy fake installation under tmp_path, and probes that answer like a healthy machine ----
 
-PATCHES = ["rvc_rocm_dilated_conv.patch", "rvc_preprocess_keep_all_tails.patch"]
+PATCHES = ["rvc_rocm_dilated_conv.patch", "rvc_preprocess_keep_all_tails.patch", "rvc_train_fp32_env.patch"]
 # The four files every filelist line for silence names (trainer/filelist.py), relative to rvc/logs/mute.
 MUTE_FILES = ("0_gt_wavs/mute40k.wav", "3_feature768/mute.npy", "2a_f0/mute.wav.npy", "2b-f0nsf/mute.wav.npy")
 

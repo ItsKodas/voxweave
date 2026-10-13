@@ -1,0 +1,14 @@
+diff --git a/configs/config.py b/configs/config.py
+index 525fec9..19e231c 100644
+--- a/configs/config.py
++++ b/configs/config.py
+@@ -48,6 +48,9 @@ def get_training_dtype() :
+     """Select one shared training dtype from the visible CUDA devices."""
+     if not torch.cuda.is_available():
+         return torch.float32
++    # Set by the app when a run in half precision turned its losses into NaN: full precision is slower but stable.
++    if os.environ.get("AIVOICE_TRAIN_FP32") == "1":
++        return torch.float32
+ 
+     profiles = [get_device_dtype_sm(i) for i in range(torch.cuda.device_count())]
+     unsupported = [

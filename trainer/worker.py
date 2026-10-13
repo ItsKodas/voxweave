@@ -89,6 +89,18 @@ STAGE_TITLES = {
 MAX_UNUSABLE_SHARE = 0.02
 
 
+# Half precision is fast but can overflow on some recordings: every loss becomes NaN and nothing learned after
+# that is a voice. The run is then started once more from the beginning in full precision.
+UNSTABLE_RETRY = "Training became unstable. Starting it again in full precision, which is slower but steady"
+UNSTABLE_TWICE = ("Training became unstable (its numbers overflowed) even in full precision, so no usable voice "
+                  "can come from these clips as they are. Listen through the clips for ones that are not clean "
+                  "speech (music, shouting, clipping, very long silences), delete them, and train again.")
+
+
+class _Unstable(Exception):
+    """The trainer's losses turned into NaN or infinity."""
+
+
 class JobError(Exception):
     """A failure with a message meant for the user. `resumable` says whether running again with --resume could
     get further than this run did (False when only a new training run can help)."""
@@ -188,6 +200,7 @@ class _Training:
         self.not_resumed = False   # it started training without loading the saved state
         self.saving = False        # between a "Saving model" line and the end of that epoch
         self.kill_now = False      # an epoch just ended with a stop pending: the one safe moment to kill
+        self.unstable = False      # a loss line showed NaN or infinity: nothing after it is worth keeping
         self.stop_seen_at = None
         self.grace = float(CANCEL_GRACE_SECONDS)  # set when the stop is first seen
 
@@ -213,6 +226,7 @@ class Job:
         self.backups_skipped = 0  # in a row
         self.stop_reason = None
         self.done_stages = {}
+        self.fp32 = False  # full precision, after half precision turned the losses into NaN
         self.tail = deque(maxlen=TAIL_LINES)
         self._progress = self._log_file = None
 
@@ -334,6 +348,8 @@ class Job:
             "MIOPEN_CUSTOM_CACHE_DIR": str(cache / "miopen" / "cache"), "MIOPEN_LOG_LEVEL": "3",
             "MPLCONFIGDIR": str(cache / "mpl"), "NUMBA_CACHE_DIR": str(cache / "numba"),
         })
+        if self.fp32:
+            env["AIVOICE_TRAIN_FP32"] = "1"  # read by the trainer (trainer/patches/rvc_train_fp32_env.patch)
         return env
 
     def _run(self, argv, on_line=None, should_stop=None, cwd=None, env=None):
@@ -580,11 +596,26 @@ class Job:
                                 "are left out of training." % (missing, segments))
         saved_state = [p for name in CHECKPOINTS for p in (self.exp / name, self.exp / (name + ".bak")) if p.exists()]
         expect_resume = self.args.resume and (self._is_done("checkpoint") or bool(saved_state))
+        self.fp32 = (self.exp / "fp32").is_file()  # an earlier part of this run already had to switch
         self._emit(0.0, "Loading the saved training state" if expect_resume else "Starting training")
         restored = False
         while True:
-            if self._train_once(expect_resume):
-                break
+            try:
+                if self._train_once(expect_resume):
+                    break
+            except _Unstable:
+                # Whatever was saved since the numbers went wrong is worthless, and nothing says when that was.
+                self._drop_training_state()
+                if self.fp32:
+                    raise JobError(UNSTABLE_TWICE, resumable=False) from None
+                self._check_stop()
+                self._log("worker", "a loss turned into NaN: starting training again in full precision")
+                (self.exp / "fp32").write_text("")
+                self.fp32, expect_resume, restored = True, False, False
+                self.epochs_done, self.eta = 0, None
+                self.epoch_times.clear()
+                self._emit(0.0, UNSTABLE_RETRY)
+                continue
             # The trainer could not load the checkpoint pair and was stopped before it trained or saved anything.
             self._check_stop()
             if restored or not self._restore_backup():
@@ -617,13 +648,16 @@ class Job:
                 return
             if state.not_resumed:
                 return
+            if kind == "loss" and any(v != v or v in (float("inf"), float("-inf")) for v in event["values"].values()):
+                state.unstable = True  # stopped at once: every epoch after this would be wasted
+                return
             if kind == "saved":
                 state.saving = True
             elif kind == "epoch_done":
                 self._epoch_done(event["epoch"], state)
 
         def should_stop():
-            if state.not_resumed:
+            if state.not_resumed or state.unstable:
                 return True
             if not self._poll_stop():
                 return False
@@ -645,6 +679,8 @@ class Job:
             self._log("worker", "the trainer did not load the saved state (%d of 2 checkpoint files loaded)"
                       % state.resumed_lines)
             return False
+        if state.unstable:
+            raise _Unstable()
         if self._poll_stop() and not (code == 0 and self._model_ready()):
             raise Cancelled()
         self._require_success(code)
@@ -722,6 +758,17 @@ class Job:
                 self._log("worker", "WARNING: %d checkpoint backups in a row were skipped. If the trainer is stopped "
                                     "during a save now, the run can only go back to the last backup that was made, "
                                     "or cannot be resumed if there is none." % self.backups_skipped)
+
+    def _drop_training_state(self):
+        """Remove every saved checkpoint, its backups and any model written from them, and forget that a
+        checkpoint was saved, so that the next launch of the trainer starts from the pretrained base."""
+        for name in CHECKPOINTS:
+            for suffix in ("", ".bak", ".failed"):
+                _unlink(self.exp / (name + suffix))
+        _unlink(self.weights)
+        if "checkpoint" in self.done_stages:
+            del self.done_stages["checkpoint"]
+            write_json_atomic(self.exp / "stages.json", self.done_stages)
 
     def _restore_backup(self):
         """Put the .bak pair in place of the checkpoint pair, keeping the unreadable files as .failed.

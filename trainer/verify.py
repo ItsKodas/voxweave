@@ -14,7 +14,7 @@ from pathlib import Path
 
 PINNED_COMMIT = "81eed5e8f68b6bed1789f682fe78cdd324495afc"
 TORCH_SUFFIX = "+rocm7.2.1"
-PATCHES = ["rvc_rocm_dilated_conv.patch", "rvc_preprocess_keep_all_tails.patch"]
+PATCHES = ["rvc_rocm_dilated_conv.patch", "rvc_preprocess_keep_all_tails.patch", "rvc_train_fp32_env.patch"]
 SETUP_HINT = "Run: bash trainer/setup.sh"
 TORCH_PROBE = "import torch; print(torch.__version__, torch.cuda.is_available())"
 # The silence samples every training filelist names (trainer/filelist.py), relative to rvc/logs/mute.
@@ -91,7 +91,7 @@ def _check_rvc_patches(trainer: Path, run):
             bad.append(name)
     if bad:
         return False, f"patch not applied to trainer/rvc: {', '.join(bad)}. {SETUP_HINT}"
-    return True, "both patches are applied"
+    return True, "all patches are applied"
 
 
 def _check_pretrained(trainer: Path):

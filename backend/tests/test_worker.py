@@ -537,6 +537,97 @@ def test_more_than_a_few_segments_without_pitch_still_stop_the_run(rig):
     assert "2 of 60 segments" in rig.final()["error"] and "train" not in rig.runner.ran()
 
 
+NAN_LOSS = "loss_disc=nan, loss_gen=nan, loss_fm=nan,loss_mel=nan, loss_kl=7.650"
+
+
+def unstable_in_half_precision(rig, also_in_full=False, at_epoch=2):
+    """A fake trainer whose losses turn into NaN at an epoch, as the real one did on a real voice. In full
+    precision it trains normally, unless told to fail there too."""
+    def train(c):
+        full = c.env.get("AIVOICE_TRAIN_FP32") == "1"
+        if full and not also_in_full:
+            return FakeRunner.train(rig.runner, c)
+        exp = c.arg("-e")
+        c.line(f"INFO:{exp}:Loaded generator pretrained model: assets/pretrained_v2/f0G40k.pth")
+        for epoch in range(1, int(c.arg("-te")) + 1):
+            if epoch >= at_epoch:
+                c.line(f"INFO:{exp}:{NAN_LOSS}")
+            if epoch % int(c.arg("-se")) == 0:
+                write_checkpoint(c.exp_dir / "G_2333333.pth", epoch)
+                write_checkpoint(c.exp_dir / "D_2333333.pth", epoch)
+            c.line(f"INFO:{exp}:====> Epoch: {epoch} [2026-10-13 06:42:58] | (0:00:10.0)")
+        write_model(rig.runner.rvc / "assets" / "weights" / f"{exp}.pth")
+        return 0
+
+    rig.runner.stages["train"] = train
+
+
+def test_losses_that_turn_into_nan_stop_the_trainer_at_once_and_training_restarts_in_full_precision(rig):
+    # Found on a real voice: the losses were NaN from epoch 2, the run went on for 200 epochs, and the model it
+    # exported answered every sound with noise at full volume.
+    unstable_in_half_precision(rig)
+    assert rig.run() == 0
+    trains = [c for c in rig.runner.calls if c.stage == "train"]
+    assert len(trains) == 2
+    assert trains[0].env.get("AIVOICE_TRAIN_FP32") is None and trains[1].env.get("AIVOICE_TRAIN_FP32") == "1"
+    assert rig.runner.killed == ["train"]  # the first launch was stopped, not left to finish
+    messages = [p.get("message") for p in rig.progress()]
+    assert any("unstable" in (m or "") and "full precision" in (m or "") for m in messages)
+    assert "a loss turned into NaN" in rig.log()
+    assert rig.final()["ok"] and (rig.model / "model.onnx").exists()
+
+
+def test_the_unstable_launch_is_stopped_within_the_epoch_and_leaves_nothing_behind(rig):
+    seen = {}
+
+    def train(c):
+        if c.env.get("AIVOICE_TRAIN_FP32") == "1":
+            seen["left"] = sorted(p.name for p in c.exp_dir.iterdir() if p.name.startswith(("G_", "D_")))
+            seen["weights"] = (rig.runner.rvc / "assets" / "weights" / f"{EXP}.pth").exists()
+            return FakeRunner.train(rig.runner, c)
+        exp = c.arg("-e")
+        write_checkpoint(c.exp_dir / "G_2333333.pth", 5)  # saved while the numbers were already wrong
+        write_checkpoint(c.exp_dir / "D_2333333.pth", 5)
+        (c.exp_dir / "G_2333333.pth.bak").write_bytes(b"old")
+        c.line(f"INFO:{exp}:{NAN_LOSS}")
+        seen["went on"] = True
+        return 0
+
+    rig.runner.stages["train"] = train
+    assert rig.run() == 0
+    assert "went on" not in seen
+    assert seen["left"] == [] and seen["weights"] is False
+
+
+def test_training_that_is_unstable_in_full_precision_too_fails_with_advice_and_cannot_be_resumed(rig):
+    unstable_in_half_precision(rig, also_in_full=True)
+    assert rig.run() == 1
+    final = rig.final()
+    assert "even in full precision" in final["error"] and "delete them" in final["error"]
+    assert final["can_resume"] is False if "can_resume" in final else final.get("resumable") is False
+    assert len([c for c in rig.runner.calls if c.stage == "train"]) == 2
+    assert not (rig.model / "model.onnx").exists()
+    assert "index" not in rig.runner.ran() and "export" not in rig.runner.ran()
+
+
+def test_a_resumed_run_stays_in_full_precision_once_it_had_to_switch(rig):
+    unstable_in_half_precision(rig)
+    stop_at = {"point": "epoch_done:7"}
+    rig.runner.at = lambda point: rig.cancel() if point == stop_at["point"] else None
+    assert rig.run() == 2 and rig.final()["cancelled"]
+    rig.runner.at = lambda point: None
+    (rig.job / "cancel").unlink(missing_ok=True)
+    rig.runner.calls.clear()
+    assert rig.run("--resume") == 0
+    trains = [c for c in rig.runner.calls if c.stage == "train"]
+    assert trains and all(c.env.get("AIVOICE_TRAIN_FP32") == "1" for c in trains)
+
+
+def test_a_healthy_run_never_asks_for_full_precision(rig):
+    assert rig.run() == 0
+    assert all(c.env.get("AIVOICE_TRAIN_FP32") is None for c in rig.runner.calls)
+
+
 def test_training_that_exits_zero_without_the_model_fails(rig):
     def train(c):
         c.line(f"INFO:{EXP}:Saving final checkpoint: Traceback (most recent call last): FileNotFoundError")
