@@ -15,8 +15,11 @@ vi.mock("./ImportDrop", () => ({
   ImportDrop: ({ onImported }: { onImported: () => void }) => <button onClick={onImported}>import done</button>,
 }));
 vi.mock("./TrainPanel", () => ({
-  TrainPanel: ({ voice, active, onModelReady }: { voice: { name: string }; active: boolean; onModelReady: () => void }) => (
-    <button onClick={onModelReady}>train {voice.name} {active ? "active" : "idle"}</button>
+  TrainPanel: ({ voice, active, onModelReady, onStarted }: { voice: { name: string }; active: boolean; onModelReady: () => void; onStarted?: () => void }) => (
+    <>
+      <button onClick={onModelReady}>train {voice.name} {active ? "active" : "idle"}</button>
+      <button onClick={onStarted}>started {voice.name}</button>
+    </>
   ),
 }));
 vi.mock("./ClipList", () => ({
@@ -72,5 +75,14 @@ describe("VoiceStudio", () => {
     expect(onModelReady).toHaveBeenCalledTimes(1);
     rerender(<VoiceStudio voice={VOICE} active={false} onChanged={() => {}} onModelReady={onModelReady} />);
     expect(screen.getByRole("button", { name: "train Alpha idle" })).toBeInTheDocument();
+  });
+
+  it("passes on that a training run was started", async () => {
+    const onTrainingStarted = vi.fn();
+    const onChanged = vi.fn();
+    render(<VoiceStudio voice={VOICE} active onChanged={onChanged} onTrainingStarted={onTrainingStarted} />);
+    await userEvent.click(screen.getByRole("button", { name: "started Alpha" }));
+    expect(onTrainingStarted).toHaveBeenCalledTimes(1);
+    expect(onChanged).not.toHaveBeenCalled();
   });
 });

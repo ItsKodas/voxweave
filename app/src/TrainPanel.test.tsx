@@ -1,8 +1,8 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LibraryVoice } from "./studioApi";
-import { TrainPanel } from "./TrainPanel";
+import { TrainPanel, forgetEnvironment } from "./TrainPanel";
 import { TrainingEnvironment, TrainingStatus } from "./trainingApi";
 
 vi.mock("./trainingApi", async (importOriginal) => ({
@@ -14,7 +14,8 @@ import { trainingApi } from "./trainingApi";
 const VOICE: LibraryVoice = { id: "v1", name: "Alpha", created: "1", minutes: 10, clips: 60, models: [] };
 const make = (over: Partial<TrainingStatus> = {}): TrainingStatus => ({
   state: "idle", voice_id: null, stage: null, stage_index: null, stages: 7, epoch: null, epochs: null,
-  percent: 0, eta_seconds: null, message: null, error: null, started: null, finished: null, can_resume: false, ...over,
+  percent: 0, eta_seconds: null, message: null, error: null, started: null, finished: null, can_resume: false,
+  has_checkpoint: false, ...over,
 });
 const READY: TrainingEnvironment = { ready: true, ok: true, checks: [{ id: "gpu", ok: true, message: "GPU found" }] };
 const running = (over: Partial<TrainingStatus> = {}) =>
@@ -27,6 +28,7 @@ function answer(own: TrainingStatus, latest: TrainingStatus = own) {
 
 beforeEach(() => {
   vi.resetAllMocks();
+  forgetEnvironment();
   answer(make());
   vi.mocked(trainingApi.environment).mockResolvedValue(READY);
   vi.mocked(trainingApi.start).mockResolvedValue(running());
@@ -34,8 +36,8 @@ beforeEach(() => {
   vi.spyOn(window, "confirm").mockReturnValue(true);
 });
 
-const panel = (voice = VOICE, onModelReady = vi.fn(), active = true) =>
-  render(<TrainPanel voice={voice} active={active} onModelReady={onModelReady} />);
+const panel = (voice = VOICE, onModelReady = vi.fn(), active = true, onStarted = vi.fn()) =>
+  render(<TrainPanel voice={voice} active={active} onModelReady={onModelReady} onStarted={onStarted} />);
 
 describe("TrainPanel before training", () => {
   it("asks for more audio below 5 minutes and offers no Start", async () => {
@@ -174,12 +176,39 @@ describe("TrainPanel after training", () => {
     expect(onModelReady).toHaveBeenCalledTimes(1);
   });
 
-  it("does not announce a finished run it never saw running", async () => {
+  it("does not announce a finished run it never saw running: the model is simply ready", async () => {
     answer(make({ state: "done", voice_id: "v1", percent: 100 }));
     const onModelReady = vi.fn();
     panel({ ...VOICE, models: ["rvc"] }, onModelReady);
-    expect(await screen.findByText(/Training finished/)).toBeInTheDocument();
+    expect(await screen.findByText("Trained model: ready")).toBeInTheDocument();
+    expect(screen.queryByText(/Training finished/)).not.toBeInTheDocument();
     expect(onModelReady).not.toHaveBeenCalled();
+  });
+
+  it("says the model is ready for a finished run it never saw, even before the voice list has caught up", async () => {
+    answer(make({ state: "done", voice_id: "v1", percent: 100 }));
+    panel(); // the voice as it was listed before training: no model yet
+    expect(await screen.findByText("Trained model: ready")).toBeInTheDocument();
+    expect(screen.queryByText(/Training finished/)).not.toBeInTheDocument();
+  });
+
+  it("explains what Resume does when the run stopped before its first checkpoint", async () => {
+    answer(make({ state: "cancelled", voice_id: "v1", can_resume: true, has_checkpoint: false }));
+    panel();
+    expect(await screen.findByRole("button", { name: "Resume" })).toBeInTheDocument();
+    expect(screen.getByText("Resume keeps the prepared audio and starts training from the first epoch.")).toBeInTheDocument();
+  });
+
+  it("does not say so when the run has a checkpoint to continue from, or cannot be resumed", async () => {
+    answer(make({ state: "cancelled", voice_id: "v1", can_resume: true, has_checkpoint: true }));
+    const first = panel();
+    expect(await screen.findByRole("button", { name: "Resume" })).toBeInTheDocument();
+    expect(screen.queryByText(/starts training from the first epoch/)).not.toBeInTheDocument();
+    first.unmount();
+    answer(make({ state: "cancelled", voice_id: "v1", can_resume: false }));
+    panel();
+    expect(await screen.findByRole("button", { name: "Start over" })).toBeInTheDocument();
+    expect(screen.queryByText(/starts training from the first epoch/)).not.toBeInTheDocument();
   });
 
   it("shows a failure with its log location, Resume when the backend says so, and Start over", async () => {
@@ -187,7 +216,7 @@ describe("TrainPanel after training", () => {
     panel();
     expect(await screen.findByRole("alert")).toHaveTextContent("Out of memory");
     expect(screen.getByText(/data\/voices\/v1\/training\/worker\.log/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Resume" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Resume" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Start over" })).toBeInTheDocument();
   });
 
@@ -195,8 +224,9 @@ describe("TrainPanel after training", () => {
     answer(make({ state: "failed", voice_id: "v1", error: "The clips changed since this training run started", can_resume: false }));
     panel();
     expect(await screen.findByRole("alert")).toHaveTextContent("The clips changed");
+    // The buttons arrive with the environment report, a moment after the status: wait for them before judging.
+    expect(await screen.findByRole("button", { name: "Start over" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Start over" })).toBeInTheDocument();
   });
 
   it.each([
@@ -206,7 +236,7 @@ describe("TrainPanel after training", () => {
     answer(make({ state, voice_id: "v1", can_resume: true }));
     panel();
     expect(await screen.findByText(words)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Resume" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Resume" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Start over" })).toBeInTheDocument();
   });
 
@@ -236,9 +266,10 @@ describe("TrainPanel with a trained model", () => {
   it("shows the model is ready and offers Train again after confirming the replacement", async () => {
     panel(TRAINED);
     expect(await screen.findByText("Trained model: ready")).toBeInTheDocument();
+    const again = await screen.findByRole("button", { name: "Train again" }); // arrives with the environment report
     expect(screen.queryByRole("button", { name: "Start training" })).not.toBeInTheDocument();
     vi.mocked(window.confirm).mockReturnValueOnce(false);
-    await userEvent.click(screen.getByRole("button", { name: "Train again" }));
+    await userEvent.click(again);
     expect(window.confirm).toHaveBeenCalledWith("Train again? The current model is replaced only when the new training finishes.");
     expect(trainingApi.start).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole("button", { name: "Train again" }));
@@ -278,5 +309,106 @@ describe("TrainPanel visibility", () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(trainingApi.status).not.toHaveBeenCalled();
     expect(trainingApi.environment).not.toHaveBeenCalled();
+  });
+});
+
+describe("TrainPanel when the voice engine does not answer", () => {
+  it("says so with a Retry button instead of staying empty, and recovers on Retry", async () => {
+    vi.mocked(trainingApi.status).mockRejectedValue(new Error("Failed to fetch"));
+    panel();
+    expect(await screen.findByText("Could not reach the voice engine. Retrying…")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /start training/i })).not.toBeInTheDocument();
+    expect(trainingApi.environment).not.toHaveBeenCalled();
+    answer(make());
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("button", { name: "Start training" })).toBeInTheDocument();
+    expect(screen.queryByText(/Could not reach the voice engine/)).not.toBeInTheDocument();
+  });
+
+  it("recovers by itself: it asks again every 3 seconds", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(trainingApi.status).mockRejectedValue(new Error("Failed to fetch"));
+      panel();
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(screen.getByText("Could not reach the voice engine. Retrying…")).toBeInTheDocument();
+      answer(running());
+      await act(async () => { await vi.advanceTimersByTimeAsync(2999); });
+      expect(screen.getByText("Could not reach the voice engine. Retrying…")).toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(screen.getByText("Epoch 12 of 200")).toBeInTheDocument();
+      expect(screen.queryByText(/Could not reach the voice engine/)).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("TrainPanel and the slow environment check", () => {
+  it("checks once and remembers the answer for the next voice, so Resume is there at once", async () => {
+    const first = panel();
+    await screen.findByRole("button", { name: "Start training" });
+    expect(trainingApi.environment).toHaveBeenCalledTimes(1);
+    first.unmount();
+    answer(make({ state: "interrupted", voice_id: "v2", can_resume: true, has_checkpoint: true }));
+    panel({ ...VOICE, id: "v2", name: "Beta" });
+    expect(await screen.findByRole("button", { name: "Resume" })).toBeInTheDocument();
+    expect(screen.queryByText("Checking this computer…")).not.toBeInTheDocument();
+    expect(trainingApi.environment).toHaveBeenCalledTimes(1);
+  });
+
+  it("remembers a failing answer too, and Check again still asks afresh", async () => {
+    vi.mocked(trainingApi.environment).mockResolvedValue({ ready: false, ok: false, checks: [{ id: "b", ok: false, message: "GPU not visible" }] });
+    const first = panel();
+    await screen.findByText("GPU not visible");
+    first.unmount();
+    panel({ ...VOICE, id: "v2", name: "Beta" });
+    expect(await screen.findByText("GPU not visible")).toBeInTheDocument();
+    expect(trainingApi.environment).toHaveBeenCalledTimes(1);
+    vi.mocked(trainingApi.environment).mockResolvedValue(READY);
+    await userEvent.click(screen.getByRole("button", { name: "Check again" }));
+    expect(trainingApi.environment).toHaveBeenLastCalledWith(true);
+    expect(await screen.findByRole("button", { name: "Start training" })).toBeInTheDocument();
+    cleanup();
+    panel({ ...VOICE, id: "v3", name: "Gamma" }); // and the fresh answer is the one remembered
+    expect(await screen.findByRole("button", { name: "Start training" })).toBeInTheDocument();
+    expect(trainingApi.environment).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not call an unchecked environment broken, and does not remember it", async () => {
+    vi.mocked(trainingApi.environment).mockResolvedValue({ ready: false, ok: false, unknown: true, checks: [], checked_while_live: true });
+    const first = panel();
+    expect(await screen.findByText("Training can be checked once live mode is stopped.")).toBeInTheDocument();
+    expect(screen.queryByText(/Training is not set up on this computer/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /start training/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Check again" })).toBeInTheDocument();
+    first.unmount();
+    vi.mocked(trainingApi.environment).mockResolvedValue(READY);
+    panel();
+    expect(await screen.findByRole("button", { name: "Start training" })).toBeInTheDocument();
+    expect(trainingApi.environment).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("TrainPanel tells the app when a job starts", () => {
+  it("after a start and after a resume, but not after a refusal", async () => {
+    const onStarted = vi.fn();
+    const first = panel(VOICE, vi.fn(), true, onStarted);
+    await userEvent.click(await screen.findByRole("button", { name: "Start training" }));
+    await waitFor(() => expect(onStarted).toHaveBeenCalledTimes(1));
+    first.unmount();
+
+    answer(make({ state: "interrupted", voice_id: "v1", can_resume: true }));
+    const second = panel(VOICE, vi.fn(), true, onStarted);
+    await userEvent.click(await screen.findByRole("button", { name: "Resume" }));
+    await waitFor(() => expect(onStarted).toHaveBeenCalledTimes(2));
+    second.unmount();
+
+    answer(make());
+    vi.mocked(trainingApi.start).mockRejectedValue(new Error("Stop live mode before training"));
+    panel(VOICE, vi.fn(), true, onStarted);
+    await userEvent.click(await screen.findByRole("button", { name: "Start training" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Stop live mode before training");
+    expect(onStarted).toHaveBeenCalledTimes(2);
   });
 });

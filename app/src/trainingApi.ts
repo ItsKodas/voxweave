@@ -18,13 +18,21 @@ export type TrainingStatus = {
   error: string | null;
   started: number | null;
   finished: number | null;
-  /** Decided by the backend: this voice has a stopped run with a checkpoint that can continue. */
+  /** Decided by the backend: this voice has a stopped run that Resume can continue. */
   can_resume: boolean;
+  /** Whether that resume continues from a saved checkpoint; without one it keeps the prepared audio and trains from epoch 1. */
+  has_checkpoint: boolean;
 };
 export type TrainingEnvironment = {
   ready: boolean;
   ok: boolean;
   checks: { id: string; ok: boolean; message: string }[];
+  /** The backend has not checked yet and may not start a GPU check now (live mode or training is running). */
+  unknown?: boolean;
+  /** The answer is what was known before: no check was run because live mode is on. */
+  checked_while_live?: boolean;
+  /** Likewise, because a training run is active. */
+  checked_while_training?: boolean;
 };
 export type StartTraining = { voice_id: string; epochs?: number; batch_size?: number; resume?: boolean };
 

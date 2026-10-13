@@ -11,7 +11,8 @@ import { trainingApi } from "./trainingApi";
 
 const make = (over: Partial<TrainingStatus> = {}): TrainingStatus => ({
   state: "idle", voice_id: null, stage: null, stage_index: null, stages: 7, epoch: null, epochs: null,
-  percent: 0, eta_seconds: null, message: null, error: null, started: null, finished: null, can_resume: false, ...over,
+  percent: 0, eta_seconds: null, message: null, error: null, started: null, finished: null, can_resume: false,
+  has_checkpoint: false, ...over,
 });
 const RUNNING = make({ state: "running", voice_id: "v1", stage: "train", percent: 40 });
 const DONE = make({ state: "done", voice_id: "v1", percent: 100 });
@@ -99,6 +100,7 @@ describe("useTrainingStatus", () => {
     vi.mocked(trainingApi.status).mockRejectedValueOnce(new Error("blip"));
     await tick(1000);
     expect(result.current.status?.percent).toBe(40);
+    expect(result.current.unreachable).toBe(false); // something is known and shown: not the blank-panel case
     const before = calls();
     await tick(2000);
     expect(calls()).toBeGreaterThan(before);
@@ -135,5 +137,54 @@ describe("useTrainingStatus", () => {
     const { result } = renderHook(() => useTrainingStatus("v1", true));
     await tick(0);
     expect(result.current.elsewhere).toBeNull();
+  });
+});
+
+describe("useTrainingStatus when the first answer does not come", () => {
+  it("says the engine is unreachable and asks again every 3 seconds until an answer arrives", async () => {
+    vi.mocked(trainingApi.status).mockRejectedValue(new Error("down"));
+    const { result } = renderHook(() => useTrainingStatus("v1", true));
+    expect(result.current.unreachable).toBe(false); // nothing has failed yet
+    await tick(0);
+    expect(result.current.status).toBeNull();
+    expect(result.current.unreachable).toBe(true);
+    expect(calls()).toBe(1);
+    await tick(2999);
+    expect(calls()).toBe(1);
+    await tick(1);
+    expect(calls()).toBe(2);
+    await tick(3000);
+    expect(calls()).toBe(3);
+    vi.mocked(trainingApi.status).mockResolvedValue(make());
+    await tick(3000);
+    expect(result.current.status?.state).toBe("idle");
+    expect(result.current.unreachable).toBe(false);
+    const settled = calls();
+    await tick(30_000);
+    expect(calls()).toBe(settled); // answered and idle: silent again
+  });
+
+  it("refresh asks again at once instead of waiting for the next retry", async () => {
+    vi.mocked(trainingApi.status).mockRejectedValue(new Error("down"));
+    const { result } = renderHook(() => useTrainingStatus("v1", true));
+    await tick(0);
+    vi.mocked(trainingApi.status).mockResolvedValue(make());
+    act(() => result.current.refresh());
+    await tick(0);
+    expect(result.current.status?.state).toBe("idle");
+    expect(result.current.unreachable).toBe(false);
+    const settled = calls();
+    await tick(10_000);
+    expect(calls()).toBe(settled); // the pending retry was dropped
+  });
+
+  it("stops retrying while disabled", async () => {
+    vi.mocked(trainingApi.status).mockRejectedValue(new Error("down"));
+    const { rerender } = renderHook(({ on }) => useTrainingStatus("v1", on), { initialProps: { on: true } });
+    await tick(0);
+    rerender({ on: false });
+    const before = calls();
+    await tick(10_000);
+    expect(calls()).toBe(before);
   });
 });

@@ -7,9 +7,12 @@ vi.mock("./studioApi", () => ({
   studioApi: { voices: vi.fn(), createVoice: vi.fn(), deleteVoice: vi.fn() },
 }));
 vi.mock("./VoiceStudio", () => ({
-  VoiceStudio: ({ voice, onChanged, devicesVersion, onModelReady }: { voice: { name: string }; onChanged: () => void; devicesVersion?: number; onModelReady?: () => void }) => (
+  VoiceStudio: ({ voice, onChanged, devicesVersion, onModelReady, onTrainingStarted }: {
+    voice: { name: string }; onChanged: () => void; devicesVersion?: number; onModelReady?: () => void; onTrainingStarted?: () => void;
+  }) => (
     <>
       <button onClick={onModelReady}>model ready for {voice.name}</button>
+      <button onClick={onTrainingStarted}>training started for {voice.name}</button>
       <button onClick={onChanged}>studio for {voice.name}</button>
       <p>studio devices {devicesVersion}</p>
     </>
@@ -119,6 +122,14 @@ describe("VoicesPanel", () => {
     expect(studioApi.voices).not.toHaveBeenCalled();
     rerender(<VoicesPanel active />);
     await vi.waitFor(() => expect(studioApi.voices).toHaveBeenCalledTimes(1));
+  });
+
+  it("tells the app when a voice's training has started, without reloading anything", async () => {
+    const onTrainingStarted = vi.fn();
+    render(<VoicesPanel active onTrainingStarted={onTrainingStarted} />);
+    await userEvent.click(await screen.findByRole("button", { name: "training started for Alpha" }));
+    expect(onTrainingStarted).toHaveBeenCalledTimes(1);
+    expect(studioApi.voices).toHaveBeenCalledTimes(1);
   });
 
   it("reloads the voices and tells the app when a voice's training has finished", async () => {

@@ -20,13 +20,15 @@ export function MinutesBar({ minutes }: { minutes: number }) {
   );
 }
 
-export function VoiceStudio({ voice, active, devicesVersion = 0, onChanged, onModelReady = () => {} }: {
+export function VoiceStudio({ voice, active, devicesVersion = 0, onChanged, onModelReady = () => {}, onTrainingStarted }: {
   voice: LibraryVoice;
   active: boolean;
   devicesVersion?: number;
   onChanged: () => void;
   /** A training run finished: the voice list and the Live tab need to reload. */
   onModelReady?: () => void;
+  /** A training run was started or resumed here. */
+  onTrainingStarted?: () => void;
 }) {
   const [version, setVersion] = useState(0);
   const changed = useCallback(() => {
@@ -43,7 +45,7 @@ export function VoiceStudio({ voice, active, devicesVersion = 0, onChanged, onMo
       <h3>Import</h3>
       <ImportDrop voiceId={voice.id} active={active} onImported={changed} />
       <h3>Train</h3>
-      <TrainPanel voice={voice} active={active} onModelReady={onModelReady} />
+      <TrainPanel voice={voice} active={active} onModelReady={onModelReady} onStarted={onTrainingStarted} />
       <h3>Clips</h3>
       <ClipList voiceId={voice.id} version={version} onChanged={onChanged} />
     </section>

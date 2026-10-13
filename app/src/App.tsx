@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import "./App.css";
 import { LivePanel } from "./LivePanel";
 import { SetupCheck } from "./SetupCheck";
 import { useLiveShortcuts } from "./useLiveShortcuts";
 import { useStats } from "./useStats";
+import { useTrainingWatch } from "./useTrainingWatch";
 import { VoicesPanel } from "./VoicesPanel";
 
 const START_TIMEOUT_MS = 15_000;
@@ -59,13 +60,21 @@ function Main() {
   const [devicesVersion, setDevicesVersion] = useState(0);
   const [voicesVersion, setVoicesVersion] = useState(0);
   const [tab, setTab] = useState<"live" | "voices">("live");
+  const reloadLiveVoices = useCallback(() => setVoicesVersion((v) => v + 1), []);
+  // Followed here, not in a tab: a model that finishes while the Live tab is shown must still appear there.
+  const trainingStarted = useTrainingWatch(reloadLiveVoices);
 
   useLiveShortcuts(latest, setActionError);
+
+  const showLive = () => {
+    if (tab !== "live") reloadLiveVoices(); // whatever was trained or deleted meanwhile shows without a restart
+    setTab("live");
+  };
 
   return (
     <>
       <div role="tablist" className="tabs">
-        <button role="tab" aria-selected={tab === "live"} onClick={() => setTab("live")}>Live</button>
+        <button role="tab" aria-selected={tab === "live"} onClick={showLive}>Live</button>
         <button role="tab" aria-selected={tab === "voices"} onClick={() => setTab("voices")}>Voices</button>
       </div>
       {/* Both stay mounted so switching tabs never resets a form or interrupts a session. */}
@@ -74,7 +83,7 @@ function Main() {
         <LivePanel stats={stats} actionError={actionError} voicesVersion={voicesVersion} onDevicesRefreshed={() => setDevicesVersion((v) => v + 1)} />
       </div>
       <div role="tabpanel" hidden={tab !== "voices"}>
-        <VoicesPanel active={tab === "voices"} devicesVersion={devicesVersion} onModelReady={() => setVoicesVersion((v) => v + 1)} />
+        <VoicesPanel active={tab === "voices"} devicesVersion={devicesVersion} onModelReady={reloadLiveVoices} onTrainingStarted={trainingStarted} />
       </div>
     </>
   );

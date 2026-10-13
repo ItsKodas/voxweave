@@ -36,6 +36,17 @@ export function timeLeft(seconds: number | null): string {
 
 const percentOf = (s: TrainingStatus) => Math.round(s.percent);
 
+/**
+ * The last environment report, kept while the app is open: the check takes seconds, and choosing another voice
+ * mounts a new panel. "Check again" replaces it. A report the backend could not make (unknown) is never kept.
+ */
+let lastEnvironment: TrainingEnvironment | null = null;
+
+/** For tests: start without a remembered report. */
+export const forgetEnvironment = () => {
+  lastEnvironment = null;
+};
+
 function Bar({ status, label }: { status: TrainingStatus; label: string }) {
   return (
     <div className="train-bar">
@@ -45,14 +56,16 @@ function Bar({ status, label }: { status: TrainingStatus; label: string }) {
   );
 }
 
-export function TrainPanel({ voice, active, onModelReady }: {
+export function TrainPanel({ voice, active, onModelReady, onStarted = () => {} }: {
   voice: LibraryVoice;
   /** Whether the Voices tab is visible: nothing is asked of the backend while it is not. */
   active: boolean;
   onModelReady: () => void;
+  /** A training run was started or resumed here (the app then follows it on every tab). */
+  onStarted?: () => void;
 }) {
-  const { status, elsewhere, refresh } = useTrainingStatus(voice.id, active);
-  const [env, setEnv] = useState<TrainingEnvironment | null>(null);
+  const { status, elsewhere, unreachable, refresh } = useTrainingStatus(voice.id, active);
+  const [env, setEnv] = useState<TrainingEnvironment | null>(lastEnvironment);
   const [envError, setEnvError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
   const [epochs, setEpochs] = useState(DEFAULT_EPOCHS);
@@ -60,6 +73,7 @@ export function TrainPanel({ voice, active, onModelReady }: {
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const [sawFinish, setSawFinish] = useState(false);
 
   const enough = voice.minutes >= MIN_TRAIN_MINUTES;
   const ownActive = isActive(status);
@@ -72,6 +86,7 @@ export function TrainPanel({ voice, active, onModelReady }: {
   const wasOwn = useRef(false);
   const wasOther = useRef(false);
   useEffect(() => {
+    if (wasOwn.current && status?.state === "done") setSawFinish(true);
     if ((wasOwn.current && status?.state === "done") || (wasOther.current && elsewhere?.state === "done")) {
       notify.current();
     }
@@ -83,13 +98,15 @@ export function TrainPanel({ voice, active, onModelReady }: {
     if (status !== null && !ownActive) setStopping(false);
   }, [status, ownActive]);
 
-  // The environment check takes seconds, so it runs once, when it can matter.
-  const asked = useRef(false);
+  // The environment check takes seconds, so it runs once, when it can matter, and its answer is remembered.
+  const asked = useRef(lastEnvironment !== null);
   const checkEnvironment = useCallback(async (fresh: boolean) => {
     setChecking(true);
     setEnvError(null);
     try {
-      setEnv(await trainingApi.environment(fresh));
+      const report = await trainingApi.environment(fresh);
+      if (!report.unknown) lastEnvironment = report;
+      setEnv(report);
     } catch (e) {
       setEnvError((e as Error).message);
     } finally {
@@ -117,9 +134,10 @@ export function TrainPanel({ voice, active, onModelReady }: {
     }
   };
 
-  const start = (resume: boolean, confirmText: string | null) => {
+  const start = async (resume: boolean, confirmText: string | null) => {
     if (confirmText !== null && !window.confirm(confirmText)) return;
-    void act(() => trainingApi.start(resume ? { voice_id: voice.id, resume: true } : { voice_id: voice.id, epochs, batch_size: batch, resume: false }));
+    const started = await act(() => trainingApi.start(resume ? { voice_id: voice.id, resume: true } : { voice_id: voice.id, epochs, batch_size: batch, resume: false }));
+    if (started) onStarted();
   };
 
   const cancel = async () => {
@@ -135,7 +153,18 @@ export function TrainPanel({ voice, active, onModelReady }: {
     </div>
   );
 
-  if (status === null) return <div className="train">{alert}</div>;
+  if (status === null) {
+    return (
+      <div className="train">
+        {alert}
+        {unreachable && (
+          <p role="alert" className="error">
+            Could not reach the voice engine. Retrying… <button onClick={refresh}>Retry</button>
+          </p>
+        )}
+      </div>
+    );
+  }
 
   if (ownActive) {
     const stage = status.stage ? STAGE_NAMES[status.stage] : "Preparing";
@@ -172,6 +201,7 @@ export function TrainPanel({ voice, active, onModelReady }: {
 
   const stopped = status.state === "failed" || status.state === "cancelled" || status.state === "interrupted";
   const canStart = enough && env?.ready === true;
+  const unchecked = env?.unknown === true; // the backend may not probe the GPU right now: not a broken setup
   const failing = env?.checks.filter((c) => !c.ok) ?? [];
   const startLabel = stopped ? "Start over" : hasModel ? "Train again" : "Start training";
   const startConfirm = stopped
@@ -184,8 +214,8 @@ export function TrainPanel({ voice, active, onModelReady }: {
   return (
     <div className="train">
       {alert}
-      {hasModel && <p className="ok">Trained model: ready</p>}
-      {status.state === "done" && <p className="ok">Training finished. This voice is now available on the Live tab.</p>}
+      {(hasModel || (status.state === "done" && !sawFinish)) && <p className="ok">Trained model: ready</p>}
+      {status.state === "done" && sawFinish && <p className="ok">Training finished. This voice is now available on the Live tab.</p>}
       {status.state === "cancelled" && <p>Training was stopped</p>}
       {status.state === "interrupted" && <p>Training was interrupted when the app closed</p>}
       {status.state === "failed" && (
@@ -194,7 +224,12 @@ export function TrainPanel({ voice, active, onModelReady }: {
 
       {!enough && <p className="hint">Record or import at least {MIN_TRAIN_MINUTES} minutes to train. You have {usable.toFixed(1)}.</p>}
       {enough && env === null && !envError && <p className="hint">Checking this computer…</p>}
-      {enough && env !== null && !env.ready && (
+      {enough && unchecked && (
+        <p className="hint">
+          {env?.checked_while_live ? "Training can be checked once live mode is stopped." : "Training cannot be checked right now."}
+        </p>
+      )}
+      {enough && env !== null && !env.ready && !unchecked && (
         <div className="setup">
           <p>Training is not set up on this computer. See Training setup in the README.</p>
           <ul>{failing.map((c) => <li key={c.id}>{c.message}</li>)}</ul>
@@ -230,6 +265,9 @@ export function TrainPanel({ voice, active, onModelReady }: {
               {startLabel}
             </button>
           </div>
+          {stopped && status.can_resume && !status.has_checkpoint && (
+            <p className="hint">Resume keeps the prepared audio and starts training from the first epoch.</p>
+          )}
         </>
       )}
     </div>
