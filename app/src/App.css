@@ -4,6 +4,7 @@ h1 { font-size: 1.3rem; margin: 0 0 12px; }
 h2 { font-size: 1rem; margin: 0 0 6px; }
 label { display: block; margin: 10px 0; font-size: 0.85rem; color: #aab0bb; }
 label.row { display: flex; gap: 8px; align-items: center; color: #e8eaed; }
+label.row input[type="checkbox"] { flex: none; width: auto; margin: 0; }
 select, input[type="number"], input[type="range"] { display: block; width: 100%; margin-top: 4px; }
 select, input[type="number"] { padding: 6px; background: #22252c; color: inherit; border: 1px solid #343843; border-radius: 6px; }
 button { padding: 8px 18px; border: 0; border-radius: 6px; background: #4f7cff; color: #fff; font-weight: 600; cursor: pointer; }
@@ -27,7 +28,7 @@ footer { margin-top: 20px; font-size: 0.75rem; color: #7d8491; }
 .tabs button[aria-selected="true"] { color: #fff; background: #22252c; }
 .row { display: flex; gap: 8px; align-items: flex-end; }
 .row label { flex: 1; margin: 0; }
-.row input { display: block; width: 100%; margin-top: 4px; padding: 6px; background: #22252c; color: inherit; border: 1px solid #343843; border-radius: 6px; }
+.row input:not([type="checkbox"]):not([type="radio"]) { display: block; width: 100%; margin-top: 4px; padding: 6px; background: #22252c; color: inherit; border: 1px solid #343843; border-radius: 6px; }
 .voice-list { list-style: none; padding: 0; margin: 12px 0; }
 .voice-list li { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; }
 .voice-list li.selected { background: #22252c; }

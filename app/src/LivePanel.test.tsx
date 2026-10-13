@@ -66,8 +66,8 @@ describe("LivePanel", () => {
     render(<LivePanel stats={IDLE} />);
     await ready();
     expect(screen.getByLabelText("Microphone").querySelectorAll("option")).toHaveLength(1);
-    const destinations = [...screen.getByLabelText("Virtual mic").querySelectorAll("option")].map((o) => o.textContent);
-    expect(destinations).toEqual(["None (listen only)", "Headset", "VoiceMeeter Input"]);
+    const destinations = [...screen.getByLabelText(/^Virtual microphone/).querySelectorAll("option")].map((o) => o.textContent);
+    expect(destinations).toEqual(["None (listen only)", "Headset", "VoiceMeeter Output (sent through VoiceMeeter Input)"]);
   });
 
   describe("without a virtual mic", () => {
@@ -76,8 +76,8 @@ describe("LivePanel", () => {
     it("selects None instead of a real output, explains why, and keeps Start disabled", async () => {
       render(<LivePanel stats={IDLE} />);
       await screen.findByText(/other apps will not hear anything until VoiceMeeter is installed/i);
-      expect(screen.getByLabelText("Virtual mic")).toHaveValue("");
-      expect(screen.getByLabelText("Virtual mic")).toHaveDisplayValue("None (listen only)");
+      expect(screen.getByLabelText(/^Virtual microphone/)).toHaveValue("");
+      expect(screen.getByLabelText(/^Virtual microphone/)).toHaveDisplayValue("None (listen only)");
       expect(screen.getByRole("button", { name: "Start" })).toBeDisabled();
       expect(screen.getByText(/choose a virtual mic or tick listen to output/i)).toBeInTheDocument();
     });
@@ -101,7 +101,7 @@ describe("LivePanel", () => {
   it("disables Start when neither a virtual mic nor a listen device is chosen", async () => {
     render(<LivePanel stats={IDLE} />);
     const start = await ready();
-    await userEvent.selectOptions(screen.getByLabelText("Virtual mic"), "None (listen only)");
+    await userEvent.selectOptions(screen.getByLabelText(/^Virtual microphone/), "None (listen only)");
     expect(start).toBeDisabled();
     await userEvent.click(screen.getByLabelText("Listen to output"));
     expect(start).toBeEnabled();
@@ -169,7 +169,7 @@ describe("LivePanel", () => {
       render(<LivePanel stats={IDLE} onMicChosen={onMicChosen} />);
       await ready();
       await waitFor(() => expect(onMicChosen).toHaveBeenLastCalledWith(VM.index));
-      await userEvent.selectOptions(screen.getByLabelText("Virtual mic"), "");
+      await userEvent.selectOptions(screen.getByLabelText(/^Virtual microphone/), "");
       expect(onMicChosen).toHaveBeenLastCalledWith(null);
     });
 
@@ -211,17 +211,17 @@ describe("LivePanel", () => {
       await screen.findByText(/other apps will not hear anything/i);
       vi.mocked(api.refreshDevices).mockResolvedValue({ ...NO_VIRTUAL_MIC, devices: [MIC, SPEAKERS, HEADSET, VM], virtual_mic: 3 });
       await userEvent.click(screen.getByRole("button", { name: "Refresh devices" }));
-      await vi.waitFor(() => expect(screen.getByLabelText("Virtual mic")).toHaveValue("3"));
+      await vi.waitFor(() => expect(screen.getByLabelText(/^Virtual microphone/)).toHaveValue("3"));
       expect(screen.queryByText(/other apps will not hear anything/i)).not.toBeInTheDocument();
     });
 
     it("keeps a deliberate None choice when a virtual mic was available all along", async () => {
       render(<LivePanel stats={IDLE} />);
       await ready();
-      await userEvent.selectOptions(screen.getByLabelText("Virtual mic"), "None (listen only)");
+      await userEvent.selectOptions(screen.getByLabelText(/^Virtual microphone/), "None (listen only)");
       await userEvent.click(screen.getByRole("button", { name: "Refresh devices" }));
       await vi.waitFor(() => expect(api.refreshDevices).toHaveBeenCalled());
-      expect(screen.getByLabelText("Virtual mic")).toHaveValue("");
+      expect(screen.getByLabelText(/^Virtual microphone/)).toHaveValue("");
     });
 
     it("shows the error when the refresh fails", async () => {
@@ -438,8 +438,8 @@ describe("dedicated microphone setup", () => {
     fireEvent.click(screen.getByRole("button", { name: "I have installed it" }));
     await waitFor(() => expect(screen.queryByText("Set up a dedicated Voxweave microphone")).not.toBeInTheDocument());
     expect(api.refreshDevices).toHaveBeenCalledTimes(1);
-    expect(screen.getByText(/microphone called/)).toHaveTextContent("CABLE Output");
-    expect(screen.getByLabelText("Virtual mic")).toHaveValue("41"); // moved from VoiceMeeter to the new cable
+    expect(screen.getByText(/as the microphone\./)).toHaveTextContent("CABLE Output");
+    expect(screen.getByLabelText(/^Virtual microphone/)).toHaveValue("41"); // moved from VoiceMeeter to the new cable
   });
 
   it("says so when the cable is not there yet", async () => {
@@ -447,15 +447,15 @@ describe("dedicated microphone setup", () => {
     await ready();
     fireEvent.click(screen.getByRole("button", { name: "I have installed it" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("No virtual cable was found yet");
-    expect(screen.getByLabelText("Virtual mic")).toHaveValue("3");
+    expect(screen.getByLabelText(/^Virtual microphone/)).toHaveValue("3");
   });
 
   it("shows which microphone other apps should choose when a cable is already there", async () => {
     vi.mocked(api.devices).mockResolvedValue({ ...DEVICES, devices: [...DEVICES.devices, CABLE], virtual_mic: 41 });
     render(<LivePanel stats={IDLE} />);
     await ready();
-    expect(screen.getByLabelText("Virtual mic")).toHaveValue("41");
-    expect(screen.getByText(/microphone called/)).toHaveTextContent("CABLE Output");
+    expect(screen.getByLabelText(/^Virtual microphone/)).toHaveValue("41");
+    expect(screen.getByText(/as the microphone\./)).toHaveTextContent("CABLE Output");
     expect(screen.queryByText("Set up a dedicated Voxweave microphone")).not.toBeInTheDocument();
   });
 });
@@ -501,5 +501,22 @@ describe("my voice calibration", () => {
     await ready();
     expect(await screen.findByText(/no recordings in the library to measure/)).toBeInTheDocument();
     expect(screen.getByText("Pitch shift (0 semitones)")).toBeInTheDocument();
+  });
+});
+
+describe("naming the virtual microphone", () => {
+  it("says which microphone other apps should choose, and what VoiceMeeter needs", async () => {
+    render(<LivePanel stats={IDLE} />);
+    await ready();
+    const hint = screen.getByText(/In other apps \(Discord/);
+    expect(hint).toHaveTextContent("choose VoiceMeeter Output as the microphone");
+    expect(hint).toHaveTextContent("B1");
+  });
+
+  it("warns when the chosen device is an ordinary playback device", async () => {
+    render(<LivePanel stats={IDLE} />);
+    await ready();
+    await userEvent.selectOptions(screen.getByLabelText(/^Virtual microphone/), "Headset");
+    expect(screen.getByText(/not a virtual microphone/)).toBeInTheDocument();
   });
 });

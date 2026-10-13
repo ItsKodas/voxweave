@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api, Device, DeviceList, Params, Stats, Voice } from "./api";
 import { CalibrationPanel } from "./CalibrationPanel";
 import { calibrationApi, VoiceProfile } from "./calibrationApi";
+import { heardAs, micOptionLabel } from "./virtualMic";
 
 const PRESET_LABELS: Record<string, string> = {
   low_latency: "Low latency",
@@ -253,6 +254,7 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
     // The webview does not open outside links itself, so the address is put on the clipboard instead.
     navigator.clipboard?.writeText(CABLE_PAGE).then(() => setCopied(true), () => undefined);
   };
+  const micHeard = mic === null ? null : heardAs(outputs.find((d) => d.index === mic)?.name ?? "");
   const hasDestination = mic !== null || (monitorOn && monitor !== null);
   const canStart = !busy && !speechActive && input !== null && hasDestination && voice !== "";
   const shownError = error ?? actionError ?? stats.error;
@@ -271,14 +273,14 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
         </select>
       </label>
       <label>
-        Virtual mic
+        Virtual microphone (what other apps hear)
         <select
           value={mic ?? ""}
           onChange={(e) => setMic(e.target.value === "" ? null : Number(e.target.value))}
           disabled={stats.running}
         >
           <option value="">None (listen only)</option>
-          {outputs.map((d) => <option key={d.index} value={d.index}>{d.name}</option>)}
+          {outputs.map((d) => <option key={d.index} value={d.index}>{micOptionLabel(d.name)}</option>)}
         </select>
       </label>
       {loaded && virtualMic === null && (
@@ -287,13 +289,18 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
           running. You can still listen to the converted voice yourself.
         </p>
       )}
-      {loaded && (hasCable ? (
+      {loaded && micHeard && (
         <p className="hint">
-          Other apps hear this app on the microphone called <strong>CABLE Output</strong>: choose it as the microphone
-          in Discord or wherever you talk. You can rename it (for example to "Voxweave Mic") in Windows Sound settings,
-          under Recording.
+          In other apps (Discord, a game, a recorder), choose <strong>{micHeard.microphone}</strong> as the microphone.{" "}
+          {micHeard.note} Windows lists the end this app plays into under playback devices, which is why that end is
+          called "Input". You can rename the microphone (for example to "Voxweave Mic") in Windows Sound settings, under
+          Recording.
         </p>
-      ) : (
+      )}
+      {loaded && mic !== null && !micHeard && (
+        <p className="hint">This is an ordinary playback device, not a virtual microphone: other apps cannot choose it as a microphone.</p>
+      )}
+      {loaded && (hasCable ? null : (
         <details className="setup-mic">
           <summary>Set up a dedicated Voxweave microphone</summary>
           <p>

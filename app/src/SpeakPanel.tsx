@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { heardAs, micOptionLabel } from "./virtualMic";
 import { api, Device, DeviceList } from "./api";
 import { isBusy, MAX_TEXT, TtsEnvironment, TtsPreset, ttsApi, TtsVoice } from "./ttsApi";
 import { TtsView } from "./useTtsStatus";
@@ -163,6 +164,7 @@ export function SpeakPanel({ tts, active, liveRunning, devicesVersion = 0, prefe
   const tooLong = chars > MAX_TEXT;
   const hasVirtualMic = mic !== null;
   const micOn = hasVirtualMic && toMic;
+  const micHeard = micOn ? heardAs(mics.find((d) => d.index === mic)?.name ?? "") : null;
   const hasDestination = micOn || monitor !== null;
   const unchecked = env?.unknown === true; // the backend may not probe the GPU right now: not a broken setup
   const envBroken = env !== null && !env.ready && !unchecked;
@@ -320,16 +322,21 @@ export function SpeakPanel({ tts, active, liveRunning, devicesVersion = 0, prefe
           {hasVirtualMic && (
             <label className="row">
               <input type="checkbox" checked={toMic} disabled={busy} onChange={(e) => setToMic(e.target.checked)} />
-              Send to virtual mic
+              Send to a virtual microphone (other apps hear it)
             </label>
           )}
           {micOn && mics.length > 1 && (
             <label>
-              Virtual mic
+              Virtual microphone
               <select value={mic ?? ""} onChange={(e) => setMic(Number(e.target.value))} disabled={busy}>
-                {mics.map((d) => <option key={d.index} value={d.index}>{d.name}</option>)}
+                {mics.map((d) => <option key={d.index} value={d.index}>{micOptionLabel(d.name)}</option>)}
               </select>
             </label>
+          )}
+          {micOn && micHeard && (
+            <p className="hint">
+              In other apps, choose <strong>{micHeard.microphone}</strong> as the microphone. {micHeard.note}
+            </p>
           )}
           {!hasDestination && <p className="hint">Choose a listen device or the virtual mic to speak.</p>}
           <label className="row">
