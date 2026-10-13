@@ -1,0 +1,19 @@
+{
+  "mainBinaryName": "Voxweave",
+  "bundle": {
+    "targets": ["nsis"],
+    "publisher": "Voxweave",
+    "shortDescription": "Voxweave: live AI voice conversion",
+    "resources": {
+      "../../installer/staged/backend/": "backend/",
+      "../../installer/staged/setup/": "setup/",
+      "../../installer/staged/bin/uv.exe": "bin/uv.exe",
+      "../../installer/staged/THIRD-PARTY-NOTICES.txt": "THIRD-PARTY-NOTICES.txt"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}

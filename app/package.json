@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "installer": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/build-installer.ps1",
     "test": "vitest run"
   },
   "dependencies": {
