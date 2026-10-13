@@ -235,3 +235,118 @@ def test_setup_pins_f5_and_the_rocm_torch_and_prints_the_licence_notice():
     assert script.count("sha256=") >= 7
     assert "--no-python-downloads" in script
     assert "CC-BY-NC-4.0" in script and "non-commercial" in script
+
+
+# ---- a probe that runs out of time: its whole process tree is ended (final fix wave, B7) ----
+# The Python of a virtual environment is a launcher; the interpreter that does the work is its child.
+
+class FakeProbeProcess:
+    def __init__(self, log, hangs):
+        self.pid, self.returncode = 4242, None
+        self._log, self._hangs = log, hangs
+
+    def communicate(self, timeout=None):
+        self._log.append(("communicate", timeout))
+        if self._hangs and self.returncode is None:
+            raise subprocess.TimeoutExpired("python", timeout)
+        self.returncode = 0 if self.returncode is None else self.returncode
+        return "2.9.1+rocm7.2.1 True\n", ""
+
+    def kill(self):
+        self._log.append(("kill", self.pid))
+        self.returncode = 1
+
+
+def bounded(verify, monkeypatch, hangs, taskkill_error=None):
+    log = []
+
+    def popen(args, **options):
+        log.append(("popen", list(args), options))
+        return FakeProbeProcess(log, hangs)
+
+    def run(args, **options):
+        log.append(("run", args, options))
+        if taskkill_error is not None:
+            raise taskkill_error
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(verify, "_WINDOWS", True)
+    return log, lambda args, **options: verify.run_bounded(args, popen=popen, run=run, **options)
+
+
+def test_a_probe_that_finishes_is_returned_like_subprocess_run_and_nothing_is_killed(verify, monkeypatch):
+    log, run = bounded(verify, monkeypatch, hangs=False)
+    done = run(["python.exe", "-c", "pass"], capture_output=True, text=True, timeout=180, env={"A": "1"}, cwd="tts")
+    assert (done.returncode, done.stdout, done.stderr) == (0, "2.9.1+rocm7.2.1 True\n", "")
+    (_, argv, options), communicate = log
+    assert argv == ["python.exe", "-c", "pass"] and communicate == ("communicate", 180)
+    assert options["stdin"] == subprocess.DEVNULL and options["stdout"] == options["stderr"] == subprocess.PIPE
+    assert options["env"] == {"A": "1"} and options["cwd"] == "tts" and options["text"] is True
+    assert "shell" not in options
+
+
+def test_a_probe_that_runs_out_of_time_has_its_process_tree_ended(verify, monkeypatch):
+    log, run = bounded(verify, monkeypatch, hangs=True)
+    with pytest.raises(subprocess.TimeoutExpired):
+        run(["python.exe", "-c", "import torch"], capture_output=True, text=True, timeout=180)
+    kinds = [entry[0] for entry in log]
+    assert kinds == ["popen", "communicate", "run", "kill", "communicate"]  # the tree, then the launcher itself
+    _, argv, options = log[2]
+    assert argv == ["taskkill", "/PID", "4242", "/T", "/F"] and isinstance(argv, list)
+    assert options["timeout"] and options["stdin"] == subprocess.DEVNULL and "shell" not in options
+    assert log[4] == ("communicate", verify.PIPE_WAIT)  # its output is let go of, with a limit of its own
+
+
+def test_a_probe_is_still_ended_when_taskkill_cannot_be_run(verify, monkeypatch):
+    log, run = bounded(verify, monkeypatch, hangs=True, taskkill_error=FileNotFoundError("taskkill"))
+    with pytest.raises(subprocess.TimeoutExpired):
+        run(["python.exe", "-c", "import torch"], timeout=180)
+    assert ("kill", 4242) in log
+
+
+def test_a_probe_that_times_out_is_a_failed_check_not_a_crash(verify, root, monkeypatch):
+    log, run = bounded(verify, monkeypatch, hangs=True)
+    result = verify.run_checks(root, run=run)
+    checks = by_id(result)
+    assert result["ok"] is False and not checks["torch_gpu"]["ok"] and "timed out" in checks["torch_gpu"]["message"]
+    assert [entry[1] for entry in log if entry[0] == "run"] == [["taskkill", "/PID", "4242", "/T", "/F"]] * 2
+
+
+def test_the_checks_use_the_tree_ending_runner_unless_another_is_injected(verify):
+    import inspect
+
+    assert inspect.signature(verify.run_checks).parameters["run"].default is verify.run_bounded
+    assert "run=run_bounded" in VERIFY.read_text(encoding="utf-8")  # and main() says so too
+
+
+# ---- setup.sh: paths handed to uv, and downloads (final fix wave, D1) ----
+
+def test_setup_hands_uv_its_requirement_and_constraint_files_as_relative_paths():
+    """The project path contains a space, and uv splits an absolute -c path at it (the constraint file would
+    silently not apply, and a package could then replace the GPU build of torch). The script therefore works
+    from tts/ and names both kinds of file relative to it."""
+    script = (REPO / "tts" / "setup.sh").read_text(encoding="utf-8")
+    lines = [line.strip() for line in script.splitlines() if not line.strip().startswith("#")]
+    assert 'cd "$T"' in lines  # the directory the relative paths are relative to
+    assert 'CONSTRAINTS=".cache/constraints.txt"' in "\n".join(lines)
+    installs = [line for line in lines if line.startswith("uv pip install") and (" -r " in line or " -c " in line)]
+    assert len(installs) == 3, installs
+    for line in installs:
+        arguments = line.split()
+        for flag in ("-r", "-c"):
+            for at in [i for i, a in enumerate(arguments) if a == flag]:
+                value = arguments[at + 1].strip('"')
+                assert value in ("requirements.lock", "requirements.txt", "$CONSTRAINTS"), line
+    assert sum(" -r requirements.lock" in line for line in installs) == 1
+    assert sum(" -r requirements.txt" in line for line in installs) == 1
+    assert all(' -c "$CONSTRAINTS"' in line for line in installs)
+    assert '-r "$T/' not in script and '-c "$T/' not in script
+
+
+def test_setup_retries_a_download_and_still_checks_what_arrived():
+    script = (REPO / "tts" / "setup.sh").read_text(encoding="utf-8")
+    downloads = [line.strip() for line in script.splitlines() if line.strip().startswith("curl ")]
+    assert len(downloads) == 1
+    assert "--retry 3" in downloads[0] and "--fail" in downloads[0] and '-o "$dest.part"' in downloads[0]
+    after = script[script.index(downloads[0]):]
+    assert after.index("sha256sum") < after.index('mv -f "$dest.part" "$dest"')  # verified before it gets its name

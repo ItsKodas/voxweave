@@ -74,14 +74,16 @@ fi
 
 # ---- 3. Python packages and F5-TTS, always under a constraint that pins the three ROCm torch packages ----
 # Without it a package asking for "torch" could replace the GPU build with a CPU one from PyPI.
-CONSTRAINTS=".cache/constraints.txt"   # relative to tts/ (the cwd): uv splits an absolute -c path at the space
+# Both the constraint file and the requirement files are named relative to tts/ (the cwd, see the cd above): uv
+# splits an absolute -c path at the space in the project path, and the same care is taken with -r.
+CONSTRAINTS=".cache/constraints.txt"
 printf 'torch==2.9.1+rocm7.2.1\ntorchaudio==2.9.1+rocm7.2.1\ntorchvision==0.24.1+rocm7.2.1\n' > "$CONSTRAINTS"
-if [ -f "$T/requirements.lock" ]; then
+if [ -f requirements.lock ]; then
   say "packages: tts/requirements.lock (exact versions)"
-  uv pip install --python "$PY" -c "$CONSTRAINTS" -r "$T/requirements.lock"
+  uv pip install --python "$PY" -c "$CONSTRAINTS" -r requirements.lock
 else
   say "packages: NOTICE: tts/requirements.lock is missing, so the newest versions allowed by tts/requirements.txt are installed instead; they may differ from the versions that were tested"
-  uv pip install --python "$PY" -c "$CONSTRAINTS" -r "$T/requirements.txt"
+  uv pip install --python "$PY" -c "$CONSTRAINTS" -r requirements.txt
 fi
 # F5-TTS without its declared dependencies (the lock holds the inference-only subset that is needed).
 say "f5-tts: 1.1.22 (--no-deps)"
@@ -105,7 +107,7 @@ while IFS=$'\t' read -r url rel bytes sha; do
   fi
   say "model: downloading $rel ($bytes bytes)"
   rm -f "$dest.part"
-  curl -sSL --fail -o "$dest.part" "$url" || { rm -f "$dest.part"; die "download of $url failed."; }
+  curl -sSL --fail --retry 3 --retry-delay 2 -o "$dest.part" "$url" || { rm -f "$dest.part"; die "download of $url failed."; }
   got="$(sha256sum "$dest.part" | cut -d' ' -f1)"
   if [ "$got" != "$sha" ] || [ "$(stat -c %s "$dest.part")" != "$bytes" ]; then
     rm -f "$dest.part"

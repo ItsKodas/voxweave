@@ -18,6 +18,42 @@ TORCH_PROBE = "import torch; print(torch.__version__, torch.cuda.is_available())
 # Asks the installed metadata instead of importing f5_tts, which only works after the worker's shims.
 F5_PROBE = 'import importlib.metadata as m; print(m.version("f5-tts"))'
 DEFAULT_ROOT = Path(__file__).resolve().parents[1]
+PROBE_TIMEOUT = 180  # seconds one probe in the TTS Python may take
+TASKKILL_TIMEOUT = 10
+PIPE_WAIT = 5  # seconds the output of a probe that was ended is waited for
+_WINDOWS = os.name == "nt"
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def run_bounded(args, capture_output=True, text=True, timeout=None, env=None, cwd=None, popen=subprocess.Popen,
+                run=subprocess.run):
+    """subprocess.run for a probe, with a time limit that ends the probe's whole process tree.
+
+    tts/.venv's python.exe is a launcher and the real interpreter is its child: subprocess.run would kill the
+    launcher only, and then wait for the child's output for as long as the child lives. Here the tree is ended
+    first (taskkill /T /F), then the process itself, and its output is waited for a few seconds at most.
+    Output is always captured as text. Raises subprocess.TimeoutExpired like subprocess.run."""
+    proc = popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                 env=env, cwd=cwd, creationflags=_NO_WINDOW)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except BaseException:
+        if _WINDOWS:
+            try:
+                run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], stdin=subprocess.DEVNULL, capture_output=True,
+                    timeout=TASKKILL_TIMEOUT, creationflags=_NO_WINDOW)
+            except (OSError, subprocess.SubprocessError):
+                pass  # the process itself is still ended below
+        try:
+            proc.kill()
+        except OSError:
+            pass  # already gone
+        try:
+            proc.communicate(timeout=PIPE_WAIT)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+        raise
+    return subprocess.CompletedProcess(args, proc.returncode, out, err)
 
 
 def _python_in(venv: Path) -> Path:
@@ -43,8 +79,8 @@ def _probe(tts: Path, run, code: str):
     """Runs `code` in the TTS Python; returns (completed, error message)."""
     env = dict(os.environ, ROCM_SDK_TARGET_FAMILY="custom", PYTHONSAFEPATH="1")
     try:
-        done = run([str(_python_in(tts / ".venv")), "-c", code], capture_output=True, text=True, timeout=180,
-                   env=env, cwd=str(tts))
+        done = run([str(_python_in(tts / ".venv")), "-c", code], capture_output=True, text=True,
+                   timeout=PROBE_TIMEOUT, env=env, cwd=str(tts))
     except (OSError, subprocess.SubprocessError) as exc:
         return None, f"could not run the TTS Python: {exc}"
     return done, None
@@ -103,7 +139,7 @@ def _check_models(tts: Path):
     return True, f"{len(entries)} model files present"
 
 
-def run_checks(root: Path, run=subprocess.run, fast: bool = False) -> dict:
+def run_checks(root: Path, run=run_bounded, fast: bool = False) -> dict:
     tts = Path(root) / "tts"
     plan = [("venv", lambda: _check_venv(tts))]
     if not fast:
@@ -127,7 +163,7 @@ def main(argv=None) -> int:
     parser.add_argument("--fast", action="store_true", help="skip the torch_gpu check")
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="repository root")
     args = parser.parse_args(argv)
-    result = run_checks(args.root, run=subprocess.run, fast=args.fast)
+    result = run_checks(args.root, run=run_bounded, fast=args.fast)
     print(json.dumps(result))
     return 0 if result["ok"] else 1
 
