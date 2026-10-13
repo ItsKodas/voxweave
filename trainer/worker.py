@@ -85,6 +85,10 @@ STAGE_TITLES = {
 }
 
 
+# Segments without pitch or features that a run tolerates: up to this share of all segments.
+MAX_UNUSABLE_SHARE = 0.02
+
+
 class JobError(Exception):
     """A failure with a message meant for the user. `resumable` says whether running again with --resume could
     get further than this run did (False when only a new training run can help)."""
@@ -567,7 +571,13 @@ class Job:
             raise JobError(str(exc)) from None
         segments = self._segments()
         if listed != segments:  # the filelist leaves out a segment that lacks pitch or features, without a word
-            raise JobError("%d of %d segments have no pitch or feature data." % (segments - listed, segments))
+            missing = segments - listed
+            # A few such segments are normal in real recordings: a stretch of breath, laughter or noise has no
+            # pitch to find, and the trainer is right to skip it. More than that means something went wrong.
+            if missing > segments * MAX_UNUSABLE_SHARE:
+                raise JobError("%d of %d segments have no pitch or feature data." % (missing, segments))
+            self._log("worker", "%d of %d segments have no pitch or feature data (silence, breath or noise) and "
+                                "are left out of training." % (missing, segments))
         saved_state = [p for name in CHECKPOINTS for p in (self.exp / name, self.exp / (name + ".bak")) if p.exists()]
         expect_resume = self.args.resume and (self._is_done("checkpoint") or bool(saved_state))
         self._emit(0.0, "Loading the saved training state" if expect_resume else "Starting training")

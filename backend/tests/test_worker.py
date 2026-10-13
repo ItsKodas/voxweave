@@ -502,6 +502,41 @@ def test_segments_missing_their_features_fail_instead_of_being_dropped_silently(
     assert "train" not in rig.runner.ran()
 
 
+def test_a_few_segments_without_pitch_among_many_are_left_out_and_training_goes_on(rig):
+    # Found by the first real import: 1 of 937 segments (a breath) had no pitch and stopped the whole run.
+    for n in range(4, 61):
+        rig.add_clip(n)
+    rig.recordings = rig.clips_snapshot()
+
+    def pitch(c):
+        FakeRunner.pitch(rig.runner, c)
+        for folder in ("2a_f0", "2b-f0nsf"):
+            (rig.exp / folder / "7_0.wav.npy").unlink()
+        return 0
+
+    rig.runner.stages["pitch"] = pitch
+    assert rig.run() == 0
+    assert "train" in rig.runner.ran()
+    assert "1 of 60 segments have no pitch or feature data" in rig.log()
+
+
+def test_more_than_a_few_segments_without_pitch_still_stop_the_run(rig):
+    for n in range(4, 61):
+        rig.add_clip(n)
+    rig.recordings = rig.clips_snapshot()
+
+    def pitch(c):
+        FakeRunner.pitch(rig.runner, c)
+        for n in (3, 7):
+            for folder in ("2a_f0", "2b-f0nsf"):
+                (rig.exp / folder / f"{n}_0.wav.npy").unlink()
+        return 0
+
+    rig.runner.stages["pitch"] = pitch
+    assert rig.run() == 1
+    assert "2 of 60 segments" in rig.final()["error"] and "train" not in rig.runner.ran()
+
+
 def test_training_that_exits_zero_without_the_model_fails(rig):
     def train(c):
         c.line(f"INFO:{EXP}:Saving final checkpoint: Traceback (most recent call last): FileNotFoundError")
