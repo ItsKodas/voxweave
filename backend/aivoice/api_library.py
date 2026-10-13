@@ -2,6 +2,7 @@ import logging
 import threading
 from contextlib import AbstractContextManager
 from dataclasses import asdict
+from pathlib import Path
 from typing import Callable
 from urllib.parse import urlsplit
 
@@ -9,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from aivoice import tts_reference, voicepack
 from aivoice.api import log_refused
 from aivoice.importer import Importer
 from aivoice.library import Library, Voice
@@ -34,6 +36,26 @@ class RecordBody(BaseModel):
 
 class ImportBody(BaseModel):
     paths: list[str]
+
+
+class ExportBody(BaseModel):
+    include_reference: bool = True
+
+
+class PackBody(BaseModel):
+    path: str
+
+
+def downloads_folder() -> Path:
+    """Where exported voice packs go: the Downloads folder, where people look for a file they just made."""
+    return Path.home() / "Downloads"
+
+
+def _has_reference(pack: Path) -> bool:
+    import zipfile
+
+    with zipfile.ZipFile(pack) as z:
+        return voicepack.REFERENCE in z.namelist()
 
 
 def _summary(voice: Voice) -> dict:
@@ -73,7 +95,8 @@ def same_app_only_for(allowed_origins: list[str]) -> Callable[[Request], None]:
 def library_router(studio: Studio, library: Library, importer: Importer, live_running: Callable[[], bool],
                    exclusive: AbstractContextManager, allowed_origins: list[str], training=None,
                    voices_lock: AbstractContextManager | None = None, tts=None,
-                   calibrating: Callable[[], bool] = lambda: False) -> APIRouter:
+                   calibrating: Callable[[], bool] = lambda: False, data: Path | None = None,
+                   export_dir: Callable[[], Path] | None = None) -> APIRouter:
     """`exclusive` is the audio lock, shared with the live-start and device-refresh routes: checking
     "is live running?" and then starting a recording must not interleave with the reverse."""
 
@@ -128,6 +151,26 @@ def library_router(studio: Studio, library: Library, importer: Importer, live_ru
     @router.get("/voices/{voice_id}/clips/{index}/audio")
     def clip_audio(voice_id: str, index: int) -> FileResponse:
         return FileResponse(library.clip_audio_path(voice_id, index), media_type="audio/wav")
+
+    @router.post("/voices/{voice_id}/export")
+    def export_pack(voice_id: str, body: ExportBody) -> dict:
+        """Writes the voice's trained model as one .voxweave file and says where it is."""
+        if data is None:
+            raise ValueError("Exporting is not available")
+        if training is not None and training.is_active():  # the model files may be replaced at any moment
+            raise ValueError("Training is running. Wait for it to finish or cancel it before exporting a voice")
+        pack = voicepack.export_voice(
+            data, library, voice_id, (export_dir or downloads_folder)(), body.include_reference,
+            choose_reference=lambda voice: tts_reference.choose(voice, tts_reference.library_levels(library, voice.id)))
+        return {"path": str(pack), "bytes": pack.stat().st_size, "has_reference": _has_reference(pack)}
+
+    @router.post("/packs/import")
+    def import_pack(body: PackBody) -> dict:
+        """Makes a new voice from a .voxweave file on this computer."""
+        if data is None:
+            raise ValueError("Importing is not available")
+        with voices_lock:
+            return _summary(voicepack.import_voice(data, library, Path(body.path)))
 
     @router.get("/voices/{voice_id}/prompt")
     def prompt(voice_id: str, after: int | None = None, kind: str | None = None) -> dict:

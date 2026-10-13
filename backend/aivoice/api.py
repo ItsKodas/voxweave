@@ -72,7 +72,7 @@ class SettingsBody(BaseModel):
 def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list[Device]],
                providers: list[str], default_devices: Callable[[], dict] | None = None,
                allowed_hosts: list[str] = ALLOWED_HOSTS, studio=None, library=None, importer=None,
-               training=None, tts=None, calibration=None) -> FastAPI:
+               training=None, tts=None, calibration=None, export_dir=None) -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI):
         yield
@@ -220,7 +220,8 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
 
         app.include_router(library_router(studio, library, importer, lambda: bool(manager.stats()["running"]),
                                           audio_state, ALLOWED_ORIGINS, training, voices_lock, tts,
-                                          calibrating=lambda: calibration is not None and calibration.active))
+                                          calibrating=lambda: calibration is not None and calibration.active,
+                                          data=data, export_dir=export_dir))
     if training is not None:
         from aivoice.api_training import training_router
 
