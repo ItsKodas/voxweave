@@ -67,7 +67,9 @@ STOP_WAIT = 15.0  # how long stop() waits for the request's thread to finish cle
 IDLE_UNLOAD = 600.0  # the worker is stopped after this long without a request
 TICK = 0.25  # how often a waiting request looks at the clock, the stop flag and the player
 TAIL_BYTES, TAIL_LINES, TAIL_CHARS = 4096, 6, 600
-LOG_NAME = "worker.log"
+KILL_PATIENCE = 30.0  # how long unload and shutdown wait for a kill another thread has in progress (at worst 23 s)
+SAVE_NAMES = 1000  # how many file names are tried for results saved in the same second
+LOG_NAME, PREVIOUS_LOG_NAME = "worker.log", "worker.prev.log"
 JOB_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")  # the worker's rule: the id becomes part of a file name
 
 ALREADY = "Already speaking. Stop it first."
@@ -171,6 +173,8 @@ class _Engine:
         self.tree: list = []  # its processes as last seen, so none is lost if the worker itself dies first
         self.tree_at: float | None = None
         self.killing = False  # a kill is in progress outside the lock
+        self.resting = threading.Event()  # no kill is in progress
+        self.resting.set()
         self.retry_at: float | None = None  # the last kill left something running; the next try is due then
         self.left: list[int] = []  # the pids that kill left running, for the message
         self._writing = threading.Lock()
@@ -272,6 +276,7 @@ class TtsManager:
         self._engine: _Engine | None = None  # the worker requests are sent to
         self._doomed: list[_Engine] = []  # workers to be killed, until their processes are known to be gone
         self._engine_failed = False  # the last worker died, hung or could not be started
+        self._launching = False  # the request's thread is starting a worker, outside the lock
         self._last_used = now()
         self._closed = False
         self._passed: dict | None = None  # the last full environment report, kept only if it passed
@@ -424,7 +429,10 @@ class TtsManager:
                 failures.append(exc)
             verified = not failures
             if not verified:
-                left = [p.pid for p in self._tools.survivors(procs, 0.0)]
+                try:
+                    left = [p.pid for p in self._tools.survivors(procs, 0.0)]
+                except Exception:  # noqa: BLE001 - only for the message; the retry does not depend on it
+                    left = []
         finally:  # also on KeyboardInterrupt or SystemExit: it must never be left marked as being killed
             with self._lock:
                 engine.killing = False
@@ -436,6 +444,7 @@ class TtsManager:
                     engine.retry_at = self._now() + KILL_RETRY
                     log.warning("Could not stop the voice engine (process %s), trying again in %g seconds: %s",
                                 engine.pid, KILL_RETRY, "; ".join(_reason(f) for f in failures) or "interrupted")
+            engine.resting.set()
         if verified:
             engine.close()
 
@@ -446,8 +455,17 @@ class TtsManager:
                    if not e.killing and (force or e.retry_at is None or now >= e.retry_at)]
             for engine in due:
                 engine.killing = True
+                engine.resting.clear()
         for engine in due:
             self._reap(engine)
+
+    def _wait_for_kills(self) -> None:
+        """Waits, for at most KILL_PATIENCE seconds in all, until no other thread is in the middle of a kill."""
+        deadline = time.monotonic() + KILL_PATIENCE
+        with self._lock:
+            in_progress = [e for e in self._doomed if e.killing]
+        for engine in in_progress:
+            engine.resting.wait(max(0.0, deadline - time.monotonic()))
 
     def _doom(self, engine: _Engine, failed: bool) -> None:
         """Lock held. From here on the worker takes no more requests and is only waiting to be killed."""
@@ -499,6 +517,8 @@ class TtsManager:
         result = dict(self._last) if self._job is None else self._job.describe()
         if self._engine is not None:
             engine = "ready" if self._engine.ready else "starting"
+        elif self._launching:
+            engine = "starting"
         else:
             engine = "failed" if self._doomed or self._engine_failed else "stopped"
         return {"engine": engine, **result}
@@ -625,15 +645,17 @@ class TtsManager:
 
     def unload(self) -> None:
         """Stops the request in progress, if any, and the worker, so that nothing of text to speech is on the
-        GPU (before training, and when the app closes). Raises if a process could not be stopped."""
+        GPU (before training, and when the app closes). Raises if a process could not be stopped. A kill that
+        another thread has in progress (the idle timeout, say) is waited for, not judged half-way."""
         self._stop_job()
         with self._lock:
             if self._engine is not None:
                 self._doom(self._engine, failed=False)
         self._reap_doomed(force=True)
+        self._wait_for_kills()
+        self._reap_doomed(force=True)  # what the other thread's kill left running is tried once more, now
         with self._lock:
             if self._doomed:
-                self._engine_failed = True
                 raise TtsError(f"The voice engine could not be stopped ({self._still_running()} is still running). "
                                "Close the app, or end it in Task Manager, before using the graphics card for "
                                "something else.")
@@ -817,12 +839,12 @@ class TtsManager:
             if id != job.id:
                 log.warning("Ignoring an event of the voice engine that is not part of this request: %.200r", event)
                 continue
-            began = self._now()  # each piece has its own time
             if kind == "audio":
                 if event.get("index") != received:
                     raise self._broken(engine, f"The voice engine delivered its sentences out of order (sentence "
                                                f"{event.get('index')} where {received} was due).")
-                self._play_piece(job, received, converter, event)
+                # The next piece's time starts when this one is queued: a slow RVC pass does not eat into it.
+                began = self._play_piece(job, received, converter, event)
                 received += 1
             elif kind == "done":
                 if received != len(pieces):
@@ -844,8 +866,14 @@ class TtsManager:
                 raise _Stopped()
             engine = self._engine
             if engine is None:
-                engine = self._start_engine()
-            job.engine = engine
+                if self._doomed:
+                    raise _Failed(f"The voice engine of an earlier request is still shutting down "
+                                  f"({self._still_running()}). Try again in a moment.")
+                self._launching = True  # this request holds the only slot, so nobody else can be launching
+            else:
+                job.engine = engine
+        if engine is None:
+            engine = self._start_engine(job)
         self._remember_tree(engine)
         waited = False
         while not engine.ready:
@@ -864,29 +892,56 @@ class TtsManager:
             self._remember_tree(engine)  # the launcher's child, the real interpreter, is there by now
         return engine
 
-    def _start_engine(self) -> _Engine:
-        """Lock held. The worker exists from the moment launch returns, and is this manager's from that line on."""
-        if self._doomed:
-            raise _Failed(f"The voice engine of an earlier request is still shutting down ({self._still_running()}). "
-                          "Try again in a moment.")
+    def _start_engine(self, job: _Job) -> _Engine:
+        """Starts a worker for this request, without the lock: creating the folders and the process can take a
+        while, and status() must not wait for it. The worker exists from the moment launch returns and is this
+        manager's from that line on: if the request was stopped, or the app began closing, in the meantime, the
+        worker is ended and checked like any other instead of being put to use."""
         log_path = self._root / LOG_NAME
         argv = [str(self._tts / ".venv" / "Scripts" / "python.exe"), "-u", str(self._tts / "tts_worker.py"),
                 "--model-dir", str(self._tts / "models"), "--parent-pid", str(os.getpid())]
+        handle = None
         try:
             self._root.mkdir(parents=True, exist_ok=True)
+            self._keep_previous_log(log_path)
             handle = self._launch(argv, log_path)
         except Exception as exc:  # noqa: BLE001
             log.exception("Could not start the text-to-speech worker")
-            self._engine_failed = True
             raise _Failed(f"Could not start the voice engine: {_reason(exc)}") from exc
-        engine = _Engine(handle, log_path, self._now())
-        self._engine, self._engine_failed = engine, False
+        finally:
+            with self._lock:
+                self._launching = False
+                if handle is None:
+                    self._engine_failed = True
+                else:
+                    engine = _Engine(handle, log_path, self._now())
+                    wanted = not (job.stop.is_set() or self._closed)
+                    if wanted:
+                        self._engine, self._engine_failed = engine, False
+                        job.engine = engine
+                    else:
+                        self._doom(engine, failed=False)
         try:
             threading.Thread(target=engine.read, name="tts-events", daemon=True).start()
         except Exception as exc:  # noqa: BLE001 - nobody would hear it: it does not get to run
-            self._doom(engine, failed=True)
+            with self._lock:
+                self._doom(engine, failed=True)
+            self._reap_doomed(force=True)
             raise _Failed(f"Could not start the voice engine: {_reason(exc)}") from exc
+        if not wanted:
+            self._remember_tree(engine)
+            self._reap_doomed(force=True)
+            raise _Stopped()
         return engine
+
+    @staticmethod
+    def _keep_previous_log(log_path: Path) -> None:
+        """The last worker's output stays readable as worker.prev.log after the new worker starts its own."""
+        try:
+            if log_path.is_file():
+                os.replace(log_path, log_path.with_name(PREVIOUS_LOG_NAME))
+        except OSError as exc:
+            log.warning("Could not keep the previous voice engine log: %s", _reason(exc))
 
     def _load_reference(self, job: _Job, engine: _Engine) -> float:
         """Has the worker load this request's reference clip unless it is the one loaded. Returns its length as
@@ -949,8 +1004,9 @@ class TtsManager:
             log.exception("Could not load the trained model of %s", job.voice_id)
             raise _Failed(f"Could not load this voice's trained model: {_reason(exc)}") from exc
 
-    def _play_piece(self, job: _Job, index: int, converter, event: dict) -> None:
-        """Reads, checks and finishes one piece and queues it for playback. Nothing unchecked is ever queued."""
+    def _play_piece(self, job: _Job, index: int, converter, event: dict) -> float:
+        """Reads, checks and finishes one piece and queues it for playback. Nothing unchecked is ever queued.
+        Returns the time at which it was queued."""
         number = index + 1
         # Only ever a file in the request's own folder, whatever path the event names.
         path = job.folder / Path(str(event.get("path") or "")).name
@@ -976,6 +1032,7 @@ class TtsManager:
                 raise _Failed(f"Voice conversion produced no sound for sentence {number}")
         audio = tts_audio.finish(audio, rate)
         self._watch(job)  # stopped meanwhile: nothing more is queued
+        queued = self._now()
         self._player.enqueue(audio, session=job.session)
         if job.save:
             job.finished.append(audio)
@@ -985,14 +1042,18 @@ class TtsManager:
             pass  # the folder goes when the request ends
         with self._lock:
             job.piece = number
+        return queued
 
     def _save(self, job: _Job) -> None:
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(self._now()))
         path = self._root / f"{stamp}-{job.voice_id}.wav"
-        for n in range(2, 1000):  # never over an earlier result
+        for n in range(2, SAVE_NAMES + 2):  # never over an earlier result
             if not os.path.lexists(path):
                 break
             path = self._root / f"{stamp}-{job.voice_id}-{n}.wav"
+        else:
+            raise _Failed("The speech was played but could not be saved: too many results were saved in the same "
+                          "second")
         try:
             save_wav(path, job.finished)
         except (OSError, ValueError) as exc:

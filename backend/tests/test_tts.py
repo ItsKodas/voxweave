@@ -116,6 +116,8 @@ class FakeWorker:
         self.seen.append(command)
         self.rig.log.append(command["cmd"])
         self.commands.put(command)
+        if command["cmd"] == "synthesize":
+            self.active = command
         if not self.rig.auto:
             return
         if command["cmd"] == "set_reference":
@@ -126,7 +128,8 @@ class FakeWorker:
                 self.audio(command, index)
             self.done(command)
         elif command["cmd"] == "cancel":
-            self.emit(event="cancelled", id=command["id"], index=0)
+            if self.active is not None and self.active["id"] == command["id"]:
+                self.cancelled(self.active)  # the real worker is silent for a job that is not running
 
 
 class _In:
@@ -226,10 +229,13 @@ class FakeConverter:
         self.silent = False
         self.entered = threading.Event()
         self.gate = None  # an Event a test sets to let a conversion return
+        self.on_convert = None
 
     def convert(self, piece):
         self.inputs.append(piece)
         self.entered.set()
+        if self.on_convert is not None:
+            self.on_convert()
         if self.gate is not None:
             assert self.gate.wait(WAIT)
         if self.error is not None:
@@ -256,6 +262,8 @@ class Rig:
         self.workers = []
         self.launched = queue.Queue()
         self.launch_error = None
+        self.launching = threading.Event()
+        self.launch_gate = None  # an Event a test sets to let a launch return
         self.report = PASS
         self.verify_calls = []
         self.clock = 1_760_000_000.0  # 2025-10-09T08:53:20Z
@@ -270,6 +278,9 @@ class Rig:
     def launch(self, argv, log_path):
         if self.launch_error is not None:
             raise self.launch_error
+        self.launching.set()
+        if self.launch_gate is not None:
+            assert self.launch_gate.wait(WAIT)
         self.launches.append((argv, log_path))
         worker = FakeWorker(self, 5000 + len(self.workers))
         self.workers.append(worker)
@@ -840,6 +851,22 @@ def test_two_saves_in_the_same_second_do_not_overwrite_each_other(rig):
     assert len(read_wav(first)[0]) > len(read_wav(second)[0])
 
 
+def test_a_save_that_finds_no_free_name_fails_instead_of_overwriting(rig, monkeypatch):
+    monkeypatch.setattr(tts, "SAVE_NAMES", 3)
+    voice = rig.voice()
+    root = rig.data / "tts"
+    root.mkdir(parents=True)
+    taken = [root / f"20251009T085320Z-{voice.id}{suffix}.wav" for suffix in ("", "-2", "-3")]
+    for path in taken:
+        path.write_bytes(b"an earlier result")
+    rig.speak(voice, save=True)
+    status = rig.finish()
+    assert status["error"] == ("The speech was played but could not be saved: too many results were saved in the "
+                               "same second")
+    assert status["saved_path"] is None and all(p.read_bytes() == b"an earlier result" for p in taken)
+    assert sorted(root.glob("*.wav")) == sorted(taken)
+
+
 def test_a_save_that_fails_is_reported_and_leaves_no_file(rig, monkeypatch):
     def full(path, pieces, pause_ms=300):
         raise OSError(28, "No space left on device")
@@ -1072,6 +1099,87 @@ def test_each_piece_gets_its_own_minute(rig):
     assert rig.finish()["error"] is None and worker.kills == 0
 
 
+def test_a_slow_rvc_pass_does_not_eat_the_next_pieces_minute(rig):
+    rig.auto = False
+    rig.converter.on_convert = lambda: setattr(rig, "clock", rig.clock + tts.PIECE_TIMEOUT - 1)
+    rig.speak(rig.voice(model=True), preset="best")
+    worker = rig.worker()
+    worker.expect("set_reference")
+    worker.emit(event="reference", seconds=8.0)
+    job = worker.expect("synthesize")
+    worker.audio(job, 0)
+    rig.player.pieces.get(timeout=WAIT)  # converted (59 s on the clock) and queued
+    rig.clock += tts.PIECE_TIMEOUT - 1  # the worker's minute for the next piece starts now
+    assert not rig.manager.join(0.05) and worker.kills == 0
+    rig.converter.on_convert = None
+    worker.audio(job, 1)
+    worker.audio(job, 2)
+    worker.done(job)
+    assert rig.finish()["error"] is None
+
+
+def test_the_previous_workers_log_is_kept_when_a_new_worker_starts(rig):
+    voice = rig.voice()
+    rig.speak(voice)
+    rig.finish()
+    log_path = rig.launches[0][1]
+    log_path.write_text("the first worker's last words")
+    rig.workers[0].die()
+    rig.speak(voice)
+    rig.finish()
+    assert (log_path.parent / "worker.prev.log").read_text() == "the first worker's last words"
+    log_path.write_text("the second worker's last words")
+    rig.manager.unload()
+    rig.speak(voice)
+    rig.finish()
+    assert (log_path.parent / "worker.prev.log").read_text() == "the second worker's last words"
+    assert sorted(p.name for p in log_path.parent.glob("worker*")) == ["worker.prev.log"]  # the fake writes none
+
+
+def test_status_is_not_held_up_while_the_worker_is_being_launched(rig):
+    rig.launch_gate = threading.Event()
+    rig.speak()
+    assert rig.launching.wait(WAIT)
+    seen = []
+    poll = threading.Thread(target=lambda: seen.append(rig.manager.status()))
+    poll.start()
+    poll.join(WAIT)
+    assert not poll.is_alive(), "status() waited for the launch"
+    assert seen[0]["engine"] == "starting" and seen[0]["state"] == "preparing"
+    assert rig.manager.is_active()
+    rig.launch_gate.set()
+    assert rig.finish()["error"] is None and rig.manager.status()["engine"] == "ready"
+
+
+@pytest.mark.parametrize("ending", ["stop", "unload", "shutdown"])
+def test_a_worker_whose_launch_outlives_its_request_is_not_left_running(rig, ending):
+    rig.children(FakeProc(7009))
+    rig.launch_gate = threading.Event()
+    rig.speak()
+    assert rig.launching.wait(WAIT)
+    ender = threading.Thread(target=getattr(rig.manager, ending))
+    ender.start()
+    ender.join(0.05)
+    rig.launch_gate.set()  # the process exists only now, after the request was stopped
+    ender.join(WAIT)
+    assert not ender.is_alive()
+    worker, = rig.workers
+    assert worker.kills == 1 and worker.code is not None and worker.seen == []
+    assert ("kill", 7009) in rig.tools.calls  # its tree was listed before the kill and swept after it
+    status = rig.manager.status()
+    assert status["engine"] == "stopped" and status["state"] == "idle" and status["error"] is None
+
+
+def test_a_launch_that_fails_leaves_the_engine_failed_and_not_starting(rig):
+    rig.launch_error = OSError(5, "Access is denied")
+    rig.speak()
+    status = rig.finish()
+    assert status["engine"] == "failed" and status["error"] == "Could not start the voice engine: Access is denied"
+    rig.launch_error = None
+    rig.speak(rig.library.list()[0])
+    assert rig.finish()["error"] is None and rig.manager.status()["engine"] == "ready"
+
+
 def test_a_worker_that_does_not_start_within_two_minutes_is_treated_as_dead(rig):
     rig.auto = rig.ready = False
     rig.speak()
@@ -1294,6 +1402,87 @@ def test_shutdown_stops_the_request_and_the_worker_and_refuses_new_requests(rig)
         rig.speak(rig.library.list()[0])
     rig.manager.shutdown()
     assert len(rig.launches) == 1
+
+
+def kill_in_progress(rig):
+    """An idle-timeout kill started by a status poll on another thread, held half-way."""
+    rig.speak()
+    rig.finish()
+    worker, = rig.workers
+    entered, release = threading.Event(), threading.Event()
+
+    def held():
+        entered.set()
+        assert release.wait(WAIT)
+
+    worker.on_kill = held
+    rig.clock += tts.IDLE_UNLOAD
+    poll = threading.Thread(target=rig.manager.status)
+    poll.start()
+    assert entered.wait(WAIT)
+    return worker, release, poll
+
+
+def test_unload_waits_for_a_kill_another_thread_has_in_progress(rig):
+    worker, release, poll = kill_in_progress(rig)
+    outcome = []
+
+    def unload():
+        try:
+            rig.manager.unload()
+            outcome.append("unloaded")
+        except Exception as exc:  # noqa: BLE001
+            outcome.append(exc)
+
+    unloading = threading.Thread(target=unload)
+    unloading.start()
+    unloading.join(0.05)
+    assert outcome == []  # neither a false "could not be stopped" nor a return before the worker is gone
+    release.set()
+    unloading.join(WAIT)
+    poll.join(WAIT)
+    assert outcome == ["unloaded"] and worker.kills == 1 and worker.code is not None
+    assert rig.manager.status()["engine"] == "stopped"
+
+
+def test_shutdown_waits_for_a_kill_another_thread_has_in_progress(rig):
+    worker, release, poll = kill_in_progress(rig)
+    closing = threading.Thread(target=rig.manager.shutdown)
+    closing.start()
+    closing.join(0.05)
+    assert closing.is_alive() and worker.code is None  # the worker is still there: shutdown has not returned
+    release.set()
+    closing.join(WAIT)
+    poll.join(WAIT)
+    assert not closing.is_alive() and worker.code is not None
+    assert rig.manager.status()["engine"] == "stopped"
+
+
+def test_a_kill_in_progress_that_never_ends_does_not_hold_unload_forever(rig, monkeypatch):
+    monkeypatch.setattr(tts, "KILL_PATIENCE", 0.01)
+    worker, release, poll = kill_in_progress(rig)
+    with pytest.raises(TtsError, match="could not be stopped"):
+        rig.manager.unload()
+    release.set()
+    poll.join(WAIT)
+    assert rig.manager.status()["engine"] == "stopped"  # it did end; nothing is left marked as failed
+
+
+def test_unload_reports_process_tools_that_fail_as_a_readable_error(rig):
+    rig.children(FakeProc(7008))
+    rig.speak()
+    rig.finish()
+
+    def broken(procs, timeout):
+        raise OSError(5, "Access is denied")
+
+    rig.tools.survivors = broken
+    with pytest.raises(TtsError, match=r"^The voice engine could not be stopped \(process 5000 is still running\)"):
+        rig.manager.unload()
+    assert rig.manager.status()["engine"] == "failed"
+    del rig.tools.survivors
+    rig.manager.unload()
+    assert rig.manager.status()["engine"] == "stopped"
 
 
 def test_shutdown_never_raises(rig):
