@@ -227,3 +227,61 @@ Copied from the build ledger when the stage was merged. Each line ends with what
 - A training panel that checked the environment while live mode was running keeps saying it can be checked once live mode stops, until Check again is pressed or another voice is selected.
 - The training start route still runs the fast environment check, and one servicing call, while holding the audio and voices locks.
 - Nothing in stage 3 has been exercised by a human, and only synthetic speech-like audio has been trained. See the stage 3 first-run checklist in the README.
+
+## Stage 4 (text to speech)
+
+Written 2026-10-13 at the end of the build, before the final whole-branch review. Sources: the build ledger (`.superpowers/sdd/2026-10-13-stage-4-text-to-speech/progress.md`) and the two real runs (`docs/superpowers/notes/2026-10-13-stage-4-first-real-run.md`).
+
+### Decisions made during the build
+
+Each line ends with what it costs if wrong.
+
+- One speech model, F5-TTS, serves all three presets, and "Best" is F5-TTS followed by the voice's own trained RVC model. GPT-SoVITS, which the design named for Best, was not built and nothing fine-tunes a text-to-speech model on a voice. Why: the spike found several blockers for GPT-SoVITS on this GPU's PyTorch build and weeks of uncertain work, while F5-TTS plus RVC needed no new training code. If wrong: Best is less faithful to the voice than a fine-tuned model would be; one can be added later without disturbing this design.
+- Balanced uses 16 sampling steps, not 32. Why: measured as accurate as 32 and twice as fast. If wrong: one constant.
+- Text to speech cannot run alongside live mode, recording or training: one activity at a time. Why: sharing the GPU would make live audio stutter, and one rule for everything is simple. If wrong: a user cannot have typed text spoken while live mode is on without stopping it first.
+- The F5-TTS weights' CC-BY-NC-4.0 licence (non-commercial) is accepted for this personal app and stated in the README and in the setup script's output. If wrong: the owner must not use the output commercially, or must swap the model.
+- The first five tasks were built in parallel by separate implementers on separate files. Why: time. If wrong: a git lock collision, retried.
+- The plan gave interfaces, behaviour and tests rather than complete code, as in stage 3. If wrong: more review rounds.
+- The process-ending and environment-check logic that `tts.py` shares with `training.py` (about 110 lines; `tts.py` imports training's private helpers) is to be moved into a shared module in the final fix wave, not earlier. Why: it touches stage 3's safety-critical code and other work was editing nearby files. If wrong: the duplication lives a few commits longer.
+- A speak request refused because something else is active answers with HTTP 409, while the matching refusals on the other routes answer 400. Why: the screen shows the message for any failure, and changing the stage 3 routes would break their tests. If wrong: a one-line change.
+- Deleting any voice is refused while something is being spoken, not only the voice being spoken. Why: the simplest safe rule; requests last seconds. If wrong: add a way to ask which voice is active.
+- (From the real run.) The start of each piece is cut by rules measured on one reference clip: sound in the first 60 ms that ends within 0.4 s and is followed by 0.4 s of quiet is taken to be what is left of the reference clip, and removed with the pause after it. Why: without it, 74 percent of Fast pieces and a few Balanced ones kept a blip and a second of room tone before the sentence. If wrong: with another voice's clip a short first word followed by a long pause could be removed, or a blip could remain; the thresholds are parameters of `tts_audio.drop_reference_tail`.
+
+### Open items
+
+Scheduled for the final fix wave:
+
+- Setup script: pass `-r requirements.lock` as a relative path like the constraint file; add `--retry` to `curl`; pin the relative-path workaround with a test.
+- Playback: the "stopped responding" timer is started before the output streams are opened, so a device that takes over 5 seconds to open (or a system sleep) ends playback wrongly; `stop()` can return while the old streams are still being closed, so a new session can open the device too early.
+- Manager: the shared process and environment module (above); four tests assert "still waiting" with a real 50 ms wait; no log line when unload or shutdown returns while a worker is still being launched; no test for the failure to start the reader thread; an error after the worker process was created but before it was registered should end the process; the backend's 10 second shutdown wait is shorter than the manager's own waits (15 and 30 seconds); a dead `if False` in `api_training.py`.
+- Routes: the quick environment check can take up to 300 seconds while route locks are held; cap it.
+
+Still open, not scheduled:
+
+- **Fast gets words wrong in about 3 of 10 sentences** (55 of 180 pieces, 18 of them missing three words or more; Balanced 1 of 90), measured with the model's own sample clip and a speech recogniser. Nothing detects a wrongly spoken sentence. Whether Fast should stay, get more steps, or carry a warning on screen is a decision for the owner after listening.
+- The model's pieces run to the very end of their allotted time; a last word was never lost in the checked pieces, but there is no margin.
+- About 4 percent of Fast pieces keep their full length because no pause could be found at their start (mostly the garbled ones).
+- Best loads the voice's RVC model again for every request (about 2 seconds before the first sound) and drops it afterwards.
+- `is_silent` looks at the peak only, so a single click counts as speech; a sentence cut hard at an over-long word can start a piece with punctuation.
+- There is no speed control for speech (fixed at 1.0; the design does not ask for one).
+- The uv package cache that `tts/.venv` and `trainer/.venv` hard-link into lives under `spike/stage3/cache/uv` on the development machine. Deleting that folder does not break the environments (hard links keep the files), but a later setup would download everything again.
+- The Speak tab learns that the voice engine failed while idle only when the tab is shown again. It polls the status on every tab while a request is active (the plan said only while visible), so that the other tabs know when speech ends.
+- Recording and training are not known to the Speak tab in advance: it shows the backend's refusal after Speak is pressed. Starting a recording is not disabled on the Voices tab while speech plays; the refusal message appears instead.
+- A voice whose reference clip's audio file is missing is refused when spoken ("The audio of clip N ... is missing"); it is not replaced by another clip.
+- A request stopped near its end saves nothing, even with "Keep as a WAV file" ticked.
+- The first speak request of a backend can take about 3 seconds to answer if the Speak tab's own environment check has not run yet.
+- Several tests are looser than their names (three in the reference and RVC tests, one in the text tests, one worker exit-code case); the worker real test builds its worker outside the fixture's clean-up block.
+
+### Not verified by a human
+
+Everything in stage 4 was exercised by automated tests only: fakes for the app side, and for the real model a stand-in player with a speech recogniser as the only listener.
+
+- **Nobody has listened to any synthesised speech.** Whether it sounds like the voice, sounds natural, starts and ends cleanly, and whether the 0.3 second pauses are right, are all unknown. The reference used in every real run is the sample clip that ships with the model, not a voice from this app.
+- **No real voice has been recorded or trained.** The Best preset was run only with stage 3's test model, trained on about a minute of synthetic sound: it proves the two models run together and the timing, not that Best sounds better than Balanced.
+- **The app has never been driven by hand.** The Speak tab in the real window, real playback on a real device, the virtual microphone being heard by another app, saving and playing a file, Stop and Escape, the tab's messages, and Quit leaving no worker behind are covered only by tests with fake devices and a fake backend. The real `/tts` routes have never served the real manager.
+- The whole "Stage 4 first run checklist" in `README.md` (10 steps).
+- `bash tts/setup.sh` on a machine that is not this one (clean caches, another driver), and the real download sizes there. Here the AMD wheels were already cached.
+- Reference clips other than the sample: a real room, a fast or slow speaker, a clip at the 3 or 12 second limits, an automatic transcript with mistakes.
+- Text other than plain English prose in the real model: numbers, abbreviations, names, very short pieces ("Hi."), a 5000 character text from start to end, other languages.
+- Long sessions: the engine being unloaded after 10 minutes idle and started again, many requests in a row, memory over time.
+- Other GPUs. Graphics memory was read from Windows on a 24 GB card (about 2.8 GB for the loaded engine, 5.3 GB with the RVC model beside it); a card with much less memory, or other programs using it, was not tried.

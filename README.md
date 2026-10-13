@@ -2,7 +2,7 @@
 
 A personal Windows app for real-time voice conversion.
 
-**Stages 1, 2 and 3 are built.** The app does live voice change: your microphone goes in, a chosen voice comes out on a virtual microphone, with an optional headphone monitor. It builds voice datasets: in the **Voices** tab you can record guided sentences or drop in existing audio, which is cut into clips and transcribed on this computer. It also trains your own voice models (RVC) from such a dataset on the AMD GPU, natively on Windows, and a trained voice then appears in the Voice list on the Live tab. Text to speech is a later stage and is not in the app yet. Only synthetic test audio has been trained so far, so how good a trained voice sounds is untested (see Known limitations).
+**Stages 1 to 4 are built.** The app does live voice change: your microphone goes in, a chosen voice comes out on a virtual microphone, with an optional headphone monitor. It builds voice datasets: in the **Voices** tab you can record guided sentences or drop in existing audio, which is cut into clips and transcribed on this computer. It also trains your own voice models (RVC) from such a dataset on the AMD GPU, natively on Windows, and a trained voice then appears in the Voice list on the Live tab. The **Speak** tab turns typed text into speech in one of your voices (text to speech), from a single short clip of that voice. Only synthetic test audio has been trained so far, so how good a trained voice sounds is untested, and nobody has listened to any synthesised speech yet (see Known limitations).
 
 Design: `docs/superpowers/specs/2026-10-13-ai-voice-design.md`
 
@@ -187,13 +187,13 @@ The app never empties `data/trash/`. If a file in the trash already has the name
 
 ### Behaviour notes
 
-- Recording and live mode cannot run at the same time. Starting a recording while live mode runs is refused ("Stop live mode before recording") and so is the reverse ("Stop recording before starting live mode"). Training is refused while either runs, and either is refused while training runs; see Training a voice.
+- Recording and live mode cannot run at the same time. Starting a recording while live mode runs is refused ("Stop live mode before recording") and so is the reverse ("Stop recording before starting live mode"). Training is refused while either runs, and either is refused while training runs; see Training a voice. Text to speech takes part in the same rule; see Speaking text.
 - **Refresh devices** on the Live tab is refused while recording ("Stop recording before refreshing devices").
 - The backend answers requests under `/library` (which serves your recordings) only for the app itself; requests from other websites get a 403. Each refused request is written to `data/backend.log` as one line starting with "Refused", with its path and the Origin, Referer and Sec-Fetch-Site headers it carried. If every action on the Voices tab fails with "Origin not allowed", that line shows what the app's window actually sent.
 
 ### Privacy
 
-Recordings and imported audio stay on this computer. The only network use is the one-time download of the speech model from Hugging Face, on the first import (and once more if you change `whisper_model` to a model you do not have yet), and the downloads of `bash trainer/setup.sh` (see Training setup). After that the model is loaded from disk without contacting Hugging Face, and the download library's usage reporting is switched off. Training itself makes no network requests.
+Recordings and imported audio stay on this computer. The only network use is the one-time download of the speech model from Hugging Face, on the first import (and once more if you change `whisper_model` to a model you do not have yet), and the downloads of `bash trainer/setup.sh` (see Training setup) and `bash tts/setup.sh` (see Text to speech setup). After that the model is loaded from disk without contacting Hugging Face, and the download library's usage reporting is switched off. Training and text to speech themselves make no network requests.
 
 ## Training setup
 
@@ -290,6 +290,94 @@ The model is exported into a new folder and swapped in only after it passes a ch
 
 **Retraining.** Add or fix clips and press **Train again**. The new model replaces the old one only when the run completes; cancelling or failing leaves the old model in use. The replaced model is not erased: it is moved to `data/trash/<id>/models-<UTC time>/` (about 150 MB for 10 minutes of audio). Nothing empties the trash; delete those folders yourself when you no longer want them.
 
+## Text to speech setup
+
+Text to speech runs **natively on Windows** on the AMD GPU, in its own Python environment under `tts/`, with the F5-TTS model. The backend environment never gets PyTorch; the model only ever runs in `tts/.venv`, in a separate worker process the backend starts and stops. This is a one-time setup, and it is not needed unless you want the **Speak** tab.
+
+**Licence of the model: non-commercial.** The F5-TTS weights this setup downloads (`F5TTS_v1_Base`) are licensed **CC-BY-NC-4.0**: personal, non-commercial use only, with attribution. Speech made with them may not be sold or used for paid work. The code (F5-TTS, Vocos) and the Vocos weights are MIT. If that licence does not suit what you want to do, do not use the Speak tab; nothing else in the app depends on these files.
+
+You need, besides the Requirements above:
+
+- The same AMD graphics driver as for training (**AMD Adrenalin 26.2.2 or newer**; see Training setup). It was developed and tested on an RX 7900 XTX only.
+- `curl` and `sha256sum` in Git Bash (they come with Git for Windows) and `uv`.
+- **Python 3.12** where `uv` can find it (`uv python install 3.12` if you have none; the script does not download Python).
+
+Then, from the repo root in Git Bash:
+
+```bash
+bash tts/setup.sh
+```
+
+It creates `tts/.venv` (Python 3.12), installs AMD's seven ROCm 7.2.1 wheels (hash-pinned, the same ones as the training environment), the exact package versions in `tts/requirements.lock`, and `f5-tts` 1.1.22 without its declared dependencies (the lock file holds the part of them that speaking needs). It then downloads the four model files listed in `tts/pretrained.json` from Hugging Face, at pinned revisions: the F5-TTS model (1.35 GB) and its vocabulary, and the Vocos vocoder (54 MB) and its configuration, **about 1.4 GB in all**. Every file is checked against its recorded size and SHA-256 before it is put in place, and an unfinished download (`*.part`) is removed and never used. The script prints the licence notice above before it downloads. Nothing is installed system-wide, nothing outside `tts/` is touched, and the caches stay inside `tts/.cache`.
+
+**Size.** The AMD wheels are about 2.1 GB to download; if the training environment's package cache (`trainer/.cache/uv`) exists, it is reused and they are not downloaded again. On disk the environment is about 6.5 GB (`tts/.venv`, largely shared with that cache through hard links when both are on the same drive) and the models 1.4 GB. On the development machine, where the AMD wheels were already cached, setup took 43 seconds and 8 seconds when re-run; on a clean machine the downloads dominate.
+
+The script is safe to re-run: each step is skipped when its result is already correct, so it also repairs a damaged environment. It never touches your voices or recordings.
+
+To check the environment without changing anything, run the check the app runs. It prints one JSON object and exits 0 only if everything passed. Add `--fast` to skip the GPU check, which takes a few seconds:
+
+```bash
+backend/.venv/Scripts/python tts/verify.py
+```
+
+The checks are `venv`, `torch_gpu` (the ROCm build of PyTorch is installed and sees the GPU), `f5_package` and `models` (files present with the right sizes). When one fails, its message names the missing item and the fix. In the app, the Speak tab then shows the failing checks under "Text to speech is not set up on this computer" with a **Check again** button. Live mode, recording and training keep working either way.
+
+## Speaking text
+
+Open the **Speak** tab, choose a voice, type or paste text, and press **Speak** (or Ctrl+Enter in the text box). The text is spoken in that voice on the outputs you chose. **Nobody has listened to the output yet**: everything in this section was measured by program on the development machine (see Known limitations and the Stage 4 checklist).
+
+**Choosing a voice.** The list holds the voices from the Voices tab. A voice can be spoken as soon as it has **one clip between 3 and 12 seconds long with a transcript**; no training is needed for Fast and Balanced. A voice without such a clip is listed but greyed out, with the reason.
+
+**The reference clip.** The model copies a voice from one short clip of it and that clip's transcript: it hears how the clip sounds and continues in the same voice with your text. The app picks the clip by itself: a recorded clip before an imported one, then the one closest to 8 seconds. Everything about the result follows from that clip, so it is worth getting a good one:
+
+- One clear sentence of **5 to 10 seconds**, spoken the way you want the speech to sound. The speed of the clip sets the speed of the speech, and its mood carries over.
+- A quiet room and no background sound. The model copies the room as well as the voice: hiss or echo in the clip comes back in every sentence.
+- No long pauses inside it, and nothing cut off at the start or the end.
+- **The transcript must be exactly what is said.** For an imported clip, check the automatic transcript on the Voices tab and correct it. A wrong transcript makes the model stumble or say words from the clip.
+- The easiest way: on the Voices tab, record one of the guided sentences at a natural pace. A recorded clip is always preferred over imported ones.
+
+**Speed / quality.** All three use the same model; they differ in how many refinement steps each sentence gets. The times are from the development machine (RX 7900 XTX) for sentences of about 90 characters, each about 8 seconds of speech, with the reference clip that ships with the model:
+
+| Preset | What it does | First sound after pressing Speak | Each further sentence |
+|---|---|---|---|
+| Fast | 8 steps | 0.4 s | 0.4 s |
+| Balanced | 16 steps (the default) | 0.8 s | 0.8 s |
+| Best | 32 steps, then the voice's own trained model reshapes the result | about 4 s | 0.6 to 1.6 s |
+
+- **Fast makes mistakes.** In the measurements, a speech recogniser found at least one wrong or missing word in about 3 of 10 sentences spoken at Fast, and in 1 of 90 at Balanced. Use Fast for trying things out, Balanced for anything you want to keep.
+- **Best** is offered only for a voice that has a trained model (see Training a voice); otherwise the option is greyed out with "Best needs a trained model. Train this voice on the Voices tab." It speaks the text with the model at full steps and then passes each sentence through the voice's trained RVC model, the same one live mode uses. About 2 of its 4 seconds are spent loading that model, on every request. Whether Best sounds more like the voice than Balanced has not been judged by anyone; the only trained model that exists so far was made from synthetic test sound.
+- **The first request after the app starts takes longer**: the voice engine has to start and load the model, 11 to 17 seconds on the development machine, and about half a minute the very first time on a machine. The screen says "Getting ready. Starting the voice engine. The first time takes about 20 seconds." meanwhile. The engine then stays loaded and is stopped again after 10 minutes without a request, when training starts, and when the app quits.
+- Speech is made faster than it plays at every preset (about 8 seconds of speech in under a second at Fast and Balanced, in about 2 seconds at Best), so playback does not have to wait once it has started.
+
+**Outputs.** **Listen on** chooses where you hear it (your headphones or speakers; the Windows default output is preselected; "Off" for none). **Send to virtual mic** also plays it into the virtual microphone, so that other apps (Discord, a recorder) hear it as if spoken; the box appears only when a virtual mic exists. At least one of the two must be chosen.
+
+**Keep as a WAV file.** Tick it before pressing Speak and the whole speech is also written to `data/tts/<UTC time>-<voice id>.wav` (mono, 48 kHz), with the same short pauses between sentences as in playback. The screen shows "Saved to ..." with the path. The file is written when playback has finished; a request that was stopped or failed saves nothing. An earlier file is never overwritten. Nothing removes these files; delete them yourself.
+
+**Stop.** **Stop** (or Escape) silences the outputs at once and cancels the rest; in the measurements the engine was idle again 0.04 seconds later. The engine stays loaded, so the next request starts quickly. Pressing Speak while something is being spoken is refused ("Already speaking. Stop it first.").
+
+**Long text.** A request can hold up to 5000 characters. The text is cut into pieces at sentence ends (`.`, `!`, `?`, a blank line), each piece is spoken on its own, and **playback starts as soon as the first piece is ready** while the rest is still being made; the screen shows "Speaking sentence N of M". A sentence too long for the model in one go is cut at a comma, semicolon or colon, and failing that between words. How long a piece may be depends on the reference clip (132 characters with the clip that ships with the model; a clip with more words per second allows more). There is a pause of 0.3 seconds between pieces. Because each piece is spoken separately, the tone of voice does not carry from one sentence into the next.
+
+**What goes wrong, and how it shows.** A sentence that comes out silent stops the request with "The voice engine produced no sound for sentence N" rather than playing nothing. If the engine crashes or stops answering, the request ends with a message, the engine is ended, and the next request starts a fresh one. If the output device disappears, the request ends with the device error. In every case the screen returns to Speak, and the engine's own output is in `data/tts/worker.log` (the previous engine's in `data/tts/worker.prev.log`).
+
+**One thing at a time.** Text to speech, live mode, recording and training share the GPU and the audio devices, so only one of them runs at a time:
+
+- Speak is refused while live mode is running ("Stop live mode before speaking"), during a recording ("Stop recording before speaking") and during training ("Training is running. Wait for it to finish or cancel it before speaking").
+- While something is being spoken, starting live mode, a recording or training is refused ("Stop the speech before starting live mode", and so on), and so are **Refresh devices** and deleting a voice.
+- An engine that is loaded but not speaking blocks nothing. Starting training stops it first, because both need the GPU.
+
+**Network.** Speaking makes no network requests: the engine runs with `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`, and the text you type never leaves this computer. Only `bash tts/setup.sh` downloads anything.
+
+**Where things are.**
+
+```
+data/tts/<UTC time>-<voice id>.wav   speech you asked to keep
+data/tts/worker.log                  what the voice engine printed (worker.prev.log: the engine before it)
+data/tts/tmp/                        temporary: the pieces of the request in progress; emptied when it ends and at start-up
+tts/.venv, tts/models, tts/.cache    the environment, the model files and the engine's caches (from the setup)
+```
+
+Your recordings are only read. The reference clip is given to the engine as it is and never changed.
+
 ## Safety behaviour
 
 If anything fails (backend crash, device unplugged, a conversion that cannot keep up), the virtual mic receives silence, never your real voice. Mute is strict: both the virtual mic and the monitor go silent. If the backend dies while live, the app says "The voice engine stopped unexpectedly. Live mode is off." and the reason is in `data/backend.log`.
@@ -349,6 +437,25 @@ A human needs to do this once; it has not been done yet. Everything in stage 3 w
 9. Then the full run: **Train again** with 200 (or 300) epochs and let it finish, listen on the Live tab again and compare it with the short run. Note the total time against the estimate.
 10. Delete a trained test voice and confirm `trainer/rvc/logs/voice-<id>/` and its `trainer/rvc/assets/weights/` file are gone.
 
+## Stage 4 first run checklist
+
+A human needs to do this once; it has not been done yet. **Nobody has listened to any synthesised speech**: the automated runs judged it by length, level and a speech recogniser only. Start with the setup, then `cd app && npm run tauri dev` and open the **Speak** tab.
+
+1. Run `bash tts/setup.sh`. It prints the non-commercial licence notice, ends with "done in N s", and `backend/.venv/Scripts/python tts/verify.py` prints `"ok": true`. The Speak tab shows no "not set up" box.
+2. Give a voice a good reference clip: on the Voices tab, record one clear sentence of 5 to 10 seconds in a quiet room (or pick a voice that has such a clip and check its transcript word for word). On the Speak tab the voice can be chosen; a voice without a usable clip is greyed out with the reason.
+3. Type one sentence, choose headphones under **Listen on**, and speak it at **Fast**, then **Balanced** (and **Best** if the voice has a trained model). The first request shows "Getting ready" for 10 to 20 seconds. Listen each time: is every word there, does it sound like the voice, does each sentence start cleanly (no click, blip or stray syllable before it, no long wait) and end without its last word cut short? Note how often Fast gets a word wrong.
+4. Paste a long paragraph (ten sentences or more) and press Speak at Balanced. Sound starts within about a second, long before the whole text could have been made, the screen counts "Speaking sentence N of M", and the pauses between sentences sound natural.
+5. Press **Stop** (and, another time, Escape) half-way through. The sound ends at once, the screen returns to Speak, and speaking again works straight away.
+6. Tick **Keep as a WAV file**, speak two sentences, and play the file named on screen (under `data/tts/`) in another program. Stop a kept request half-way: no file is written.
+7. Tick **Send to virtual mic** and speak. In another app (Discord or Windows Sound Recorder) with VoiceMeeter Output as the microphone, the speech is heard or recorded.
+8. For a voice with a trained model, speak the same sentences at **Balanced** and at **Best** and compare them for likeness to the real voice. This comparison decides whether Best is worth its extra seconds.
+9. One thing at a time: with live mode running, Speak is unavailable and says why; while a long text is being spoken, Start on the Live tab and Record on the Voices tab are refused. Start a training run after speaking: Task Manager shows the text-to-speech `python.exe` gone before training begins.
+10. Choose **Quit** in the tray menu while something is being spoken, and confirm no `python.exe` whose command line contains `tts_worker.py` is left running:
+
+    ```powershell
+    Get-CimInstance Win32_Process -Filter "Name='python.exe'" | Where-Object CommandLine -like '*tts_worker.py*' | Select-Object ProcessId, CommandLine
+    ```
+
 ## Tests
 
 ```bash
@@ -373,6 +480,14 @@ AIVOICE_RUN_TRAIN_TEST=1 backend/.venv/Scripts/python -m pytest backend/tests/te
 
 It runs a 2-epoch training and converts audio with the result, cancels and resumes a run, kills a worker outright and resumes, and drives the app's own training manager through a whole run and a cancelled one on a temporary data folder (a library voice of 5.2 minutes). Last result: 4 passed in 17 min 2 s, measured while another experiment was sharing the GPU; on a free GPU the first three took 5 min 32 s, and the fourth took 4 min 51 s run by itself. If anything of a test's experiment is left under `trainer/rvc` afterwards, the test run says so with a warning. Without the variable the full backend suite reports those 4 as skipped (last result: 827 passed, 4 skipped).
 
+`backend/tests/test_tts_worker_real.py` and `backend/tests/test_tts_real.py` run the real text-to-speech model on the GPU and are skipped unless asked for. They need the text-to-speech environment, take about a minute together, open no audio device, and should not run while anything else uses the GPU:
+
+```bash
+AIVOICE_RUN_TTS_TEST=1 backend/.venv/Scripts/python -m pytest backend/tests/test_tts_worker_real.py backend/tests/test_tts_real.py -q -W error -s
+```
+
+The first drives the worker process directly (12 tests). The second drives the app's own text-to-speech manager on a temporary data folder with a temporary voice whose one clip is the sample that ships with the model: three sentences at Fast and at Balanced, Stop in the middle of a request, Best with the stage 3 test model if it still exists, and unloading; a speech recogniser checks that each Balanced sentence says its text. Last result: 22 passed in 65 s. Without the variable the full backend suite reports them as skipped (last result: 1288 passed, 26 skipped). Timings and findings: `docs/superpowers/notes/2026-10-13-stage-4-first-real-run.md`.
+
 ## Known limitations
 
 - The accurate pitch detector (harvest) is slower than real time at every preset's window size on the development machine, not only the larger ones, so all three presets use the fast one (dio). Harvest is still selectable under Advanced but will not keep up live with any preset.
@@ -384,7 +499,17 @@ It runs a 2-epoch training and converts audio with the result, cancels and resum
 - Transcription runs on the CPU (the speech engine has no AMD GPU support), so long imports take a while.
 - The first import waits for the model download with no separate progress bar.
 - **Only synthetic audio has been trained so far** (about 60 seconds of speech-like test audio, 2 to 8 epochs, in the spike and in the automated runs). How a model trained on a real voice sounds is unproven, and so is the stability of a run lasting an hour or more. The Stage 3 checklist is the first real test.
-- **Text to speech is not built yet.** Stage 3 trains RVC voice conversion models only. GPT-SoVITS (text to speech) training is planned for stage 4 and the app does not train it.
+- **Nobody has listened to any synthesised speech yet.** Text to speech was checked by program only: that sound comes out, how long and how loud it is, how fast it is made, and that a speech recogniser hears the words. Whether it sounds like the voice, whether it sounds natural, and whether sentences start and end cleanly are unknown. No real voice has been recorded or trained either, and the app has never been driven by hand. The Stage 4 checklist is the first real test.
+- **Fast gets words wrong.** With the model's own sample clip as the reference, a speech recogniser found a wrong or missing word in about 3 of 10 sentences at Fast (55 of 180), and in 1 of 90 at Balanced. Nothing in the app detects a sentence that was spoken wrongly.
+- **The "Best" preset is not what the design first planned.** The design named GPT-SoVITS, a second model fine-tuned on the voice. It was not built: it would have needed a third environment and weeks of uncertain work on this GPU. Best is F5-TTS at full steps followed by the voice's trained RVC model. Whether that is closer to the voice than Balanced is unproven.
+- Text to speech is English only (nothing else was tried, and the sentence splitting assumes Western punctuation).
+- Numbers, dates, abbreviations and symbols are read the way the model happens to read them; the app does not spell them out. Write "twenty five dollars" rather than "$25" if it matters. A full stop followed by a space always ends a piece, so "Dr. Smith" is spoken as two pieces with a pause between.
+- Each sentence is spoken on its own, so intonation does not carry from one sentence into the next, and there is a fixed 0.3 second pause between them.
+- The start of each sentence is found by rules measured on one reference clip (the model begins a piece with what is left of the reference clip's last word and a pause, which the app cuts off). With another clip a blip before a sentence, a late start, or, in an unlucky case, a missing short first word are possible.
+- There is no speed, pitch or emotion control for speech; the reference clip decides all three.
+- Text to speech and live mode cannot run at the same time, and neither can text to speech and recording or training. Starting training stops the voice engine.
+- The F5-TTS weights are licensed CC-BY-NC-4.0 (non-commercial). See Text to speech setup.
+- Text to speech needs an AMD GPU with the driver named in Training setup and has only been run on an RX 7900 XTX. There is no CPU fallback (the spike measured the processor as far too slow to be one).
 - Training depends on two patches carried against a pinned upstream commit of RVC (`81eed5e`): one rewrites a convolution that is about 60 times slower than normal on this AMD ROCm build (training is 3.4 times faster with it), the other stops preprocessing from dropping audio before a pause. `bash trainer/setup.sh` applies them and refuses to continue if the clone has been edited.
 - Training needs an AMD GPU with the driver named in Training setup and has only been run on an RX 7900 XTX. There is no CPU fallback.
 - Training and live mode cannot run at the same time (both need the GPU), and neither can training and recording. Quitting the app interrupts training; it can be resumed.
