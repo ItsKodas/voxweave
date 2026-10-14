@@ -1,5 +1,5 @@
 :root { color-scheme: dark; font-family: "Segoe UI", system-ui, sans-serif; background: #15171c; color: #e8eaed; }
-main { max-width: 440px; margin: 0 auto; padding: 16px; }
+main { max-width: 1600px; margin: 0 auto; padding: 16px 28px; }
 h1 { font-size: 1.3rem; margin: 0 0 12px; }
 h2 { font-size: 1rem; margin: 0 0 6px; }
 label { display: block; margin: 10px 0; font-size: 0.85rem; color: #aab0bb; }
@@ -73,3 +73,23 @@ audio { width: 100%; margin: 6px 0; }
 .calibration { margin: 12px 0; padding: 8px 12px; border: 1px solid #343843; border-radius: 6px; }
 .calibration h3 { margin: 0 0 6px; font-size: 1em; }
 .calibration button { margin-right: 8px; }
+
+/* ---- landscape layout: each tab flows into columns that fold back to one in a narrow window ---- */
+main > h1 { display: inline-block; margin-right: 24px; vertical-align: middle; }
+.tabs { margin-bottom: 16px; }
+.live, .speak { columns: 3 320px; column-gap: 32px; }
+.live > *, .speak > * { break-inside: avoid; }
+.live > label, .speak > label { margin-top: 0; }
+.live .meter, .live details, .live .calibration, .live .setup-mic { break-inside: avoid; }
+.live > [role="alert"], .speak > [role="alert"] { column-span: all; }
+.voices { display: grid; grid-template-columns: minmax(260px, 320px) 1fr; column-gap: 32px; align-items: start; }
+.voices > :not(.studio) { grid-column: 1; }
+.voices > .studio { grid-column: 2; grid-row: 1 / span 30; }
+.studio { columns: 2 380px; column-gap: 32px; }
+.studio > * { break-inside: avoid; }
+.studio > h2, .studio > .minutes, .studio > .clips { column-span: all; }
+.studio > h3 { break-after: avoid; }
+@media (max-width: 900px) {
+  .voices { grid-template-columns: 1fr; }
+  .voices > .studio { grid-column: 1; grid-row: auto; }
+}
