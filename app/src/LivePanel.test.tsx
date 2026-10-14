@@ -538,3 +538,23 @@ describe("LivePanel without any voice", () => {
     expect(screen.queryByText(/README/)).not.toBeInTheDocument();
   });
 });
+
+describe("likeness", () => {
+  beforeEach(() => localStorage.clear());
+
+  it("starts at the preset's value, is sent when changed, and is remembered for that voice", async () => {
+    const { unmount } = render(<LivePanel stats={IDLE} />);
+    const start = await ready();
+    const slider = screen.getByLabelText(/^Likeness:/);
+    expect(slider.closest("label")).toHaveTextContent("Likeness: 30%");
+    fireEvent.change(slider, { target: { value: "0.55" } });
+    expect(slider.closest("label")).toHaveTextContent("Likeness: 55%");
+    expect(localStorage.getItem("likeness:demo")).toBe("0.55");
+    await userEvent.click(start);
+    expect(vi.mocked(api.start).mock.calls[0][0].overrides).toMatchObject({ index_rate: 0.55 });
+    unmount();
+    render(<LivePanel stats={IDLE} />);
+    await ready();
+    await waitFor(() => expect(screen.getByLabelText(/^Likeness:/).closest("label")).toHaveTextContent("Likeness: 55%"));
+  });
+});

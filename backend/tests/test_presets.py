@@ -51,8 +51,14 @@ def test_all_presets_are_valid():
         assert isinstance(resolve(name), LiveParams)
 
 
-def test_builtin_presets_use_dio():
-    # Benchmarked on this machine: harvest pitch extraction is slower than real time,
-    # so no built-in preset may use it. "harvest" stays a valid f0_method override.
-    assert all(p.f0_method == "dio" for p in PRESETS.values())
+def test_builtin_presets_use_rmvpe_and_protect_consonants():
+    # RMVPE is the tracker the voices were trained with; harvest is slower than real time, so no preset uses it.
+    # "harvest" and "dio" stay valid overrides.
+    assert all(p.f0_method == "rmvpe" for p in PRESETS.values())
+    assert all(p.protect == 0.33 for p in PRESETS.values())
+    assert resolve("balanced", {"f0_method": "dio"}).f0_method == "dio"
+    assert resolve("balanced", {"protect": 0.5}).protect == 0.5
+    for bad in (-0.1, 0.6):
+        with pytest.raises(ValueError, match="protect"):
+            resolve("balanced", {"protect": bad})
     assert resolve("balanced", {"f0_method": "harvest"}).f0_method == "harvest"

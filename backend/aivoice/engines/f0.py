@@ -16,10 +16,18 @@ def _resize(f0: np.ndarray, n: int) -> np.ndarray:
     return f0[idx]
 
 
-def extract_f0(audio16k: np.ndarray, method: str, n_frames: int) -> np.ndarray:
+def extract_f0(audio16k: np.ndarray, method: str, n_frames: int, rmvpe=None) -> np.ndarray:
+    """Pitch for n_frames frames. "rmvpe" needs the RMVPE tracker passed in, and falls back to "dio" without it."""
     x = audio16k.astype(np.float64)
-    if method not in ("dio", "harvest"):
+    if method not in ("dio", "harvest", "rmvpe"):
         raise ValueError(f"Unknown f0 method: {method}")
+    if method == "rmvpe":
+        if rmvpe is not None:
+            if not np.any(np.abs(x) > 1e-6):
+                return np.zeros(n_frames, dtype=np.float32)
+            f0 = np.nan_to_num(rmvpe.f0(audio16k.astype(np.float32)), nan=0.0, posinf=0.0, neginf=0.0)
+            return _resize(f0, n_frames).astype(np.float32)
+        method = "dio"
     if not np.any(np.abs(x) > 1e-6):
         return np.zeros(n_frames, dtype=np.float32)
     if method == "dio":

@@ -46,6 +46,22 @@ def _check_gain(value: float) -> None:
         raise ValueError("monitor_gain must be between 0 and 2")
 
 
+_RMVPE: dict = {}
+
+
+def shared_rmvpe(data: Path, device_id: int):
+    """The RMVPE pitch tracker, loaded once per GPU and shared by every engine; None when its model is missing,
+    and the engines then use the faster, less accurate tracker."""
+    from aivoice.engines.pitch import Rmvpe, rmvpe_path
+    from aivoice.engines.rvc import make_session
+
+    path = rmvpe_path(data)
+    key = (str(path), device_id)
+    if key not in _RMVPE:
+        _RMVPE[key] = Rmvpe(make_session(str(path), device_id=device_id)) if path.is_file() else None
+    return _RMVPE[key]
+
+
 def default_engine_factory(data: Path) -> Callable[[PretrainedVoice], object]:
     from aivoice.engines.rvc import RvcEngine, make_session
 
@@ -54,7 +70,8 @@ def default_engine_factory(data: Path) -> Callable[[PretrainedVoice], object]:
         # coming up, it has to surface as a Start error and in the setup check.
         device_id = dml_device_id(data)
         engine = RvcEngine(voice.model_path, vec_model_path(data), voice.sample_rate, voice.index_path,
-                           session_factory=partial(make_session, device_id=device_id))
+                           session_factory=partial(make_session, device_id=device_id),
+                           rmvpe=shared_rmvpe(data, device_id))
         # Live mode and text to speech both build their engine here, so neither can play a damaged model's noise.
         return GuardedEngine(engine)
 
@@ -121,6 +138,12 @@ class LiveManager:
             except Exception as exc:  # noqa: BLE001
                 name = feminize.preview_name(feminize.load_settings(self._data)) if voice is None else voice.name
                 raise ValueError(f"Could not load voice {name}: {exc}") from exc
+            if voice is not None and self._calibration is not None and hasattr(engine, "pitch_range"):
+                # Pitches the model never heard are moved to the nearest one its training voice used.
+                try:
+                    engine.pitch_range = self._calibration.voice_pitch_range(voice.id)
+                except Exception:  # noqa: BLE001 - without a range the engine works as before
+                    engine.pitch_range = None
             if cfg.use_calibration and self._calibration is not None:
                 # After the model has proved itself on the warm-up above: a closed gate would have hidden a
                 # model that cannot run.

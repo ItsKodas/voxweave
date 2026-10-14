@@ -401,6 +401,25 @@ What the result sounds like depends on the person, so expect a few rounds of sam
 
 **When a training run goes wrong.** Training normally runs in half precision, which is fast. On some recordings its numbers overflow: every loss in the log becomes `nan`, and nothing learned after that is a voice. The trainer watches for this. At the first such line it stops, throws away what was saved, and starts training again from the beginning in full precision, which is slower but steady; the progress line says so. If it happens in full precision too, the run fails with advice to remove clips that are not clean speech, and it cannot be resumed. As a last line of defence, live mode and text to speech check what a voice model returns: a model that answers with noise at full volume (which is what a run that went wrong produces) is never played. Live mode refuses to start with it, or plays silence and stops, and says the model is damaged and the voice should be trained again.
 
+**How live mode keeps a voice from sounding robotic.** Four things work together:
+
+- **Pitch tracking with RMVPE**, the neural pitch tracker the voices were trained with. The older fast tracker missed a good part of voiced speech, and those moments came out buzzy or broken. RMVPE needs `data/pretrained/rmvpe.onnx`, made once from the trainer's own RMVPE weights (no download):
+  ```bash
+  trainer/.venv/Scripts/python tools/export_rmvpe_onnx.py --mel-basis data/pretrained/rmvpe_mel.npy
+  ```
+  ```bash
+  tools/.rvc/venv/Scripts/python tools/export_rmvpe_onnx.py data/pretrained/rmvpe.onnx --mel-basis data/pretrained/rmvpe_mel.npy
+  ```
+  ```bash
+  backend/.venv/Scripts/python tools/check_rmvpe_onnx.py data/pretrained/rmvpe.onnx
+  ```
+  Without the file, live mode falls back to the older tracker. The installed app does not have it yet.
+- **Short pitch dropouts are bridged**: when the tracker loses the pitch for up to 40 ms in the middle of a word, the gap is filled from the pitch on either side instead of reaching the model as "no pitch".
+- **Pitches the voice never had are moved to the nearest one it has.** The app measures the pitch range of a voice's recordings (from the 5th to the 95th percentile). A pitch far outside it is first moved by octaves, and what is still outside is pulled to the edge of the range while keeping the rise and fall of your speech. Voices with no recordings in the library (exported models) have no known range and are left as they are.
+- **Consonants are protected**: where there is no pitch (s, t, f, sh, breath), the sound keeps most of your own features instead of being pulled towards the training voice, which is what smears them.
+
+**Likeness** on the Live tab is how strongly your speech is pulled towards sounds of the training voice (the index rate). Higher sounds more like the voice but breaks up more when you speak differently from its recordings; lower is steadier. It is remembered for each voice on this computer and is set before pressing Start. None of this changes the limits of the data: a voice trained on one speaking style still only knows that style.
+
 **Calibrating live mode to your own voice.** The voice models only learn the target voice, so nothing is trained on you. Instead, **My voice** on the Live tab makes one recording of about 18 seconds with the microphone chosen there: stay quiet for the first 3 seconds, then read the text on screen aloud. It ends by itself. From it the app keeps (in `data/calibration/profile.json`) your usual pitch, your speaking level, and how loud the room is when you say nothing. Live mode then uses it three ways:
 
 - **Pitch.** When you choose a voice, the pitch slider is set to the whole number of semitones that moves your usual pitch onto that voice's usual pitch, measured from up to a minute of the voice's own clips. A line under the slider says so. Move the slider and your setting is kept until you choose another voice or calibrate again. A voice with no clips in the library (an exported model) cannot be measured: set its pitch by hand.

@@ -1,3 +1,4 @@
+import pytest
 import numpy as np
 from fastapi.testclient import TestClient
 
@@ -119,3 +120,27 @@ def test_a_clip_cannot_be_recorded_during_a_calibration_recording_and_the_other_
     refused = client.post("/calibration/start", json={"input_device": 1})
     assert refused.status_code == 400 and "Stop recording" in refused.json()["detail"]
     client.post("/library/record/cancel")
+
+
+def test_live_mode_gives_the_engine_the_voices_pitch_range(tmp_path):
+    from aivoice.library import Library
+    from tests.test_calibration import voice_like
+
+    library = Library(tmp_path)
+    voice = library.create("Ranged")
+    library.add_clip(voice.id, voice_like(4.0, 220.0), "words", "recorded")
+    folder = tmp_path / "voices" / voice.id / "models" / "rvc"
+    folder.mkdir(parents=True)
+    (folder / "model.onnx").write_bytes(b"x")
+    (folder / "voice.json").write_text('{"name": "Ranged", "sample_rate": 40000}')
+
+    class Ranged(Identity):
+        pitch_range = None
+
+    engine = Ranged()
+    calibration = Calibration(tmp_path, FakeRecorder(), lambda: DEVICES, library)
+    manager = LiveManager(tmp_path, lambda: DEVICES, lambda v: engine, FakeStreams(), calibration=calibration)
+    manager.start(StartConfig(input_device=1, mic_device=3, voice=voice.id))
+    low, high = engine.pitch_range
+    assert low == pytest.approx(220, rel=0.05) and high == pytest.approx(220, rel=0.05)
+    manager.stop()

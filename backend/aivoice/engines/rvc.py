@@ -5,6 +5,7 @@ import numpy as np
 import soxr
 
 from aivoice.engines.f0 import extract_f0, shift_f0, to_coarse
+from aivoice.engines.pitch import fill_gaps, fit_to_range
 from aivoice.presets import LiveParams
 
 
@@ -41,10 +42,23 @@ def _fit(audio: np.ndarray, n: int) -> np.ndarray:
     return np.concatenate([np.zeros(n - len(audio), dtype=audio.dtype), audio])
 
 
+def protect_consonants(phone: np.ndarray, phone0: np.ndarray, pitchf: np.ndarray, protect: float) -> np.ndarray:
+    """RVC's "protect": where there is no pitch (consonants, breath), keep part of the features as they were before
+    the index pulled them towards the training voice, so s, t, f and sh stay clear instead of turning into noise.
+    At 0.5 or more nothing is protected."""
+    if protect >= 0.5:
+        return phone
+    mask = np.where(pitchf > 0, 1.0, protect).astype(np.float32)[None, :, None]
+    return (phone * mask + phone0 * (1.0 - mask)).astype(np.float32)
+
+
 class RvcEngine:
     def __init__(self, model_path, vec_path, model_sample_rate: int, index_path=None,
-                 session_factory: Callable[[str], object] | None = None):
+                 session_factory: Callable[[str], object] | None = None, rmvpe=None):
         factory = session_factory or make_session
+        self._rmvpe = rmvpe
+        # The training voice's usual pitch range (low, high) in Hz, when known: pitches outside it are moved inside.
+        self.pitch_range: tuple[float, float] | None = None
         self._vec = factory(str(vec_path))
         self._net = factory(str(model_path))
         self._vec_input = self._vec.get_inputs()[0].name
@@ -60,12 +74,18 @@ class RvcEngine:
     def convert(self, audio: np.ndarray, sample_rate: int, pitch_shift: float, params: LiveParams) -> np.ndarray:
         n = len(audio)
         wav16 = soxr.resample(audio.astype(np.float32), sample_rate, 16000).astype(np.float32)
-        feats = self._vec.run(None, {self._vec_input: wav16[None, None, :]})[0][0]
+        feats = self._vec.run(None, {self._vec_input: wav16[None, None, :]})[0][0].astype(np.float32)
+        phone0 = np.repeat(feats, 2, axis=0)[None]
         if self._index is not None:
-            feats = blend_index(feats.astype(np.float32), self._index, self._big_npy, params.index_rate)
+            feats = blend_index(feats, self._index, self._big_npy, params.index_rate)
         phone = np.repeat(feats, 2, axis=0)[None].astype(np.float32)
         frames = phone.shape[1]
-        pitchf = shift_f0(extract_f0(wav16, params.f0_method, frames), pitch_shift)
+        pitchf = fill_gaps(extract_f0(wav16, params.f0_method, frames, rmvpe=self._rmvpe))
+        pitchf = shift_f0(pitchf, pitch_shift)
+        if self.pitch_range is not None:
+            pitchf = fit_to_range(pitchf, *self.pitch_range)
+        if self._index is not None:
+            phone = protect_consonants(phone, phone0, pitchf, params.protect)
         feed = {
             "phone": phone,
             "phone_lengths": np.array([frames], dtype=np.int64),

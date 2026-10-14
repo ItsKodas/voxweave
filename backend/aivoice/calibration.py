@@ -260,6 +260,17 @@ class Calibration:
 
     def voice_pitch(self, voice_id: str) -> float | None:
         """The usual pitch of a voice, measured from its clips (up to a minute of them). None when it has none."""
+        stats = self._voice_stats(voice_id)
+        return None if stats is None else stats[0]
+
+    def voice_pitch_range(self, voice_id: str) -> tuple[float, float] | None:
+        """The pitch range the voice's recordings cover (5th to 95th percentile, Hz), which is what a model
+        trained on them knows. None when the voice has no recordings to measure."""
+        stats = self._voice_stats(voice_id)
+        return None if stats is None else (stats[1], stats[2])
+
+    def _voice_stats(self, voice_id: str) -> tuple[float, float, float] | None:
+        """(median, low, high) pitch of a voice's clips, remembered until its clips change."""
         if self._library is None:
             return None
         try:
@@ -273,8 +284,9 @@ class Calibration:
         cache = self._folder / "voices" / f"{voice.id}.json"
         try:
             saved = json.loads(cache.read_text(encoding="utf-8"))
-            if saved.get("key") == key and float(saved["pitch_hz"]) > 0:
-                return float(saved["pitch_hz"])
+            stats = (float(saved["pitch_hz"]), float(saved["low_hz"]), float(saved["high_hz"]))
+            if saved.get("key") == key and 0 < stats[1] <= stats[0] <= stats[2]:
+                return stats
         except (OSError, ValueError, KeyError, TypeError):
             pass
         pitches, seconds = [], 0.0
@@ -291,13 +303,14 @@ class Calibration:
         voiced = np.concatenate(pitches) if pitches else np.zeros(0)
         if len(voiced) < int(MIN_VOICED_SECONDS * 100):
             return None
-        pitch = round(float(np.median(voiced)), 1)
+        low, pitch, high = (round(float(v), 1) for v in np.percentile(voiced, [5, 50, 95]))
         try:
             cache.parent.mkdir(parents=True, exist_ok=True)
-            cache.write_text(json.dumps({"key": key, "pitch_hz": pitch}), encoding="utf-8")
+            cache.write_text(json.dumps({"key": key, "pitch_hz": pitch, "low_hz": low, "high_hz": high}),
+                             encoding="utf-8")
         except OSError:
             pass  # measured again next time
-        return pitch
+        return pitch, low, high
 
     def suggestion(self, voice_id: str) -> dict:
         """The pitch shift for speaking as this voice, with the reason when there is none."""

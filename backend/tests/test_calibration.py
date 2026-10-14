@@ -258,3 +258,15 @@ def test_a_voice_without_recordings_has_no_suggestion_and_says_so(tmp_path):
     for voice_id in (empty.id, "bench", "../../etc"):
         answer = cal.suggestion(voice_id)
         assert answer["pitch_shift"] is None and "by hand" in answer["reason"]
+
+
+def test_a_voices_pitch_range_is_measured_from_its_clips_and_remembered(tmp_path):
+    library = Library(tmp_path)
+    voice = library.create("Wide")
+    for hz in (200.0, 250.0, 300.0):
+        library.add_clip(voice.id, voice_like(2.0, hz), "words", "recorded")
+    cal, _ = make(tmp_path, library=library)
+    low, high = cal.voice_pitch_range(voice.id)
+    assert low == pytest.approx(200, rel=0.05) and high == pytest.approx(300, rel=0.05)
+    assert low <= cal.voice_pitch(voice.id) <= high
+    assert cal.voice_pitch_range("nope") is None

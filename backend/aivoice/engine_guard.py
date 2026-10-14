@@ -41,3 +41,9 @@ class GuardedEngine:
 
     def __getattr__(self, name):  # anything else the engine offers is passed through
         return getattr(self._inner, name)
+
+    def __setattr__(self, name, value):
+        if name == "_inner":
+            object.__setattr__(self, name, value)
+        else:  # settings such as the pitch range belong to the engine inside
+            setattr(self._inner, name, value)

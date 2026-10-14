@@ -1,6 +1,6 @@
 from dataclasses import dataclass, fields, replace
 
-F0_METHODS = ("dio", "harvest")
+F0_METHODS = ("dio", "harvest", "rmvpe")
 
 
 @dataclass(frozen=True)
@@ -10,13 +10,15 @@ class LiveParams:
     context_ms: int
     f0_method: str
     index_rate: float
+    protect: float = 0.33  # consonants keep this much of the index's pull; 0.5 or more protects nothing
 
 
-# Every preset uses "dio": harvest pitch extraction benchmarked slower than real time at every preset window.
+# Every preset uses RMVPE, the neural pitch tracker the voices were trained with (it falls back to "dio" when its
+# model is missing). "harvest" benchmarked slower than real time at every preset window.
 PRESETS: dict[str, LiveParams] = {
-    "low_latency": LiveParams(120, 30, 400, "dio", 0.0),
-    "balanced": LiveParams(250, 50, 800, "dio", 0.3),
-    "high_quality": LiveParams(500, 80, 1500, "dio", 0.6),
+    "low_latency": LiveParams(120, 30, 400, "rmvpe", 0.0),
+    "balanced": LiveParams(250, 50, 800, "rmvpe", 0.3),
+    "high_quality": LiveParams(500, 80, 1500, "rmvpe", 0.6),
 }
 
 
@@ -31,6 +33,8 @@ def _validate(p: LiveParams) -> None:
         raise ValueError(f"f0_method must be one of {F0_METHODS}")
     if not 0.0 <= p.index_rate <= 1.0:
         raise ValueError("index_rate must be between 0 and 1")
+    if not 0.0 <= p.protect <= 0.5:
+        raise ValueError("protect must be between 0 and 0.5")
 
 
 def resolve(preset: str, overrides: dict | None = None) -> LiveParams:

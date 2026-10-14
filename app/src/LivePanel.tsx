@@ -48,6 +48,26 @@ function chooseDevices(list: DeviceList, keep?: Selection & { hadVirtualMic: boo
 /** VB-Audio's own page for VB-CABLE, the virtual cable that gives the app a microphone other apps can choose. */
 const CABLE_PAGE = "https://vb-audio.com/Cable/";
 
+/** The likeness chosen for each voice is remembered on this computer; it never needs to reach the backend's disk. */
+const LIKENESS_KEY = (voiceId: string) => `likeness:${voiceId}`;
+function storedLikeness(voiceId: string): number | null {
+  try {
+    const raw = localStorage.getItem(LIKENESS_KEY(voiceId));
+    const value = raw === null ? NaN : Number(raw);
+    return Number.isFinite(value) && value >= 0 && value <= 1 ? value : null;
+  } catch {
+    return null;
+  }
+}
+function storeLikeness(voiceId: string, value: number | null) {
+  try {
+    if (value === null) localStorage.removeItem(LIKENESS_KEY(voiceId));
+    else localStorage.setItem(LIKENESS_KEY(voiceId), String(value));
+  } catch {
+    // remembered for this session only
+  }
+}
+
 function Meter({ label, level }: { label: string; level: number }) {
   return (
     <label className="meter">
@@ -93,6 +113,16 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
   const [profile, setProfile] = useState<VoiceProfile | null>(null);
   const [useCalibration, setUseCalibration] = useState(true);
   const [pitchNote, setPitchNote] = useState<string | null>(null);
+
+  // Likeness is the index rate, kept per voice: how hard speech is pulled towards sounds of the training voice.
+  useEffect(() => {
+    if (voice === "") return;
+    const remembered = storedLikeness(voice);
+    setOverrides((current) => {
+      const { index_rate: _dropped, ...rest } = current;
+      return remembered === null ? rest : { ...rest, index_rate: remembered };
+    });
+  }, [voice]);
 
   // With a calibration, choosing a voice sets the pitch that moves the speaker onto that voice. Only then: a
   // pitch moved by hand stays until the voice or the calibration changes.
@@ -410,6 +440,23 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
         />
       </label>
       {pitchNote && <p className="hint">{pitchNote}</p>}
+      {voice !== PREVIEW_VOICE_ID && (
+        <>
+          <label>
+            Likeness: {Math.round(Number(value("index_rate") || 0) * 100)}%
+            <input type="range" min={0} max={1} step={0.05} value={Number(value("index_rate") || 0)} disabled={stats.running}
+              onChange={(e) => {
+                const rate = Number(e.target.value);
+                setOverrides((o) => ({ ...o, index_rate: rate }));
+                storeLikeness(voice, rate);
+              }} />
+          </label>
+          <p className="hint">
+            Higher sounds more like the voice but breaks up more when you speak differently from its recordings;
+            lower is steadier. Remembered for each voice. Set it before pressing Start.
+          </p>
+        </>
+      )}
 
       <CalibrationPanel input={input} disabled={stats.running || speechActive} onProfile={setProfile} />
       {profile !== null && (
