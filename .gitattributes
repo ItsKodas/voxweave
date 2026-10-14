@@ -2,3 +2,4 @@
 trainer/setup.sh text eol=lf
 trainer/patches/*.patch -text
 tts/setup.sh text eol=lf
+*.cmd text eol=crlf
