@@ -1,13 +1,32 @@
 import { useEffect, useRef, useState } from "react";
-import { DEFAULT_FEMINIZE, FeminizeJob, FeminizeSettings, feminizeApi } from "./feminizeApi";
+import { DEFAULT_FEMINIZE, DEFAULT_MASCULINIZE, FeminizeJob, FeminizeSettings, feminizeApi } from "./feminizeApi";
 import { LibraryVoice } from "./studioApi";
 
 const POLL_MS = 500;
-const percent = (x: number) => `${Math.round((x - 1) * 100)}%`;
+const signedPercent = (x: number) => {
+  const p = Math.round((x - 1) * 100);
+  return `${p > 0 ? "+" : ""}${p}%`;
+};
+
+type Mode = "feminine" | "masculine";
+const modeOf = (s: FeminizeSettings): Mode =>
+  s.pitch_semitones < 0 || (s.pitch_semitones === 0 && s.formant_shift < 1) ? "masculine" : "feminine";
+
+/** What each direction offers: the slider ranges, the defaults, and the words used for the result. */
+const MODES = {
+  feminine: {
+    defaults: DEFAULT_FEMINIZE, pitch: [0, 12], resonance: [1, 1.35], adjective: "feminized",
+    explain: "Raises the pitch and the resonances of this voice, the way a shorter vocal tract would, and can add a little breath.",
+  },
+  masculine: {
+    defaults: DEFAULT_MASCULINIZE, pitch: [-12, 0], resonance: [0.8, 1], adjective: "masculinized",
+    explain: "Lowers the pitch and the resonances of this voice, the way a longer vocal tract would.",
+  },
+} as const;
 
 /**
- * Feminize: a version of this voice with a higher pitch and higher resonances, made by signal processing. Listen to
- * a sample, use the settings for live mode's preview, or make a new voice from the feminized clips and train it.
+ * Change a voice's gender: a version with a different pitch and different resonances, made by signal processing.
+ * Listen to a sample, use the settings for live mode's preview, or make a new voice from the changed clips and train it.
  */
 export function FeminizePanel({ voice, onCreated }: { voice: LibraryVoice; onCreated: (voiceId: string) => void }) {
   const [settings, setSettings] = useState<FeminizeSettings>(DEFAULT_FEMINIZE);
@@ -19,6 +38,8 @@ export function FeminizePanel({ voice, onCreated }: { voice: LibraryVoice; onCre
   const urlRef = useRef<string | null>(null);
   const onCreatedRef = useRef(onCreated);
   onCreatedRef.current = onCreated;
+  const mode = modeOf(settings);
+  const m = MODES[mode];
 
   // Start from the settings saved for the live preview, so the sliders mean the same thing everywhere.
   useEffect(() => {
@@ -57,6 +78,12 @@ export function FeminizePanel({ voice, onCreated }: { voice: LibraryVoice; onCre
     setSaved(false);
   };
 
+  const switchMode = (next: Mode) => {
+    if (next === mode) return;
+    setSettings({ ...MODES[next].defaults });
+    setSaved(false);
+  };
+
   const run = async (kind: "sample" | "save" | "start", action: () => Promise<void>) => {
     setBusy(kind);
     setError(null);
@@ -85,19 +112,27 @@ export function FeminizePanel({ voice, onCreated }: { voice: LibraryVoice; onCre
   return (
     <div className="feminize">
       {error && <p role="alert" className="error">{error}</p>}
+      <div role="radiogroup" aria-label="Direction" className="kind">
+        {(["feminine", "masculine"] as const).map((k) => (
+          <label key={k}>
+            <input type="radio" name={`gender-${voice.id}`} checked={mode === k} disabled={busy !== null}
+              onChange={() => switchMode(k)} />
+            {k === "feminine" ? "More feminine" : "More masculine"}
+          </label>
+        ))}
+      </div>
       <p className="hint">
-        Raises the pitch and the resonances of this voice, the way a shorter vocal tract would, and adds a little
-        breath. Listen to a sample first. Then either use it live straight away (rougher, no training), or make a new
-        voice from the feminized clips and train it (smoother, about three hours).
+        {m.explain} Listen to a sample first. Then either use it live straight away (rougher, no training), or make a
+        new voice from the changed clips and train it (smoother, about three hours).
       </p>
       <label>
         Pitch: {settings.pitch_semitones > 0 ? "+" : ""}{settings.pitch_semitones} semitones
-        <input type="range" min={0} max={12} step={0.5} value={settings.pitch_semitones}
+        <input type="range" min={m.pitch[0]} max={m.pitch[1]} step={0.5} value={settings.pitch_semitones}
           onChange={(e) => change("pitch_semitones", Number(e.target.value))} />
       </label>
       <label>
-        Resonance: +{percent(settings.formant_shift)}
-        <input type="range" min={1} max={1.35} step={0.01} value={settings.formant_shift}
+        Resonance: {signedPercent(settings.formant_shift)}
+        <input type="range" min={m.resonance[0]} max={m.resonance[1]} step={0.01} value={settings.formant_shift}
           onChange={(e) => change("formant_shift", Number(e.target.value))} />
       </label>
       <label>
@@ -118,12 +153,12 @@ export function FeminizePanel({ voice, onCreated }: { voice: LibraryVoice; onCre
         </button>
         <button disabled={busy !== null || following || voice.clips === 0}
           onClick={() => run("start", async () => setJob(await feminizeApi.start(voice.id, settings)))}>
-          Make a feminized voice
+          {mode === "feminine" ? "Make a feminized voice" : "Make a masculinized voice"}
         </button>
       </div>
       {saved && (
         <p className="hint" aria-live="polite">
-          Saved. On the Live tab, choose the voice "My voice, feminized (preview, no training)".
+          Saved. On the Live tab, choose the voice "My voice, {m.adjective} (preview, no training)".
         </p>
       )}
       {job && !otherVoiceJob && (
@@ -144,7 +179,7 @@ export function FeminizePanel({ voice, onCreated }: { voice: LibraryVoice; onCre
           </p>
         ) : null
       )}
-      {otherVoiceJob && <p className="hint">A feminized voice is being made from another voice. Wait for it to finish.</p>}
+      {otherVoiceJob && <p className="hint">A changed voice is being made from another voice. Wait for it to finish.</p>}
     </div>
   );
 }

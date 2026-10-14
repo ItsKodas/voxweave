@@ -101,7 +101,7 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
     if (voice === PREVIEW_VOICE_ID) {
       // The preview takes its pitch from the feminize settings; the slider only adds to that.
       setPitch(0);
-      setPitchNote("The feminize settings on a voice's page set this preview's pitch. The slider adds to it.");
+      setPitchNote("The Change gender settings on a voice's page set this preview's pitch. The slider adds to it.");
       return;
     }
     if (calibrated === null || voice === "") {

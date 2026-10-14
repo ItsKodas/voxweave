@@ -119,7 +119,7 @@ class LiveManager:
                 processor = StreamProcessor(engine, self._sr, params)
                 engine.convert(np.zeros(processor.window, dtype=np.float32), self._sr, 0.0, params)
             except Exception as exc:  # noqa: BLE001
-                name = feminize.PREVIEW_NAME if voice is None else voice.name
+                name = feminize.preview_name(feminize.load_settings(self._data)) if voice is None else voice.name
                 raise ValueError(f"Could not load voice {name}: {exc}") from exc
             if cfg.use_calibration and self._calibration is not None:
                 # After the model has proved itself on the warm-up above: a closed gate would have hidden a

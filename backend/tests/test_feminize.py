@@ -197,3 +197,28 @@ def test_a_cancelled_job_stops_and_keeps_what_it_made(tmp_path):
     job.join(60)
     status = job.status()
     assert status["finished"] and status["cancelled"] and status["done"] < 3
+
+
+def test_the_masculine_direction_lowers_pitch_and_resonances():
+    x = vowel(f0=200.0, formants=(800.0, 1400.0, 2900.0))
+    y = feminize(x, SR, FeminizeSettings(pitch_semitones=-5.0, formant_shift=0.88, breathiness=0.0))
+    assert median_f0(y) == pytest.approx(200.0 * 2 ** (-5 / 12), rel=0.03)
+    assert first_formant(y, low=400, high=1100) == pytest.approx(first_formant(x, low=400, high=1100) * 0.88, rel=0.06)
+
+
+def test_settings_know_their_direction_and_name_the_preview_and_the_new_voice():
+    from aivoice.feminize import preview_name
+
+    assert FeminizeSettings().direction == "feminine"
+    assert FeminizeSettings(-5.0, 0.88, 0.0).direction == "masculine"
+    assert FeminizeSettings(0.0, 0.9, 0.0).direction == "masculine"
+    assert FeminizeSettings(0.0, 1.1, 0.0).direction == "feminine"
+    assert preview_name(FeminizeSettings()) == "My voice, feminized (preview, no training)"
+    assert preview_name(FeminizeSettings(-5.0, 0.88, 0.0)) == "My voice, masculinized (preview, no training)"
+
+
+def test_a_masculinized_voice_is_named_so(tmp_path):
+    library, voice = voice_with_clips(tmp_path, n=1)
+    job = FeminizeJob(library)
+    assert job.start(voice.id, FeminizeSettings(-5.0, 0.88, 0.0))["voice_name"] == "Kai (masculinized)"
+    job.join(60)

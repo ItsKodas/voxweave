@@ -29,7 +29,8 @@ F0_FLOOR, F0_CEIL = 60.0, 800.0
 LIVE_RATE = 24000  # the live preview works at half rate: four times less work, and speech has little above 12 kHz
 LIVE_CONTEXT_S = 0.2  # analysed before the part that is played, so the pitch tracker has something to go on
 PREVIEW_ID = "@feminize"
-PREVIEW_NAME = "My voice, feminized (preview, no training)"
+PREVIEW_NAME = "My voice, feminized (preview, no training)"  # the name with the default settings
+MASCULINE_DEFAULTS = (-5.0, 0.88, 0.0)  # lower pitch, lower resonances as from a longer vocal tract, no added breath
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,16 @@ class FeminizeSettings:
     pitch_semitones: float = 5.0  # how much higher the voice is
     formant_shift: float = 1.15  # how much higher its resonances are (1.15 = 15 percent)
     breathiness: float = 0.15  # 0 leaves it as it is, 1 is a whisper
+
+    @property
+    def direction(self) -> str:
+        """ "masculine" when the voice is made lower, "feminine" otherwise."""
+        return "masculine" if self.pitch_semitones < 0 or (self.pitch_semitones == 0 and self.formant_shift < 1) \
+            else "feminine"
+
+    @property
+    def adjective(self) -> str:
+        return "masculinized" if self.direction == "masculine" else "feminized"
 
     def validated(self) -> "FeminizeSettings":
         for name, value, low, high in (("pitch_semitones", self.pitch_semitones, -12.0, 12.0),
@@ -97,7 +108,7 @@ def feminize(audio: np.ndarray, sr: int, settings: FeminizeSettings) -> np.ndarr
 
 
 class FeminizeEngine:
-    """Live mode's preview: a voice engine that feminizes the speaker's own voice, with no model behind it.
+    """Live mode's preview: a voice engine that feminizes (or masculinizes) the speaker's own voice, with no model.
 
     The processor only plays the newest chunk and crossfade of each window, so only that part (plus a little
     context for the pitch tracker) is processed, at half rate, with the faster pitch tracker.
@@ -121,6 +132,11 @@ class FeminizeEngine:
 
 
 # ---- settings kept for the live preview
+
+
+def preview_name(settings: FeminizeSettings) -> str:
+    """What the live preview is called in the voice list: it says which way the voice is changed."""
+    return f"My voice, {settings.adjective} (preview, no training)"
 
 
 def settings_path(data: Path) -> Path:
@@ -173,7 +189,7 @@ class FeminizeJob:
             clips = [c for c in source.clips if c.text.strip()]
             if not clips:
                 raise ValueError("This voice has no clips with transcripts to make a feminized voice from")
-            new_name = (name or f"{source.name} (feminized)").strip()[:60]
+            new_name = (name or f"{source.name} ({settings.adjective})").strip()[:60]
             voice = self._library.create(new_name)
             self._cancel.clear()
             self._state = {"active": True, "done": 0, "total": len(clips), "source": source_id, "voice_id": voice.id,

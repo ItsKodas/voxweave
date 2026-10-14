@@ -93,3 +93,12 @@ def test_a_foreign_page_cannot_make_or_change_anything(tmp_path):
     assert client.post(f"/library/voices/{voice.id}/feminize", json={}, headers=evil).status_code == 403
     assert client.put("/library/feminize/settings", json={}, headers=evil).status_code == 403
     assert len(library.list()) == 1
+
+
+def test_the_live_preview_is_named_after_the_direction_saved(tmp_path):
+    client, library, voice, manager, data = rig(tmp_path)
+    names = lambda: [v["name"] for v in client.get("/voices").json() if v["id"] == "@feminize"]  # noqa: E731
+    assert names() == ["My voice, feminized (preview, no training)"]
+    client.put("/library/feminize/settings", json={"pitch_semitones": -5, "formant_shift": 0.88, "breathiness": 0},
+               headers=ORIGIN)
+    assert names() == ["My voice, masculinized (preview, no training)"]

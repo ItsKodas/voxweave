@@ -2,6 +2,7 @@ import { call, failure, origin } from "./api";
 
 export type FeminizeSettings = { pitch_semitones: number; formant_shift: number; breathiness: number };
 export const DEFAULT_FEMINIZE: FeminizeSettings = { pitch_semitones: 5, formant_shift: 1.15, breathiness: 0.15 };
+export const DEFAULT_MASCULINIZE: FeminizeSettings = { pitch_semitones: -5, formant_shift: 0.88, breathiness: 0 };
 /** The voice live mode offers for the feminized preview of the speaker's own voice, with no model behind it. */
 export const PREVIEW_VOICE_ID = "@feminize";
 

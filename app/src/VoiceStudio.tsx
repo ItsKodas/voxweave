@@ -48,7 +48,7 @@ export function VoiceStudio({ voice, active, devicesVersion = 0, onChanged, onMo
       <ImportDrop voiceId={voice.id} active={active} onImported={changed} />
       <h3>Train</h3>
       <TrainPanel voice={voice} active={active} onModelReady={onModelReady} onStarted={onTrainingStarted} />
-      <h3>Feminize</h3>
+      <h3>Change gender</h3>
       <FeminizePanel voice={voice} onCreated={() => onChanged()} />
       <h3>Share</h3>
       <VoicePackExport voice={voice} />

@@ -87,3 +87,30 @@ describe("FeminizePanel", () => {
     expect(screen.getByRole("button", { name: "Make a feminized voice" })).toBeDisabled();
   });
 });
+
+describe("the masculine direction", () => {
+  it("switches to lower defaults and ranges, and names what it makes accordingly", async () => {
+    const running: FeminizeJob = { ...IDLE, active: true, total: 50, source: "kai-1", voice_id: "kai-m", voice_name: "Kai (masculinized)" };
+    vi.mocked(feminizeApi.start).mockResolvedValue(running);
+    vi.mocked(feminizeApi.saveSettings).mockImplementation(async (s) => s);
+    render(<FeminizePanel voice={VOICE} onCreated={() => {}} />);
+    await screen.findByText("Pitch: +6 semitones");
+    fireEvent.click(screen.getByRole("radio", { name: "More masculine" }));
+    expect(screen.getByText("Pitch: -5 semitones")).toBeInTheDocument();
+    expect(screen.getByText("Resonance: -12%")).toBeInTheDocument();
+    expect(screen.getByLabelText(/Pitch:/)).toHaveAttribute("max", "0");
+    expect(screen.getByLabelText(/Pitch:/)).toHaveAttribute("min", "-12");
+    fireEvent.click(screen.getByRole("button", { name: "Use for the live preview" }));
+    expect(await screen.findByText(/"My voice, masculinized \(preview, no training\)"/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Make a masculinized voice" }));
+    await waitFor(() => expect(feminizeApi.start).toHaveBeenCalledWith("kai-1", { pitch_semitones: -5, formant_shift: 0.88, breathiness: 0 }));
+    expect(await screen.findByText(/Making "Kai \(masculinized\)"/)).toBeInTheDocument();
+  });
+
+  it("opens in the masculine direction when the saved settings are masculine", async () => {
+    vi.mocked(feminizeApi.settings).mockResolvedValue({ pitch_semitones: -4, formant_shift: 0.9, breathiness: 0 });
+    render(<FeminizePanel voice={VOICE} onCreated={() => {}} />);
+    await screen.findByText("Pitch: -4 semitones");
+    expect(screen.getByRole("radio", { name: "More masculine" })).toBeChecked();
+  });
+});

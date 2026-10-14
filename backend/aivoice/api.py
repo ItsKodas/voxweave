@@ -153,7 +153,8 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
     def voices() -> list[dict]:
         voices = [{"id": v.id, "name": v.name, "has_index": v.index_path is not None} for v in list_voices(data)]
         # Always last, always there: live mode can feminize the speaker's own voice without any trained model.
-        return voices + [{"id": feminize.PREVIEW_ID, "name": feminize.PREVIEW_NAME, "has_index": False}]
+        name = feminize.preview_name(feminize.load_settings(data))
+        return voices + [{"id": feminize.PREVIEW_ID, "name": name, "has_index": False}]
 
     @app.get("/presets")
     def presets() -> dict:
