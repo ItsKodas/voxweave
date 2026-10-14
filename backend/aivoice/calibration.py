@@ -326,7 +326,9 @@ class Calibration:
         profile = self.profile()
         if profile is None:
             return {"pitch_shift": None, "reason": "Calibrate your voice first."}
-        target = self.voice_pitch(voice_id)
+        from aivoice.pretrained import base_voice_id
+
+        target = self.voice_pitch(base_voice_id(voice_id))
         if target is None:
             return {"pitch_shift": None, "speaker_hz": profile.pitch_hz,
                     "reason": "This voice has no recordings in the library to measure, so set the pitch by hand."}

@@ -208,7 +208,8 @@ class FakeRunner:
     def export(self, c):
         out = Path(c.env["AIVOICE_EXPORT_DIR"])
         (out / "model.onnx").write_bytes(b"\1" * (1024 * 1024 + 1))
-        (out / "model.index").write_bytes(Path(c.arg("--index")).read_bytes())
+        if "--index" in c.argv:  # the versions kept at earlier epochs share the final model's index
+            (out / "model.index").write_bytes(Path(c.arg("--index")).read_bytes())
         name = next(a for a in c.argv if a.startswith("--name="))[len("--name="):]
         (out / "voice.json").write_text(json.dumps({"name": name, "sample_rate": 40000}))
         c.line(f"Exported {c.argv[3]} at 40000 Hz to {out}")
@@ -1854,3 +1855,55 @@ def test_chosen_clips_that_are_all_gone_stop_the_run(rig):
     (rig.job / "selected-clips.json").write_text(json.dumps(["0099.orig.wav"]))
     assert rig.run() == 1
     assert "None of the clips chosen" in rig.final()["error"]
+
+
+def test_versions_at_earlier_epochs_are_exported_beside_the_final_model_and_the_rest_are_not_kept(rig):
+    weights_dir = rig.rvc / "assets" / "weights"
+    seen = {}
+
+    def train(c):
+        result = FakeRunner.train(rig.runner, c)
+        seen["sw"] = c.arg("-sw")
+        return result
+
+    real_epoch_done = rig.worker.Job._epoch_done
+
+    def epoch_done(job, epoch, state):
+        weights_dir.mkdir(parents=True, exist_ok=True)
+        if epoch % 5 == 0:  # what the trainer writes with -sw 1
+            write_model(weights_dir / f"{EXP}_e{epoch}_s{epoch * 10}.pth")
+        real_epoch_done(job, epoch, state)
+        seen.setdefault("kept", []).append(sorted(p.name for p in weights_dir.glob(f"{EXP}_e*_s*.pth")))
+
+    exported = []
+
+    def export(c):
+        out = Path(c.env["AIVOICE_EXPORT_DIR"])
+        exported.append((out.name, Path(c.argv[2]).name, [a for a in c.argv if a.startswith("--name=")]))
+        return FakeRunner.export(rig.runner, c)
+
+    rig.runner.stages["train"] = train
+    rig.runner.stages["export"] = export
+    import unittest.mock as mock
+    with mock.patch.object(rig.worker.Job, "_epoch_done", epoch_done):
+        assert rig.run("--snapshots=10,15", epochs=20) == 0
+    assert seen["sw"] == "1"
+    assert all(all(("_e10_" in n or "_e15_" in n) for n in kept) for kept in seen["kept"])  # others deleted as they come
+    names = [e[0] for e in exported]
+    assert names == ["rvc.new", "rvc-e10.new", "rvc-e15.new"]
+    assert exported[1][2] == ["--name=My Voice (epoch 10)"]
+    models = rig.model.parent
+    assert (models / "rvc-e10" / "model.onnx").exists() and (models / "rvc-e15" / "model.onnx").exists()
+    assert not list(weights_dir.glob(f"{EXP}_e*_s*.pth"))  # nothing left behind
+
+
+def test_without_versions_to_compare_the_trainer_saves_no_extra_weights(rig):
+    seen = {}
+
+    def train(c):
+        seen["sw"] = c.arg("-sw")
+        return FakeRunner.train(rig.runner, c)
+
+    rig.runner.stages["train"] = train
+    assert rig.run() == 0
+    assert seen["sw"] == "0"

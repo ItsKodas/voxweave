@@ -256,6 +256,7 @@ def test_start_launches_the_worker_and_writes_the_job_record(rig):
         str(rig.trainer / ".venv" / "Scripts" / "python.exe"), "-P", str(rig.trainer / "worker.py"),
         "--voice-dir", str(voice_dir), "--job-dir", str(voice_dir / "training"),
         "--experiment", f"voice-{voice}", "--epochs", "120", "--batch-size", "16", "--save-every", "5",
+        "--snapshots=60,90",
         "--parent-pid", str(os.getpid()), "--name=Dad's voice",
     ]
     assert all(isinstance(a, str) for a in argv)
@@ -915,7 +916,7 @@ def test_resume_continues_a_stopped_run_with_its_settings(rig, state):
     s = rig.manager.start(voice, resume=True)
     argv = rig.launches[0][0]
     assert argv[argv.index("--epochs") + 1] == "300" and argv[argv.index("--batch-size") + 1] == "4"
-    assert argv[argv.index("--save-every") + 2] == "--resume"
+    assert "--resume" in argv and "--snapshots=150,225" in argv  # the same versions as the run it continues
     assert (s["state"], s["error"], s["can_resume"], s["started"], s["finished"]) == ("running", None, False, 1000.0, None)
     assert rig.manager.status()["state"] == "running"  # the old final line is not read as this run's
 
@@ -1766,3 +1767,13 @@ def test_a_run_with_chosen_clips_names_them_for_the_worker_and_a_full_run_forget
     rig.manager.status(voice)
     rig.manager.start(voice)  # a new run without a limit uses every clip
     assert not selected.exists()
+
+
+def test_versions_to_compare_are_kept_at_half_and_three_quarters_of_a_run():
+    from aivoice.training import snapshot_epochs
+
+    assert snapshot_epochs(200) == [100, 150]
+    assert snapshot_epochs(300) == [150, 225]
+    assert snapshot_epochs(71) == [35, 55]
+    assert snapshot_epochs(50) == []  # too short to compare
+    assert all(e % 5 == 0 for n in range(60, 500, 7) for e in snapshot_epochs(n))

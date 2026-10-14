@@ -22,6 +22,13 @@ const STAGE_NAMES: Record<TrainingStage, string> = {
 };
 
 /** Rough wall-clock time for a run, rounded up to the next 5 minutes. */
+/** The earlier epochs a run also keeps a version of the voice at (as backend/aivoice/training.py snapshot_epochs). */
+export function snapshotEpochs(epochs: number): number[] {
+  if (epochs < 60) return [];
+  const marks = new Set([0.5, 0.75].map((f) => Math.round((epochs * f) / 5) * 5));
+  return [...marks].filter((e) => e > 0 && e < epochs).sort((a, b) => a - b);
+}
+
 /** Time limits offered for a quick run, in minutes. */
 const TIME_LIMITS = [10, 20, 30, 60, 120];
 
@@ -303,6 +310,15 @@ export function TrainPanel({ voice, active, onModelReady, onStarted = () => {} }
             </label>
           </details>
           {limit === 0 && <p>Rough time: <strong>{estimate(epochs, voice.minutes)}</strong></p>}
+          {(() => {
+            const kept = snapshotEpochs(limit === 0 ? epochs : (plan?.epochs ?? 0));
+            return kept.length > 0 && (limit === 0 || plan !== null) ? (
+              <p className="hint">
+                Also keeps the voice as it was at epochs {kept.join(" and ")}, listed on the Live tab as "{voice.name} (epoch{" "}
+                {kept[0]})" and so on, so you can compare them by ear and keep the one that sounds best.
+              </p>
+            ) : null;
+          })()}
           <div className="actions">
             {stopped && status.can_resume && (
               <button disabled={busy} onClick={() => start(true, null)}>Resume</button>

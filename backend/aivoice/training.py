@@ -80,6 +80,15 @@ _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _NEW_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 
 
+def snapshot_epochs(epochs: int) -> list[int]:
+    """The earlier epochs at which a run also keeps a version of the voice to compare by ear: at half and three
+    quarters of the run (multiples of the save interval). Runs too short to compare get none."""
+    if epochs < 60:
+        return []
+    marks = {round(epochs * f / SAVE_EVERY) * SAVE_EVERY for f in (0.5, 0.75)}
+    return sorted(e for e in marks if 0 < e < epochs)
+
+
 class TrainingError(ValueError):
     pass
 
@@ -886,6 +895,7 @@ class TrainingManager:
             argv = [str(self._trainer / ".venv" / "Scripts" / "python.exe"), "-P", str(self._worker),
                     "--voice-dir", str(voice_dir), "--job-dir", str(job_dir), "--experiment", experiment,
                     "--epochs", str(epochs), "--batch-size", str(batch_size), "--save-every", str(SAVE_EVERY),
+                    f"--snapshots={','.join(str(e) for e in snapshot_epochs(epochs))}",
                     *(["--resume"] if resume else []), "--parent-pid", str(os.getpid()),
                     f"--name={voice.name}"]  # one argument, so a name starting with "-" is still a name
             handle = self._launch(argv, job_dir / OUTPUT_LOG)

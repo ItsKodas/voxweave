@@ -473,3 +473,18 @@ describe("TrainPanel in the installed app", () => {
     expect(trainingApi.environment).not.toHaveBeenCalled();
   });
 });
+
+describe("versions to compare", () => {
+  it("keeps versions at half and three quarters of the run, as the backend does", async () => {
+    const { snapshotEpochs } = await import("./TrainPanel");
+    expect(snapshotEpochs(200)).toEqual([100, 150]);
+    expect(snapshotEpochs(300)).toEqual([150, 225]);
+    expect(snapshotEpochs(71)).toEqual([35, 55]);
+    expect(snapshotEpochs(50)).toEqual([]);
+  });
+
+  it("says which versions a run keeps", async () => {
+    panel();
+    expect(await screen.findByText(/Also keeps the voice as it was at epochs 100 and 150/)).toBeInTheDocument();
+  });
+});

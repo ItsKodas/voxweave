@@ -89,3 +89,26 @@ def test_damaged_library_folders_never_raise(tmp_path):
     bad = add_library_voice(tmp_path, "Bad", None)
     (tmp_path / "voices" / bad.id / "models" / "rvc" / "voice.json").write_text("{nope")
     assert [v.id for v in list_voices(tmp_path)] == [good.id]
+
+
+def test_versions_kept_at_earlier_epochs_are_listed_after_their_voice_and_share_its_index(tmp_path):
+    import json
+
+    from aivoice.library import Library
+    from aivoice.pretrained import base_voice_id
+
+    library = Library(tmp_path)
+    voice = library.create("Poki")
+    models = tmp_path / "voices" / voice.id / "models"
+    for folder, with_index in (("rvc", True), ("rvc-e150", False), ("rvc-e100", False), ("rvc-ebad", False)):
+        (models / folder).mkdir(parents=True)
+        (models / folder / "model.onnx").write_bytes(b"x")
+        (models / folder / "voice.json").write_text(json.dumps({"name": "Poki", "sample_rate": 40000}))
+        if with_index:
+            (models / folder / "model.index").write_bytes(b"i")
+    voices = list_voices(tmp_path)
+    assert [(v.id, v.name) for v in voices] == [
+        (voice.id, "Poki"), (f"{voice.id}@e100", "Poki (epoch 100)"), (f"{voice.id}@e150", "Poki (epoch 150)")]
+    assert all(v.index_path == models / "rvc" / "model.index" for v in voices)
+    assert voices[1].model_path == models / "rvc-e100" / "model.onnx"
+    assert base_voice_id(f"{voice.id}@e100") == voice.id and base_voice_id(voice.id) == voice.id

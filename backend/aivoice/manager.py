@@ -12,7 +12,7 @@ from aivoice.engine_guard import GuardedEngine
 from aivoice.devices import Device, get_device
 from aivoice.live import LiveSession
 from aivoice.presets import resolve
-from aivoice.pretrained import PretrainedVoice, list_voices, vec_model_path
+from aivoice.pretrained import PretrainedVoice, base_voice_id, list_voices, vec_model_path
 from aivoice.processor import StreamProcessor
 from aivoice.router import Router
 
@@ -148,7 +148,7 @@ class LiveManager:
             if voice is not None and self._calibration is not None and hasattr(engine, "pitch_range"):
                 # Pitches the model never heard are moved to the nearest one its training voice used.
                 try:
-                    engine.pitch_range = self._calibration.voice_pitch_range(voice.id)
+                    engine.pitch_range = self._calibration.voice_pitch_range(base_voice_id(voice.id))
                 except Exception:  # noqa: BLE001 - without a range the engine works as before
                     engine.pitch_range = None
             if cfg.use_calibration and self._calibration is not None:

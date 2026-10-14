@@ -500,6 +500,8 @@ class Job:
             _unlink(self.exp / record)
         _remove_tree(self.exp)
         _unlink(self.weights)
+        for path in self._snapshot_weights().values():
+            _unlink(path)
         for link in self._index_links():
             _unlink(link)
 
@@ -683,7 +685,7 @@ class Job:
             self.python, "train/train.py", "-e", self.experiment, "-sr", SAMPLE_RATE, "-f0", "1",
             "-bs", str(args.batch_size), "-g", "0", "-te", str(args.epochs), "-se", str(args.save_every),
             "-pg", "assets/pretrained_v2/f0G40k.pth", "-pd", "assets/pretrained_v2/f0D40k.pth",
-            "-l", "1", "-c", "0", "-sw", "0", "-v", "v2"], on_line, should_stop)
+            "-l", "1", "-c", "0", "-sw", "1" if self._snapshots() else "0", "-v", "v2"], on_line, should_stop)
         if state.not_resumed:
             self._log("worker", "the trainer did not load the saved state (%d of 2 checkpoint files loaded)"
                       % state.resumed_lines)
@@ -710,8 +712,39 @@ class Job:
             return float(CANCEL_GRACE_SECONDS)
         return float(min(MAX_CANCEL_GRACE_SECONDS, max(CANCEL_GRACE_SECONDS, 2 * mean)))
 
+    def _snapshots(self):
+        """The epochs at which a version of the voice is kept to compare (before the last epoch, a multiple of the
+        save interval, since the trainer writes its small weight files only when it saves)."""
+        wanted = set()
+        for part in str(getattr(self.args, "snapshots", "") or "").split(","):
+            part = part.strip()
+            if part.isdigit():
+                epoch = int(part)
+                if 0 < epoch < self.args.epochs and epoch % self.args.save_every == 0:
+                    wanted.add(epoch)
+        return sorted(wanted)
+
+    def _snapshot_weights(self):
+        """{epoch: path} of the small weight files the trainer wrote for this experiment ("<exp>_e100_s5000.pth")."""
+        found = {}
+        pattern = re.compile(re.escape(self.experiment) + r"_e(\d+)_s\d+\.pth$")
+        for path in self.weights.parent.glob(self.experiment + "_e*_s*.pth"):
+            match = pattern.match(path.name)
+            if match:
+                found[int(match.group(1))] = path
+        return found
+
+    def _prune_snapshot_weights(self):
+        """The trainer writes a weight file at every save; only the ones for the chosen epochs are kept."""
+        keep = set(self._snapshots())
+        for epoch, path in self._snapshot_weights().items():
+            if epoch not in keep:
+                _unlink(path)
+
     def _epoch_done(self, epoch, state):
         saved, state.saving = state.saving or epoch % self.args.save_every == 0, False
+        if saved:
+            self._prune_snapshot_weights()
         self.epoch_times.append(self.clock())
         self.epochs_done = max(self.epochs_done, min(epoch, self.args.epochs))
         mean = self._mean_epoch_seconds()
@@ -855,7 +888,46 @@ class Job:
         except BaseException:
             shutil.rmtree(new, ignore_errors=True)  # whatever went wrong, the model in use was not touched
             raise
+        self._export_snapshots(models)
         self._emit(1.0, "The model is exported")
+
+    def _export_snapshots(self, models):
+        """The versions of the voice kept at earlier epochs, each in models/rvc-e<epoch>/ beside the final one, for the
+        person to compare by ear. They share the final model's search index. A version that cannot be exported is
+        left out with a line in the log: the final model is what the run is for."""
+        for stale in models.glob("rvc-e*"):  # versions from an earlier run would be mistaken for this run's
+            if stale.is_dir() and not self._move_to_trash(stale):
+                _remove_tree(stale)
+        weights = self._snapshot_weights()
+        for epoch in self._snapshots():
+            path = weights.get(epoch)
+            if path is None:
+                self._log("worker", "no weights were saved at epoch %d, so that version is left out" % epoch)
+                continue
+            target, new = models / ("rvc-e%d" % epoch), models / ("rvc-e%d.new" % epoch)
+            _remove_tree(new)
+            new.mkdir(parents=True)
+            env = dict(os.environ)
+            env.pop("__PYVENV_LAUNCHER__", None)
+            env.update({"AIVOICE_EXPORT_DIR": str(new), "PYTHONDONTWRITEBYTECODE": "1", "PYTHONIOENCODING": "utf-8",
+                        "PYTHONUNBUFFERED": "1"})
+            self._emit(1.0, "Exporting the version at epoch %d" % epoch)
+            try:
+                code = self._run_simple([
+                    TOOLS_DIR / ".rvc" / "venv" / "Scripts" / "python.exe", TOOLS_DIR / "export_rvc_onnx.py",
+                    path, self.experiment, "--name=%s (epoch %d)" % (self.args.name or self.experiment, epoch)],
+                    cwd=TOOLS_DIR.parent, env=env)
+                size = (new / "model.onnx").stat().st_size if (new / "model.onnx").exists() else 0
+                info = read_json(new / "voice.json")
+                if code != 0 or size <= MIN_MODEL_BYTES or not isinstance(info, dict):
+                    raise OSError("the export did not produce a usable model (exit code %s)" % code)
+                os.replace(new, target)
+                self._log("worker", "kept the version at epoch %d in %s" % (epoch, target))
+            except OSError as exc:
+                shutil.rmtree(new, ignore_errors=True)
+                self._log("worker", "the version at epoch %d could not be exported: %s" % (epoch, exc))
+            finally:
+                _unlink(path)
 
     @staticmethod
     def _check_export(folder):
@@ -970,6 +1042,8 @@ def parse_args(argv=None):
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--save-every", type=int, default=5)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--snapshots", default="",
+                        help="epochs at which to keep an extra version of the voice to compare, e.g. 100,150")
     parser.add_argument("--parent-pid", type=int, default=None)
     parser.add_argument("--name", default=None, help="the display name written to voice.json")
     return parser.parse_args(argv)
