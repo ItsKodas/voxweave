@@ -376,6 +376,7 @@ class TrainingManager:
         self._unavailable = unavailable
         self._voices = Path(data) / "voices"
         self._library = library
+        self.data, self.library = Path(data), library  # for planning a run to a time limit (aivoice.quicktrain)
         self._trainer = Path(trainer_root)
         self._worker = self._trainer / "worker.py"
         self._tools = processes or ProcessTools()
@@ -806,7 +807,7 @@ class TrainingManager:
             return _idle(voice_id if isinstance(voice_id, str) else None)
 
     def start(self, voice_id: str, epochs: int | None = None, batch_size: int | None = None,
-              resume: bool = False) -> dict:
+              resume: bool = False, clips: list[str] | None = None) -> dict:
         """Starts training (200 epochs, batch size 8 unless given). A resume keeps the stopped run's settings
         unless epochs is given; its batch size cannot change, because the prepared data depends on it."""
         if self._unavailable is not None:
@@ -847,7 +848,7 @@ class TrainingManager:
             with self._lock:
                 if self._start_cancelled:
                     raise TrainingError(CANCELLED_BEFORE_START)
-                return self._start_worker(voice, epochs, batch_size, bool(resume))
+                return self._start_worker(voice, epochs, batch_size, bool(resume), clips)
         except TrainingError:
             self._service()  # outside the lock: stops a worker whose start could not be completed
             raise
@@ -856,7 +857,7 @@ class TrainingManager:
                 self._starting = None
                 self._start_cancelled = False
 
-    def _start_worker(self, voice, epochs: int, batch_size: int, resume: bool) -> dict:
+    def _start_worker(self, voice, epochs: int, batch_size: int, resume: bool, clips: list[str] | None = None) -> dict:
         voice_dir = self._voices / voice.id
         job_dir = voice_dir / "training"
         experiment = f"voice-{voice.id}"
@@ -867,6 +868,14 @@ class TrainingManager:
                                  "batch_size": batch_size, "state": "running", "started": self._now(),
                                  "finished": None, "worker_pid": None, "error": None, "resumable": None})
             job_dir.mkdir(exist_ok=True)  # not parents: a voice deleted a moment ago is never recreated
+            if not resume:
+                # A run with a time limit names its clips; a new run without one uses them all. A resume keeps
+                # whatever the run it continues had.
+                selected = job_dir / "selected-clips.json"
+                if clips:
+                    atomic_json(selected, sorted(str(c) for c in clips))
+                else:
+                    selected.unlink(missing_ok=True)
             if resume:
                 job.offset = progress_path.stat().st_size if progress_path.exists() else 0  # the worker appends
                 if previous is not None:  # the bar continues from where the stopped run was

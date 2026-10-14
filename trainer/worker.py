@@ -70,6 +70,7 @@ BACKUP_SKIPS_WORTH_A_WARNING = 3
 ETA_WINDOW = 10
 TAIL_LINES = 20
 MIN_MODEL_BYTES = 1024 * 1024
+SELECTED_CLIPS = "selected-clips.json"  # in the job folder: the clips a run with a time limit uses
 SAFE_EXPERIMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 
 CLIPS_CHANGED = ("The clips changed since this training run started. Start a new training run. "
@@ -438,6 +439,14 @@ class Job:
         clips = sorted(p for p in clips_dir.glob("*.orig.wav") if p.is_file()) if clips_dir.is_dir() else []
         if not clips:
             raise JobError("This voice has no recorded clips to train on.", resumable=False)
+        # A run with a time limit trains on the clips the app chose for it (written by the app before the start).
+        selected = read_json(self.job_dir / SELECTED_CLIPS)
+        if isinstance(selected, list):
+            names = {str(n) for n in selected}
+            clips = [c for c in clips if c.name in names]
+            if not clips:
+                raise JobError("None of the clips chosen for this run are there any more. Start a new training run.",
+                               resumable=False)
         record = {"fingerprint": self._fingerprint(clips), "clips": len(clips), "settings": {
             "batch_size": args.batch_size, "sample_rate": SAMPLE_RATE, "version": "v2", "pitch": True}}
         if args.resume:

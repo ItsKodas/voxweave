@@ -396,3 +396,26 @@ def test_a_failing_report_is_what_is_known_while_live_mode_runs(s):
     assert s.client.post("/live/start", json=START).status_code == 200
     report = s.client.get("/training/environment").json()
     assert report == {**FAIL, "ready": False, "checked_while_live": True} and s.rig.verify_calls == [False]
+
+
+def test_a_time_limited_run_is_planned_and_started_with_the_chosen_clips_and_epochs(s, monkeypatch):
+    import aivoice.quicktrain as quicktrain
+
+    chosen = {"clips": ["0001.orig.wav"], "epochs": 77, "audio_minutes": 5.0, "available_minutes": 9.0,
+              "estimated_minutes": 10.0, "seconds_per_slice_epoch": 0.05, "clip_count": 1}
+    asked = []
+    monkeypatch.setattr(quicktrain, "plan_for", lambda data, library, voice_id, minutes: asked.append(minutes) or chosen)
+    assert s.client.get(f"/training/plan?voice_id={s.voice}&minutes=10").json()["epochs"] == 77
+    res = s.start_training(minutes=10)
+    assert res.status_code == 200
+    job = s.data / "voices" / s.voice / "training"
+    assert (job / "selected-clips.json").read_text().count("0001.orig.wav") == 1
+    assert json.loads((job / "job.json").read_text())["epochs"] == 77
+    assert asked == [10.0, 10.0]
+
+
+def test_a_time_limit_that_cannot_work_is_refused_before_anything_starts(s):
+    res = s.start_training(minutes=10)  # this voice's clip has no audio file: no usable audio
+    assert res.status_code == 400 and "usable audio" in res.json()["detail"]
+    assert s.start_training(minutes="ten").status_code == 400
+    assert s.client.get("/training/status").json()["state"] == "idle"

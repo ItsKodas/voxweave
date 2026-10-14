@@ -1833,3 +1833,24 @@ def test_three_skipped_backups_in_a_row_are_a_warning_in_the_log(rig, monkeypatc
     assert len(skipped) == 5
     assert warnings == [skipped[2] + 1], "once, after the third skip in a row; a good backup starts the count again"
     assert "3 checkpoint backups in a row" in lines[warnings[0]]
+
+
+def test_a_run_with_chosen_clips_trains_on_only_those(rig):
+    (rig.job).mkdir(parents=True, exist_ok=True)
+    (rig.job / "selected-clips.json").write_text(json.dumps(["0001.orig.wav", "0003.orig.wav"]))
+    seen = {}
+
+    def preprocess(c):
+        seen["staged"] = sorted(os.listdir(c.argv[2]))
+        return FakeRunner.preprocess(rig.runner, c)
+
+    rig.runner.stages["preprocess"] = preprocess
+    assert rig.run() == 0
+    assert seen["staged"] == ["0001.orig.wav", "0003.orig.wav"]
+
+
+def test_chosen_clips_that_are_all_gone_stop_the_run(rig):
+    (rig.job).mkdir(parents=True, exist_ok=True)
+    (rig.job / "selected-clips.json").write_text(json.dumps(["0099.orig.wav"]))
+    assert rig.run() == 1
+    assert "None of the clips chosen" in rig.final()["error"]

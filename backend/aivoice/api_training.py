@@ -16,6 +16,8 @@ class TrainBody(BaseModel):
     epochs: object = None
     batch_size: object = None
     resume: bool = False
+    # Train to a time limit: the best clips and the epochs that fit in this many minutes (see aivoice.quicktrain).
+    minutes: object = None
 
 
 def training_router(training: TrainingManager, studio: Studio | None, live_running: Callable[[], bool],
@@ -57,6 +59,13 @@ def training_router(training: TrainingManager, studio: Studio | None, live_runni
             return {**training.environment(probe=False), "checked_while_speaking": True}
         return training.environment(refresh)
 
+    @router.get("/plan")
+    def time_plan(voice_id: str, minutes: float) -> dict:
+        """What a run limited to this many minutes would train on: how much of the best audio, and how many epochs."""
+        from aivoice import quicktrain
+
+        return quicktrain.plan_for(training.data, training.library, voice_id, minutes)
+
     @router.post("/start")
     def start(body: TrainBody) -> dict:
         if not training.running:
@@ -71,6 +80,15 @@ def training_router(training: TrainingManager, studio: Studio | None, live_runni
             if not report["ok"] and not report.get("unknown"):
                 failing = "; ".join(c["message"] for c in report["checks"] if not c["ok"])
                 raise ValueError(f"Training is not set up: {failing}")
+        epochs, clips = body.epochs, None
+        if body.minutes is not None and not body.resume:
+            # Worked out before any lock: scoring a voice's clips the first time reads every one of them.
+            from aivoice import quicktrain
+
+            if isinstance(body.minutes, bool) or not isinstance(body.minutes, (int, float)):
+                raise ValueError("The time limit must be a number of minutes")
+            chosen = quicktrain.plan_for(training.data, training.library, body.voice_id, float(body.minutes))
+            epochs, clips = chosen["epochs"], chosen["clips"]
         # The text-to-speech worker holds GPU memory even when idle, so it is ended first. Ending a process can
         # take seconds and must not happen under the audio lock; instead the lock is taken twice, and in between
         # `training_starting` keeps anything from being spoken (which would load the worker again).
@@ -85,7 +103,7 @@ def training_router(training: TrainingManager, studio: Studio | None, live_runni
             with exclusive:
                 refuse_if_busy()  # live mode or a recording may have started meanwhile; speech cannot have
                 with voices_lock:  # so a delete of this voice cannot slip in between the check and the start
-                    return training.start(body.voice_id, body.epochs, body.batch_size, body.resume)
+                    return training.start(body.voice_id, epochs, body.batch_size, body.resume, clips)
         finally:
             training_starting.clear()
 

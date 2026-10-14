@@ -1749,3 +1749,20 @@ def test_the_cancel_timeout_follows_the_wait_the_worker_announces(rig, announced
     assert rig.manager.status()["state"] == "cancelling" and rig.handles[0].kills == 0
     rig.clock += 1
     assert rig.manager.status()["state"] == "cancelled" and rig.handles[0].kills == 1
+
+
+def test_a_run_with_chosen_clips_names_them_for_the_worker_and_a_full_run_forgets_them(rig):
+    voice = rig.voice()
+    rig.manager.start(voice, epochs=50, clips=["0001.orig.wav", "0007.orig.wav"])
+    selected = rig.job_dir(voice) / "selected-clips.json"
+    assert json.loads(selected.read_text()) == ["0001.orig.wav", "0007.orig.wav"]
+    assert rig.record(voice)["epochs"] == 50
+    rig.finish(voice, 1, error="stopped", percent=40.0)
+    rig.checkpoint(voice)
+    rig.manager.status(voice)
+    rig.manager.start(voice, resume=True)  # a resume keeps the chosen clips
+    assert selected.exists()
+    rig.finish(voice, 1, error="stopped again", percent=50.0)
+    rig.manager.status(voice)
+    rig.manager.start(voice)  # a new run without a limit uses every clip
+    assert not selected.exists()
