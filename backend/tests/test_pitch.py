@@ -85,3 +85,49 @@ def test_consonants_keep_their_features_where_there_is_no_pitch():
     assert out[0, 0].tolist() == [1, 1, 1] and out[0, 2].tolist() == [1, 1, 1]  # voiced: the index's result
     assert np.allclose(out[0, 1], 0.33) and np.allclose(out[0, 3], 0.33)  # unvoiced: mostly the original
     assert protect_consonants(phone, phone0, pitchf, 0.5) is phone  # 0.5 or more protects nothing
+
+
+SR16 = 16000
+
+
+def tone(seconds, hz=110.0, amp=0.3):
+    t = np.arange(int(seconds * SR16)) / SR16
+    return (amp * sum(np.sin(2 * np.pi * hz * k * t) / k for k in range(1, 6))).astype(np.float32)
+
+
+def hiss(seconds, amp=0.1):
+    noise = np.random.default_rng(0).standard_normal(int(seconds * SR16))
+    return (amp * np.diff(np.diff(noise, prepend=0), prepend=0)).astype(np.float32)  # mostly high frequencies
+
+
+def test_voice_like_frames_tells_voice_from_hiss_and_silence():
+    from aivoice.engines.pitch import voice_like_frames
+
+    audio = np.concatenate([tone(0.5), hiss(0.5), np.zeros(8000, np.float32)])
+    flags = voice_like_frames(audio, len(audio) // 160)
+    assert flags[5:45].mean() > 0.9  # the tone
+    assert flags[55:95].mean() < 0.1  # the hiss, like an "s"
+    assert flags[105:145].mean() < 0.1  # silence
+
+
+def test_creak_where_the_tracker_lost_the_pitch_holds_the_last_good_pitch():
+    from aivoice.engines.pitch import repair_creak
+
+    f0 = np.array([110.0] * 20 + [0.0] * 10 + [50.0] * 5 + [105.0] * 5, np.float32)
+    voice_like = np.ones(len(f0), bool)
+    out = repair_creak(f0, voice_like)
+    assert np.all(out[20:35] == 110.0)  # lost and far-too-low frames held at the last good pitch
+    assert np.all(out[35:] == 105.0)
+
+
+def test_consonants_pauses_and_long_stretches_are_left_alone():
+    from aivoice.engines.pitch import repair_creak
+
+    f0 = np.array([110.0] * 20 + [0.0] * 10 + [110.0] * 10, np.float32)
+    hissing = np.ones(len(f0), bool)
+    hissing[20:30] = False  # an "s": not voice-like
+    assert np.all(repair_creak(f0, hissing)[20:30] == 0)
+    long_gap = np.array([110.0] * 20 + [0.0] * 60, np.float32)
+    out = repair_creak(long_gap, np.ones(len(long_gap), bool), max_frames=40)
+    assert np.all(out[20:60] == 110.0) and np.all(out[60:] == 0)  # held for 0.4 s, no longer
+    assert not repair_creak(np.zeros(10, np.float32), np.ones(10, bool)).any()  # nothing good to hold

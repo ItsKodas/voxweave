@@ -100,3 +100,59 @@ def fit_to_range(f0: np.ndarray, low: float, high: float) -> np.ndarray:
     v[below] = low * (v[below] / low) ** 0.1
     f0[voiced] = v.astype(np.float32)
     return f0
+
+
+# ---- creak at the end of long sentences
+
+CREAK_MAX_FRAMES = 40  # held for up to 0.4 s; longer stretches are left as they are
+LOW_BAND_HZ = 1000.0
+VOICED_LOW_SHARE = 0.6  # a frame with at least this share of its energy below 1 kHz sounds like voice, not a hiss
+LOUD_WITHIN_DB = 30.0  # and is within this many dB of the loud parts of the window
+TOO_LOW = 0.7  # a pitch below 70 percent of the speaker's recent pitch is creak or an octave error
+
+
+def voice_like_frames(audio16k: np.ndarray, frames: int) -> np.ndarray:
+    """Per 10 ms frame: whether the sound is voice-like (loud enough, energy mostly low) rather than silence or a
+    hissing consonant. Resized to `frames`."""
+    x = np.asarray(audio16k, dtype=np.float32)
+    n = 320
+    count = max(1, len(x) // 160)
+    padded = np.pad(x, (n // 2, n // 2 + 160))
+    index = np.arange(n)[None, :] + 160 * np.arange(count)[:, None]
+    spectrum = np.abs(np.fft.rfft(padded[index] * np.hanning(n).astype(np.float32), axis=1)) ** 2
+    total = spectrum.sum(axis=1) + 1e-12
+    low = spectrum[:, : int(LOW_BAND_HZ / 8000.0 * spectrum.shape[1])].sum(axis=1)
+    level = 10.0 * np.log10(total)
+    loud = level > np.percentile(level, 90) - LOUD_WITHIN_DB
+    flags = loud & (low / total >= VOICED_LOW_SHARE)
+    if len(flags) == frames:
+        return flags
+    return flags[np.round(np.linspace(0, len(flags) - 1, frames)).astype(int)]
+
+
+def repair_creak(f0: np.ndarray, voice_like: np.ndarray, max_frames: int = CREAK_MAX_FRAMES) -> np.ndarray:
+    """Where the sound is plainly voice but the tracker found no pitch, or a pitch far below the speaker's recent
+    one (creaky voice when breath runs out, or an octave error), the last good pitch is held for up to max_frames
+    instead of the model getting "no pitch" or a pitch that jumps down an octave, which is what sounds robotic."""
+    f0 = np.asarray(f0, dtype=np.float32).copy()
+    voice_like = np.asarray(voice_like, dtype=bool)
+    good = f0 > 0
+    if good.sum() < 5:
+        return f0
+    recent: list[float] = []
+    held = 0
+    last_good = 0.0
+    for i in range(len(f0)):
+        reference = float(np.median(recent)) if recent else 0.0
+        bad = voice_like[i] and (f0[i] <= 0 or (reference > 0 and f0[i] < TOO_LOW * reference))
+        if bad and last_good > 0 and held < max_frames:
+            f0[i] = last_good
+            held += 1
+            continue
+        if f0[i] > 0 and not bad:
+            last_good = float(f0[i])
+            recent.append(last_good)
+            if len(recent) > 50:
+                recent.pop(0)
+        held = 0 if f0[i] > 0 else held
+    return f0

@@ -5,7 +5,7 @@ import numpy as np
 import soxr
 
 from aivoice.engines.f0 import extract_f0, shift_f0, to_coarse
-from aivoice.engines.pitch import fill_gaps, fit_to_range
+from aivoice.engines.pitch import fill_gaps, fit_to_range, repair_creak, voice_like_frames
 from aivoice.presets import LiveParams
 
 
@@ -104,6 +104,7 @@ class RvcEngine:
         phone = np.repeat(feats, 2, axis=0)[None].astype(np.float32)
         frames = phone.shape[1]
         pitchf = fill_gaps(extract_f0(wav16, params.f0_method, frames, rmvpe=self._rmvpe))
+        pitchf = repair_creak(pitchf, voice_like_frames(wav16, frames))
         pitchf = shift_f0(pitchf, pitch_shift)
         if self.pitch_range is not None:
             pitchf = fit_to_range(pitchf, *self.pitch_range)
