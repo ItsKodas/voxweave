@@ -37,7 +37,15 @@ export type TrainingEnvironment = {
   /** Likewise, because a training run is active. */
   checked_while_training?: boolean;
 };
-export type StartTraining = { voice_id: string; epochs?: number; batch_size?: number; resume?: boolean };
+export type StartTraining = { voice_id: string; epochs?: number; batch_size?: number; resume?: boolean; minutes?: number };
+/** What a run limited to some minutes would train on (GET /training/plan). */
+export type TrainingPlan = {
+  clip_count: number;
+  audio_minutes: number;
+  available_minutes: number;
+  epochs: number;
+  estimated_minutes: number;
+};
 
 export const trainingApi = {
   /** With a voice id: that voice's latest job. Without: the running job, else the most recently finished one. */
@@ -45,6 +53,8 @@ export const trainingApi = {
     call<TrainingStatus>("GET", `/training/status${voiceId === undefined ? "" : `?voice_id=${encodeURIComponent(voiceId)}`}`),
   environment: (refresh = false) => call<TrainingEnvironment>("GET", `/training/environment${refresh ? "?refresh=true" : ""}`),
   start: (req: StartTraining) => call<TrainingStatus>("POST", "/training/start", req),
+  plan: (voiceId: string, minutes: number) =>
+    call<TrainingPlan>("GET", `/training/plan?voice_id=${encodeURIComponent(voiceId)}&minutes=${minutes}`),
   cancel: () => call<TrainingStatus>("POST", "/training/cancel"),
 };
 

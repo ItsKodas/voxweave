@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { installedApp } from "./setupApi";
 import { LibraryVoice } from "./studioApi";
-import { TrainingEnvironment, TrainingStage, TrainingStatus, isActive, trainingApi } from "./trainingApi";
+import { TrainingEnvironment, TrainingStage, TrainingStatus, isActive, trainingApi, TrainingPlan } from "./trainingApi";
 import { useTrainingStatus } from "./useTrainingStatus";
 
 export const MIN_TRAIN_MINUTES = 5;
@@ -22,6 +22,9 @@ const STAGE_NAMES: Record<TrainingStage, string> = {
 };
 
 /** Rough wall-clock time for a run, rounded up to the next 5 minutes. */
+/** Time limits offered for a quick run, in minutes. */
+const TIME_LIMITS = [10, 20, 30, 60, 120];
+
 export function estimate(epochs: number, minutesOfAudio: number): string {
   const minutes = (epochs * minutesOfAudio * SECONDS_PER_EPOCH_PER_MINUTE) / 60;
   return `About ${Math.max(5, Math.ceil(minutes / 5) * 5)} minutes`;
@@ -70,6 +73,23 @@ export function TrainPanel({ voice, active, onModelReady, onStarted = () => {} }
   const [envError, setEnvError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
   const [epochs, setEpochs] = useState(DEFAULT_EPOCHS);
+  // 0 trains on every clip for the chosen epochs; otherwise the run is planned to fit this many minutes.
+  const [limit, setLimit] = useState(0);
+  const [plan, setPlan] = useState<TrainingPlan | null>(null);
+  const [planError, setPlanError] = useState<string | null>(null);
+  useEffect(() => {
+    setPlan(null);
+    setPlanError(null);
+    if (limit === 0) return;
+    let stale = false;
+    trainingApi.plan(voice.id, limit).then(
+      (p) => !stale && setPlan(p),
+      (e: Error) => !stale && setPlanError(e.message),
+    );
+    return () => {
+      stale = true;
+    };
+  }, [limit, voice.id, voice.clips]);
   const [batch, setBatch] = useState(DEFAULT_BATCH);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -139,7 +159,9 @@ export function TrainPanel({ voice, active, onModelReady, onStarted = () => {} }
 
   const start = async (resume: boolean, confirmText: string | null) => {
     if (confirmText !== null && !window.confirm(confirmText)) return;
-    const started = await act(() => trainingApi.start(resume ? { voice_id: voice.id, resume: true } : { voice_id: voice.id, epochs, batch_size: batch, resume: false }));
+    const started = await act(() => trainingApi.start(resume ? { voice_id: voice.id, resume: true }
+      : limit > 0 ? { voice_id: voice.id, minutes: limit, batch_size: batch, resume: false }
+      : { voice_id: voice.id, epochs, batch_size: batch, resume: false }));
     if (started) onStarted();
   };
 
@@ -247,11 +269,30 @@ export function TrainPanel({ voice, active, onModelReady, onStarted = () => {} }
       {canStart && (
         <>
           <label>
-            Epochs
-            <select value={epochs} onChange={(e) => setEpochs(Number(e.target.value))}>
-              {EPOCH_CHOICES.map((n) => <option key={n} value={n}>{n}</option>)}
+            Train for
+            <select value={limit} onChange={(e) => setLimit(Number(e.target.value))}>
+              <option value={0}>All clips, a set number of epochs</option>
+              {TIME_LIMITS.map((m) => <option key={m} value={m}>{m < 60 ? `${m} minutes` : `${m / 60} hour${m > 60 ? "s" : ""}`}, best clips first</option>)}
             </select>
           </label>
+          {limit === 0 ? (
+            <label>
+              Epochs
+              <select value={epochs} onChange={(e) => setEpochs(Number(e.target.value))}>
+                {EPOCH_CHOICES.map((n) => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </label>
+          ) : planError ? (
+            <p role="alert" className="error">{planError}</p>
+          ) : plan === null ? (
+            <p className="hint">Picking the best clips...</p>
+          ) : (
+            <p className="hint">
+              Trains on the best {plan.audio_minutes} of {plan.available_minutes} minutes ({plan.clip_count} clips) for{" "}
+              {plan.epochs} epochs: about {Math.round(plan.estimated_minutes)} minutes. Clips are chosen for clear,
+              undistorted speech well above the background noise.
+            </p>
+          )}
           <details>
             <summary>Advanced</summary>
             <label>
@@ -261,7 +302,7 @@ export function TrainPanel({ voice, active, onModelReady, onStarted = () => {} }
               </select>
             </label>
           </details>
-          <p>Rough time: <strong>{estimate(epochs, voice.minutes)}</strong></p>
+          {limit === 0 && <p>Rough time: <strong>{estimate(epochs, voice.minutes)}</strong></p>}
           <div className="actions">
             {stopped && status.can_resume && (
               <button disabled={busy} onClick={() => start(true, null)}>Resume</button>

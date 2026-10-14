@@ -7,7 +7,7 @@ import { TrainingEnvironment, TrainingStatus } from "./trainingApi";
 
 vi.mock("./trainingApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./trainingApi")>()),
-  trainingApi: { status: vi.fn(), environment: vi.fn(), start: vi.fn(), cancel: vi.fn() },
+  trainingApi: { status: vi.fn(), environment: vi.fn(), start: vi.fn(), cancel: vi.fn(), plan: vi.fn() },
 }));
 import { trainingApi } from "./trainingApi";
 import { rememberMode, SetupState } from "./setupApi";
@@ -42,6 +42,25 @@ const panel = (voice = VOICE, onModelReady = vi.fn(), active = true, onStarted =
   render(<TrainPanel voice={voice} active={active} onModelReady={onModelReady} onStarted={onStarted} />);
 
 describe("TrainPanel before training", () => {
+  it("trains to a time limit: shows what the best clips and epochs would be and starts with the limit", async () => {
+    vi.mocked(trainingApi.plan).mockResolvedValue({ clip_count: 84, audio_minutes: 4.1, available_minutes: 6.8, epochs: 71, estimated_minutes: 10.0 });
+    panel();
+    const limit = await screen.findByLabelText("Train for");
+    await userEvent.selectOptions(limit, "10");
+    expect(trainingApi.plan).toHaveBeenCalledWith("v1", 10);
+    expect(await screen.findByText(/Trains on the best 4.1 of 6.8 minutes \(84 clips\) for 71 epochs: about 10 minutes/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Epochs")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Start training" }));
+    expect(trainingApi.start).toHaveBeenCalledWith({ voice_id: "v1", minutes: 10, batch_size: 8, resume: false });
+  });
+
+  it("says why a time limit cannot work", async () => {
+    vi.mocked(trainingApi.plan).mockRejectedValue(new Error("10 minutes is too short to train a usable voice. Allow at least 14 minutes."));
+    panel();
+    await userEvent.selectOptions(await screen.findByLabelText("Train for"), "10");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Allow at least 14 minutes");
+  });
+
   it("asks for more audio below 5 minutes and offers no Start", async () => {
     panel({ ...VOICE, minutes: 3.25 });
     expect(await screen.findByText("Record or import at least 5 minutes to train. You have 3.2.")).toBeInTheDocument();
