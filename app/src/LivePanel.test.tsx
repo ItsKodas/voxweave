@@ -580,3 +580,16 @@ describe("quality", () => {
     await waitFor(() => expect(screen.getByLabelText(/^Quality:/)).toHaveValue("6"));
   });
 });
+
+describe("the shelved feminized preview voice", () => {
+  it("is not offered in the voice list even though the backend still lists it", async () => {
+    vi.mocked(api.voices).mockResolvedValue([
+      { id: "demo", name: "Demo", has_index: true },
+      { id: "@feminize", name: "My voice, feminized (preview, no training)", has_index: false },
+    ]);
+    render(<LivePanel stats={IDLE} />);
+    await ready();
+    expect(screen.queryByRole("option", { name: /feminized/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Demo" })).toBeInTheDocument();
+  });
+});

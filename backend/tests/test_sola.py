@@ -64,7 +64,7 @@ def test_quality_levels_are_valid_settings_that_only_get_longer():
         if previous is not None:
             assert params.chunk_ms > previous.chunk_ms and params.context_ms >= previous.context_ms
         previous = params
-    assert QUALITY_LEVELS[1] == {"chunk_ms": 250, "context_ms": 800, "crossfade_ms": 50}  # the Balanced preset
+    assert {k: QUALITY_LEVELS[1][k] for k in ("chunk_ms", "context_ms", "crossfade_ms")} == {"chunk_ms": 250, "context_ms": 800, "crossfade_ms": 50}  # the Balanced timing
 
 
 def test_a_window_too_short_for_a_full_search_searches_what_it_has():
@@ -117,3 +117,55 @@ def test_every_quality_level_fits_its_output_buffer_whatever_the_conversion_time
 
 def test_the_old_fixed_two_seconds_was_too_little_for_long_chunks():
     assert simulate(6, SR * 2)[0] > 0
+
+
+class Echo:
+    """Returns its input, and records the noise position live mode gave it."""
+
+    def __init__(self):
+        self.noise_position = None
+        self.positions = []
+
+    def convert(self, audio, sample_rate, pitch_shift, params):
+        self.positions.append(self.noise_position)
+        return np.asarray(audio, np.float32)
+
+
+def test_lookahead_plays_audio_from_that_far_before_the_newest_input_and_loses_nothing():
+    params = resolve("balanced", {"lookahead_ms": 100})
+    p = StreamProcessor(Echo(), SR, params)
+    x = np.clip(np.random.default_rng(3).standard_normal(SR * 3) * 0.2, -0.9, 0.9).astype(np.float32)
+    y = np.concatenate([p.process(x[i:i + p.chunk]) for i in range(0, len(x) - p.chunk + 1, p.chunk)])
+    delay = p.crossfade + p.lookahead
+    skip = 3 * p.chunk  # the first chunks still crossfade out of the silence the window started with
+    assert np.allclose(y[delay + skip:], x[skip:len(y) - delay], atol=1e-5)
+
+
+def test_live_mode_tells_the_engine_where_each_window_starts():
+    params = resolve("balanced", {})
+    engine = Echo()
+    p = StreamProcessor(engine, SR, params)
+    for _ in range(3):
+        p.process(np.zeros(p.chunk, np.float32))
+    assert engine.positions == [p.chunk - p.window, 2 * p.chunk - p.window, 3 * p.chunk - p.window]
+
+
+def test_two_windows_covering_the_same_moment_draw_the_same_noise_for_it():
+    from aivoice.engines.rvc import RvcEngine
+
+    engine = RvcEngine.__new__(RvcEngine)
+    engine._noise = {}
+    engine.noise_position = 0
+    first = engine._noise_at(200, SR)
+    engine.noise_position = SR  # one second later: 100 frames on
+    second = engine._noise_at(200, SR)
+    assert np.array_equal(first[:, :, 100:], second[:, :, :100])
+    engine.noise_position = None
+    assert np.array_equal(engine._noise_at(50, SR), engine._noise_at(50, SR))  # text to speech: as before
+
+
+def test_a_lookahead_longer_than_the_context_is_refused():
+    import pytest
+
+    with pytest.raises(ValueError, match="lookahead_ms"):
+        resolve("balanced", {"context_ms": 50, "lookahead_ms": 100})

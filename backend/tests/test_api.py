@@ -261,4 +261,4 @@ def test_quality_levels_are_offered_fastest_first(tmp_path):
     client, _ = make_client(tmp_path)
     levels = client.get("/quality-levels").json()
     assert levels[0]["chunk_ms"] == 120 and levels[-1]["chunk_ms"] == 2000
-    assert all({"chunk_ms", "context_ms", "crossfade_ms"} == set(level) for level in levels)
+    assert all({"chunk_ms", "context_ms", "crossfade_ms", "lookahead_ms"} == set(level) for level in levels)

@@ -39,8 +39,11 @@ class StreamProcessor:
         self.chunk = sample_rate * params.chunk_ms // 1000
         self.crossfade = sample_rate * params.crossfade_ms // 1000
         self.window = sample_rate * params.context_ms // 1000 + self.chunk + self.crossfade
+        self.lookahead = sample_rate * params.lookahead_ms // 1000
         # The join may only move within audio the window really has before the newest chunk and crossfade.
-        self.search = min(int(sample_rate * SOLA_SEARCH_S), self.window - self.chunk - self.crossfade)
+        self.search = max(0, min(int(sample_rate * SOLA_SEARCH_S),
+                                 self.window - self.chunk - self.crossfade - self.lookahead))
+        self._consumed = 0  # samples of input taken in so far: where each window starts in time
         self.mode = "converted"
         self.pitch_shift = 0.0
         self.infer_ms = 0.0
@@ -67,10 +70,15 @@ class StreamProcessor:
             raise ValueError(f"expected {self.chunk} samples, got {len(block)}")
         incoming = np.zeros(self.chunk, dtype=np.float32) if self.mode == "muted" else block.astype(np.float32)
         self._input = np.concatenate([self._input[self.chunk :], incoming])
+        self._consumed += self.chunk
         if self.mode == "muted":
             return self._silence()
         start = time.perf_counter()
         try:
+            if hasattr(self.engine, "noise_position"):
+                # The engine draws its noise from one long sequence at the window's place in time, so two windows
+                # covering the same moment use the same noise for it, and agree about it at the join.
+                self.engine.noise_position = self._consumed - self.window
             out = self.engine.convert(self._input, self.sample_rate, self.pitch_shift, self.params)
             with np.errstate(over="ignore"):
                 out = np.asarray(out, dtype=np.float32)
@@ -85,7 +93,8 @@ class StreamProcessor:
             return np.zeros(self.chunk, dtype=np.float32)
         self._record_timing(start)
         self._failures = 0
-        candidate = out[-(self.chunk + self.crossfade + self.search) :]
+        end = len(out) - self.lookahead
+        candidate = out[end - (self.chunk + self.crossfade + self.search) : end]
         offset = sola_offset(self._tail, candidate, self.search)
         segment = candidate[offset : offset + self.chunk + self.crossfade]
         head = segment[: self.crossfade] * self._fade_in + self._tail * self._fade_out

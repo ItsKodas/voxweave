@@ -60,6 +60,10 @@ class RvcEngine:
         # The model's noise input, made once per length and reused: chunk after chunk the same input then gives
         # the same voice texture, instead of a slightly different one every few hundred milliseconds.
         self._noise: dict[int, np.ndarray] = {}
+        # Set by live mode before each conversion: where the window starts, in samples since live mode started.
+        # With it the noise comes from one long sequence at that place in time; without it (text to speech) the
+        # same noise is used for every window of a length.
+        self.noise_position: int | None = None
         # The training voice's usual pitch range (low, high) in Hz, when known: pitches outside it are moved inside.
         self.pitch_range: tuple[float, float] | None = None
         self._vec = factory(str(vec_path))
@@ -73,6 +77,15 @@ class RvcEngine:
 
             self._index = faiss.read_index(str(index_path))
             self._big_npy = self._index.reconstruct_n(0, self._index.ntotal)
+
+    _LONG_NOISE = np.random.default_rng(1234).standard_normal((1, 192, 6000)).astype(np.float32)  # 60 s, repeating
+
+    def _noise_at(self, frames: int, sample_rate: int) -> np.ndarray:
+        if self.noise_position is None:
+            return self._noise_for(frames)
+        start = (int(self.noise_position) * 100 // sample_rate) % self._LONG_NOISE.shape[2]  # 100 frames a second
+        index = (start + np.arange(frames)) % self._LONG_NOISE.shape[2]
+        return self._LONG_NOISE[:, :, index]
 
     def _noise_for(self, frames: int) -> np.ndarray:
         if frames not in self._noise:
@@ -102,7 +115,7 @@ class RvcEngine:
             "pitch": to_coarse(pitchf)[None],
             "pitchf": pitchf[None],
             "ds": np.array([0], dtype=np.int64),
-            "rnd": self._noise_for(frames),
+            "rnd": self._noise_at(frames, sample_rate),
         }
         out = np.asarray(self._net.run(None, feed)[0], dtype=np.float32).reshape(-1)
         if self._model_sr != sample_rate:

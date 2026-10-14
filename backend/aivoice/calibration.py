@@ -136,6 +136,15 @@ class GatedEngine:
         self._gate_db = gate_db
         self._gain = float(gain)
 
+    def __getattr__(self, name):  # anything else the engine offers (its noise position) is passed through
+        return getattr(self._inner, name)
+
+    def __setattr__(self, name, value):
+        if name in ("_inner", "_gate_db", "_gain"):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._inner, name, value)
+
     def convert(self, audio, sample_rate, pitch_shift, params):
         audio = np.asarray(audio, dtype=np.float32)
         if self._gate_db is not None:

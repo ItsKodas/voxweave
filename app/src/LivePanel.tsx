@@ -211,15 +211,18 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
     setMonitor(chosen.monitor);
   };
 
+  /** The backend still offers the feminized preview voice; the screen no longer shows it (the feature is shelved). */
+  const shown = (list: Voice[]) => list.filter((v) => v.id !== PREVIEW_VOICE_ID);
+
   const load = () => {
     setError(null);
     setLoadFailed(false);
     Promise.all([api.devices(), api.voices(), api.presets()])
       .then(([d, v, p]) => {
         applyDevices(d, chooseDevices(d));
-        setVoices(v);
+        setVoices(shown(v));
         setPresets(p);
-        setVoice(v[0]?.id ?? "");
+        setVoice(shown(v)[0]?.id ?? "");
         setLoaded(true);
       })
       .catch((e: Error) => {
@@ -239,8 +242,9 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
     api.voices().then(
       (list) => {
         if (stale) return;
-        setVoices(list);
-        setVoice((current) => (list.some((v) => v.id === current) ? current : (list[0]?.id ?? "")));
+        const visible = shown(list);
+        setVoices(visible);
+        setVoice((current) => (visible.some((v) => v.id === current) ? current : (visible[0]?.id ?? "")));
       },
       () => {}, // the list on screen is still valid; the next change reloads it again
     );
@@ -336,7 +340,7 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
       {shownError && <p role="alert" className="error">{shownError}</p>}
       {loadFailed && <button onClick={load}>Retry</button>}
       {speechActive && !stats.running && <p className="hint">Speech is playing. Stop it on the Speak tab to use live mode.</p>}
-      {loaded && voices.every((v) => v.id === PREVIEW_VOICE_ID) && <p className="hint">{installedApp()
+      {loaded && voices.length === 0 && <p className="hint">{installedApp()
         ? "No voice models installed. Bring in a trained voice as a voice pack: drop its .voxweave file on the Voices tab."
         : "No voice models installed. See the README to add one."}</p>}
 
