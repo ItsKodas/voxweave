@@ -5,6 +5,7 @@ import { RecordSession } from "./RecordSession";
 import { LibraryVoice } from "./studioApi";
 import { TrainPanel } from "./TrainPanel";
 import { VoicePackExport } from "./VoicePack";
+import { FeminizePanel } from "./FeminizePanel";
 
 export const USABLE_MINUTES = 10;
 export const GOOD_MINUTES = 30;
@@ -47,6 +48,8 @@ export function VoiceStudio({ voice, active, devicesVersion = 0, onChanged, onMo
       <ImportDrop voiceId={voice.id} active={active} onImported={changed} />
       <h3>Train</h3>
       <TrainPanel voice={voice} active={active} onModelReady={onModelReady} onStarted={onTrainingStarted} />
+      <h3>Feminize</h3>
+      <FeminizePanel voice={voice} onCreated={() => onChanged()} />
       <h3>Share</h3>
       <VoicePackExport voice={voice} />
       <h3>Clips</h3>

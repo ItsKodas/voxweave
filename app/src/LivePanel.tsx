@@ -4,6 +4,7 @@ import { CalibrationPanel } from "./CalibrationPanel";
 import { calibrationApi, VoiceProfile } from "./calibrationApi";
 import { installedApp } from "./setupApi";
 import { heardAs, micOptionLabel } from "./virtualMic";
+import { PREVIEW_VOICE_ID } from "./feminizeApi";
 
 const PRESET_LABELS: Record<string, string> = {
   low_latency: "Low latency",
@@ -97,6 +98,12 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
   // pitch moved by hand stays until the voice or the calibration changes.
   const calibrated = profile?.created ?? null;
   useEffect(() => {
+    if (voice === PREVIEW_VOICE_ID) {
+      // The preview takes its pitch from the feminize settings; the slider only adds to that.
+      setPitch(0);
+      setPitchNote("The feminize settings on a voice's page set this preview's pitch. The slider adds to it.");
+      return;
+    }
     if (calibrated === null || voice === "") {
       setPitchNote(null);
       return;
@@ -265,7 +272,7 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
       {shownError && <p role="alert" className="error">{shownError}</p>}
       {loadFailed && <button onClick={load}>Retry</button>}
       {speechActive && !stats.running && <p className="hint">Speech is playing. Stop it on the Speak tab to use live mode.</p>}
-      {loaded && voices.length === 0 && <p className="hint">{installedApp()
+      {loaded && voices.every((v) => v.id === PREVIEW_VOICE_ID) && <p className="hint">{installedApp()
         ? "No voice models installed. Bring in a trained voice as a voice pack: drop its .voxweave file on the Voices tab."
         : "No voice models installed. See the README to add one."}</p>}
 
