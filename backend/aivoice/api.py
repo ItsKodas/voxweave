@@ -160,6 +160,13 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
     def presets() -> dict:
         return {name: asdict(p) for name, p in PRESETS.items()}
 
+    @app.get("/quality-levels")
+    def quality_levels() -> list[dict]:
+        """The steps of the Live tab's quality slider, fastest first."""
+        from aivoice.presets import QUALITY_LEVELS
+
+        return QUALITY_LEVELS
+
     @app.get("/setup-check")
     def setup_check() -> list[dict]:
         return [asdict(c) for c in run_checks(data, list_devices(), providers)]

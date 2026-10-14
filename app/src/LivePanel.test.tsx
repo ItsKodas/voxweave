@@ -276,9 +276,9 @@ describe("LivePanel", () => {
     expect(screen.getByText(/312 ms/)).toBeInTheDocument();
   });
 
-  it("recommends a faster preset when the GPU cannot keep up", async () => {
+  it("recommends a lower quality level when the GPU cannot keep up", async () => {
     render(<LivePanel stats={{ ...IDLE, running: true, mode: "converted", suggest_faster: true }} />);
-    expect(await screen.findByText(/try a faster preset/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Move Quality further left/i)).toBeInTheDocument();
   });
 
   it("surfaces a session error from stats", async () => {
@@ -370,17 +370,18 @@ describe("LivePanel", () => {
       const { rerender } = render(<LivePanel stats={IDLE} voicesVersion={0} />);
       await ready();
       await userEvent.selectOptions(screen.getByLabelText("Voice"), "alpha");
-      await userEvent.selectOptions(screen.getByLabelText("Speed / quality"), "high_quality");
+      fireEvent.change(screen.getByLabelText(/^Quality:/), { target: { value: "4" } });
       const NEW = { id: "mine", name: "Mine", has_index: false };
       vi.mocked(api.voices).mockResolvedValue([DEMO, ALPHA, NEW]);
       const devicesCalls = vi.mocked(api.devices).mock.calls.length;
       rerender(<LivePanel stats={IDLE} voicesVersion={1} />);
       expect(await screen.findByRole("option", { name: "Mine" })).toBeInTheDocument();
       expect(screen.getByLabelText("Voice")).toHaveValue("alpha");
-      expect(screen.getByLabelText("Speed / quality")).toHaveValue("high_quality");
+      expect(screen.getByLabelText(/^Quality:/)).toHaveValue("4");
       expect(api.devices).toHaveBeenCalledTimes(devicesCalls); // only the voice list is reloaded
       await userEvent.click(screen.getByRole("button", { name: "Start" }));
-      expect(api.start).toHaveBeenCalledWith(expect.objectContaining({ voice: "alpha", preset: "high_quality" }));
+      expect(api.start).toHaveBeenCalledWith(expect.objectContaining({ voice: "alpha" }));
+      expect(vi.mocked(api.start).mock.calls[0][0].overrides).toMatchObject({ chunk_ms: 1000, context_ms: 3000, crossfade_ms: 120 });
     });
 
     it("falls back to the first voice when the selected one is gone", async () => {
@@ -556,5 +557,26 @@ describe("likeness", () => {
     render(<LivePanel stats={IDLE} />);
     await ready();
     await waitFor(() => expect(screen.getByLabelText(/^Likeness:/).closest("label")).toHaveTextContent("Likeness: 55%"));
+  });
+});
+
+describe("quality", () => {
+  beforeEach(() => localStorage.clear());
+
+  it("starts at level 2 (the old Balanced, nothing extra sent), goes up to two-second chunks and is remembered", async () => {
+    const { unmount } = render(<LivePanel stats={IDLE} />);
+    const start = await ready();
+    const slider = screen.getByLabelText(/^Quality:/);
+    expect(slider.closest("label")).toHaveTextContent("Quality: 2 of 7, about 0.6 s behind your voice");
+    await userEvent.click(start);
+    expect(vi.mocked(api.start).mock.calls[0][0].overrides).toBeNull();
+    fireEvent.change(slider, { target: { value: "6" } });
+    expect(slider.closest("label")).toHaveTextContent("Quality: 7 of 7, about 4.2 s behind your voice");
+    await userEvent.click(start);
+    expect(vi.mocked(api.start).mock.calls[1][0].overrides).toMatchObject({ chunk_ms: 2000, context_ms: 5000, crossfade_ms: 200 });
+    unmount();
+    render(<LivePanel stats={IDLE} />);
+    await ready();
+    await waitFor(() => expect(screen.getByLabelText(/^Quality:/)).toHaveValue("6"));
   });
 });

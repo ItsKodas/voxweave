@@ -10,6 +10,27 @@ class EngineFailure(RuntimeError):
     pass
 
 
+SOLA_SEARCH_S = 0.012  # how far a join may move to line the new chunk up with the end of the last one
+
+
+def sola_offset(tail: np.ndarray, candidate: np.ndarray, search: int) -> int:
+    """Where in candidate the stretch most like tail begins (0..search), by normalised cross-correlation.
+    `search` itself is where the join falls without any moving, and is the answer when there is nothing to match.
+
+    Each chunk is generated anew, so its waveform near the join is not in step with the end of the previous one;
+    a plain crossfade then partly cancels the two and the join is heard as a dip or a click. Moving the join by a
+    few milliseconds to where the waveforms agree (synchronous overlap-add, as RVC's own real-time tool does)
+    removes that."""
+    n = len(tail)
+    if n == 0 or search <= 0 or not np.any(tail):
+        return max(search, 0)
+    region = candidate[: n + search].astype(np.float64)
+    numerator = np.correlate(region, tail.astype(np.float64), mode="valid")
+    energy = np.convolve(region * region, np.ones(n), mode="valid")
+    score = numerator / np.sqrt(energy + 1e-8)
+    return int(np.argmax(score[: search + 1]))
+
+
 class StreamProcessor:
     def __init__(self, engine: VoiceEngine, sample_rate: int, params: LiveParams, max_failures: int = 5):
         self.engine = engine
@@ -18,6 +39,8 @@ class StreamProcessor:
         self.chunk = sample_rate * params.chunk_ms // 1000
         self.crossfade = sample_rate * params.crossfade_ms // 1000
         self.window = sample_rate * params.context_ms // 1000 + self.chunk + self.crossfade
+        # The join may only move within audio the window really has before the newest chunk and crossfade.
+        self.search = min(int(sample_rate * SOLA_SEARCH_S), self.window - self.chunk - self.crossfade)
         self.mode = "converted"
         self.pitch_shift = 0.0
         self.infer_ms = 0.0
@@ -62,7 +85,9 @@ class StreamProcessor:
             return np.zeros(self.chunk, dtype=np.float32)
         self._record_timing(start)
         self._failures = 0
-        segment = out[-(self.chunk + self.crossfade) :]
+        candidate = out[-(self.chunk + self.crossfade + self.search) :]
+        offset = sola_offset(self._tail, candidate, self.search)
+        segment = candidate[offset : offset + self.chunk + self.crossfade]
         head = segment[: self.crossfade] * self._fade_in + self._tail * self._fade_out
         emitted = np.concatenate([head, segment[self.crossfade : self.chunk]])
         self._tail = segment[self.chunk :].copy()

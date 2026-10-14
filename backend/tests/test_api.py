@@ -255,3 +255,10 @@ def test_foreign_origin_can_still_read(tmp_path):
     res = client.get("/health", headers={"Origin": "https://evil.example"})
     assert res.status_code == 200
     assert "access-control-allow-origin" not in res.headers
+
+
+def test_quality_levels_are_offered_fastest_first(tmp_path):
+    client, _ = make_client(tmp_path)
+    levels = client.get("/quality-levels").json()
+    assert levels[0]["chunk_ms"] == 120 and levels[-1]["chunk_ms"] == 2000
+    assert all({"chunk_ms", "context_ms", "crossfade_ms"} == set(level) for level in levels)

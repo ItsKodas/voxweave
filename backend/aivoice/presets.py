@@ -22,6 +22,19 @@ PRESETS: dict[str, LiveParams] = {
 }
 
 
+# The quality slider on the Live tab: longer chunks with more context before them give the model and the pitch
+# tracker more to go on, at the cost of delay. Level 1 is the fastest; the last level is the most the app allows.
+QUALITY_LEVELS: list[dict] = [
+    {"chunk_ms": 120, "context_ms": 400, "crossfade_ms": 30},
+    {"chunk_ms": 250, "context_ms": 800, "crossfade_ms": 50},
+    {"chunk_ms": 500, "context_ms": 1500, "crossfade_ms": 80},
+    {"chunk_ms": 750, "context_ms": 2500, "crossfade_ms": 100},
+    {"chunk_ms": 1000, "context_ms": 3000, "crossfade_ms": 120},
+    {"chunk_ms": 1500, "context_ms": 4000, "crossfade_ms": 150},
+    {"chunk_ms": 2000, "context_ms": 5000, "crossfade_ms": 200},
+]
+
+
 def _validate(p: LiveParams) -> None:
     if not 40 <= p.chunk_ms <= 2000:
         raise ValueError("chunk_ms must be between 40 and 2000")

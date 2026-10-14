@@ -6,11 +6,6 @@ import { installedApp } from "./setupApi";
 import { heardAs, micOptionLabel } from "./virtualMic";
 import { PREVIEW_VOICE_ID } from "./feminizeApi";
 
-const PRESET_LABELS: Record<string, string> = {
-  low_latency: "Low latency",
-  balanced: "Balanced",
-  high_quality: "High quality",
-};
 
 type Selection = { input: number | null; mic: number | null; monitor: number | null };
 
@@ -47,6 +42,34 @@ function chooseDevices(list: DeviceList, keep?: Selection & { hadVirtualMic: boo
 
 /** VB-Audio's own page for VB-CABLE, the virtual cable that gives the app a microphone other apps can choose. */
 const CABLE_PAGE = "https://vb-audio.com/Cable/";
+
+/**
+ * The steps of the quality slider, fastest first: the same as QUALITY_LEVELS in backend/aivoice/presets.py.
+ * Longer chunks with more context give the model and the pitch tracker more to go on, at the cost of delay.
+ */
+export const QUALITY_LEVELS = [
+  { chunk_ms: 120, context_ms: 400, crossfade_ms: 30 },
+  { chunk_ms: 250, context_ms: 800, crossfade_ms: 50 },
+  { chunk_ms: 500, context_ms: 1500, crossfade_ms: 80 },
+  { chunk_ms: 750, context_ms: 2500, crossfade_ms: 100 },
+  { chunk_ms: 1000, context_ms: 3000, crossfade_ms: 120 },
+  { chunk_ms: 1500, context_ms: 4000, crossfade_ms: 150 },
+  { chunk_ms: 2000, context_ms: 5000, crossfade_ms: 200 },
+];
+const QUALITY_KEY = "quality-level";
+function storedQuality(): number {
+  try {
+    const n = Number(localStorage.getItem(QUALITY_KEY));
+    return Number.isInteger(n) && n >= 0 && n < QUALITY_LEVELS.length && localStorage.getItem(QUALITY_KEY) !== null ? n : 1;
+  } catch {
+    return 1;
+  }
+}
+/** Roughly how far behind your voice the converted voice is at a level: a chunk is collected, then converted. */
+const delaySeconds = (level: number) => {
+  const q = QUALITY_LEVELS[level];
+  return (2 * q.chunk_ms + q.crossfade_ms) / 1000;
+};
 
 /** The likeness chosen for each voice is remembered on this computer; it never needs to reach the backend's disk. */
 const LIKENESS_KEY = (voiceId: string) => `likeness:${voiceId}`;
@@ -103,7 +126,8 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
   const [monitor, setMonitor] = useState<number | null>(null);
   const [monitorGain, setMonitorGain] = useState(1);
   const [voice, setVoice] = useState("");
-  const [preset, setPreset] = useState("balanced");
+  const [preset] = useState("balanced");
+  const [quality, setQuality] = useState(storedQuality);
   const [overrides, setOverrides] = useState<Partial<Params>>({});
   const [pitch, setPitch] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -113,6 +137,16 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
   const [profile, setProfile] = useState<VoiceProfile | null>(null);
   const [useCalibration, setUseCalibration] = useState(true);
   const [pitchNote, setPitchNote] = useState<string | null>(null);
+
+  // The quality level sets the chunk timing; the Advanced fields can still override each value by hand.
+  useEffect(() => {
+    setOverrides((o) => ({ ...o, ...QUALITY_LEVELS[quality] }));
+    try {
+      localStorage.setItem(QUALITY_KEY, String(quality));
+    } catch {
+      // remembered for this session only
+    }
+  }, [quality]);
 
   // Likeness is the index rate, kept per voice: how hard speech is pulled towards sounds of the training voice.
   useEffect(() => {
@@ -415,18 +449,11 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
         </select>
       </label>
       <label>
-        Speed / quality
-        <select
-          value={preset}
-          disabled={stats.running}
-          onChange={(e) => {
-            setPreset(e.target.value);
-            setOverrides({});
-          }}
-        >
-          {Object.keys(presets).map((p) => <option key={p} value={p}>{PRESET_LABELS[p] ?? p}</option>)}
-        </select>
+        Quality: {quality + 1} of {QUALITY_LEVELS.length}, about {delaySeconds(quality).toFixed(1)} s behind your voice
+        <input type="range" min={0} max={QUALITY_LEVELS.length - 1} step={1} value={quality} disabled={stats.running}
+          onChange={(e) => setQuality(Number(e.target.value))} />
       </label>
+      <p className="hint">Further right is smoother and steadier, and further behind. Set it before pressing Start.</p>
       <label>
         Pitch shift ({pitch > 0 ? "+" : ""}{pitch} semitones)
         <input
@@ -522,7 +549,7 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
           </p>
           <Meter label="Input" level={stats.in_level} />
           <Meter label="Output" level={stats.out_level} />
-          {stats.suggest_faster && <p className="hint">The GPU is not keeping up. Try a faster preset.</p>}
+          {stats.suggest_faster && <p className="hint">The GPU is not keeping up. Move Quality further left.</p>}
         </div>
       )}
     </section>

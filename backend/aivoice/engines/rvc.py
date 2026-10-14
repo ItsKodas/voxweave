@@ -57,6 +57,9 @@ class RvcEngine:
                  session_factory: Callable[[str], object] | None = None, rmvpe=None):
         factory = session_factory or make_session
         self._rmvpe = rmvpe
+        # The model's noise input, made once per length and reused: chunk after chunk the same input then gives
+        # the same voice texture, instead of a slightly different one every few hundred milliseconds.
+        self._noise: dict[int, np.ndarray] = {}
         # The training voice's usual pitch range (low, high) in Hz, when known: pitches outside it are moved inside.
         self.pitch_range: tuple[float, float] | None = None
         self._vec = factory(str(vec_path))
@@ -70,6 +73,13 @@ class RvcEngine:
 
             self._index = faiss.read_index(str(index_path))
             self._big_npy = self._index.reconstruct_n(0, self._index.ntotal)
+
+    def _noise_for(self, frames: int) -> np.ndarray:
+        if frames not in self._noise:
+            if len(self._noise) > 8:
+                self._noise.clear()
+            self._noise[frames] = np.random.default_rng(1234).standard_normal((1, 192, frames)).astype(np.float32)
+        return self._noise[frames]
 
     def convert(self, audio: np.ndarray, sample_rate: int, pitch_shift: float, params: LiveParams) -> np.ndarray:
         n = len(audio)
@@ -92,7 +102,7 @@ class RvcEngine:
             "pitch": to_coarse(pitchf)[None],
             "pitchf": pitchf[None],
             "ds": np.array([0], dtype=np.int64),
-            "rnd": np.random.randn(1, 192, frames).astype(np.float32),
+            "rnd": self._noise_for(frames),
         }
         out = np.asarray(self._net.run(None, feed)[0], dtype=np.float32).reshape(-1)
         if self._model_sr != sample_rate:
