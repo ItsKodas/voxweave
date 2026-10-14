@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { Clip, studioApi } from "./studioApi";
+import { Clip, CLIP_KINDS, ClipKind, studioApi } from "./studioApi";
+
+const KIND_LABELS: Record<ClipKind, string> = {
+  speech: "Speech", laugh: "Laugh", cough: "Cough", breath: "Breath", hum: "Hum", filler: "Um / filler", noise: "Other sound",
+};
 
 const EMPTY_TRANSCRIPT = "A transcript cannot be empty. Delete the clip if it is not usable.";
 
@@ -12,6 +16,19 @@ function ClipRow({ voiceId, clip, onPlay, onDeleted, onError }: {
 }) {
   const [saved, setSaved] = useState(clip.text);
   const [text, setText] = useState(clip.text);
+  const [kind, setKind] = useState<ClipKind>(clip.kind ?? "speech");
+
+  const changeKind = async (next: ClipKind) => {
+    const before = kind;
+    setKind(next);
+    try {
+      await studioApi.setClipKind(voiceId, clip.index, next);
+      onError(null);
+    } catch (e) {
+      setKind(before);
+      onError((e as Error).message);
+    }
+  };
 
   const save = async () => {
     if (text.trim() === saved) return;
@@ -52,6 +69,11 @@ function ClipRow({ voiceId, clip, onPlay, onDeleted, onError }: {
       </span>
       <input aria-label={`Transcript of clip ${clip.index}`} value={text} maxLength={500}
         onChange={(e) => setText(e.target.value)} onBlur={save} />
+      <select aria-label={`Kind of sound in clip ${clip.index}`} className="kind-select" value={kind}
+        title="Live mode trains on every kind; text to speech only copies a voice from speech"
+        onChange={(e) => changeKind(e.target.value as ClipKind)}>
+        {CLIP_KINDS.map((k) => <option key={k} value={k}>{KIND_LABELS[k]}</option>)}
+      </select>
       <button className="secondary" aria-label={`Play clip ${clip.index}`} onClick={() => onPlay(clip.index)}>Play</button>
       <button className="danger" aria-label={`Delete clip ${clip.index}`} onClick={remove}>Delete</button>
     </li>
@@ -62,6 +84,25 @@ export function ClipList({ voiceId, version, onChanged }: { voiceId: string; ver
   const [clips, setClips] = useState<Clip[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [playing, setPlaying] = useState<{ index: number; url: string } | null>(null);
+  const [reload, setReload] = useState(0);
+  const [labelling, setLabelling] = useState(false);
+  const [labelNote, setLabelNote] = useState<string | null>(null);
+
+  const labelSounds = async () => {
+    setLabelling(true);
+    setLabelNote(null);
+    try {
+      const res = await studioApi.labelSounds(voiceId);
+      const parts = Object.entries(res.labelled).map(([kind, n]) => `${n} ${kind}`);
+      setLabelNote(parts.length ? `Labelled ${parts.join(", ")}.` : "No laughs or other sounds were found among the clips marked as speech.");
+      setReload((r) => r + 1);
+      setError(null);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setLabelling(false);
+    }
+  };
 
   useEffect(() => {
     let gone = false;
@@ -77,7 +118,7 @@ export function ClipList({ voiceId, version, onChanged }: { voiceId: string; ver
     return () => {
       gone = true;
     };
-  }, [voiceId, version]);
+  }, [voiceId, version, reload]);
 
   // The player's object URL is released when another clip replaces it and when the list unmounts.
   const playingUrl = playing?.url ?? null;
@@ -128,6 +169,17 @@ export function ClipList({ voiceId, version, onChanged }: { voiceId: string; ver
       {error && <p role="alert" className="error">{error}</p>}
       {playing && <audio aria-label="Clip player" controls autoPlay src={playing.url} />}
       {clips !== null && clips.length === 0 && <p className="hint">No clips yet. Record a sentence or drop in audio files.</p>}
+      {clips !== null && clips.length > 0 && (
+        <p className="hint">
+          Each clip is labelled as speech or as a sound (laugh, cough, breath, hum, um). Live mode trains on all of them,
+          so it can laugh and cough in this voice; text to speech only ever copies a voice from speech. Correct a label
+          with the list on its row.{" "}
+          <button className="secondary" disabled={labelling} onClick={labelSounds}>
+            {labelling ? "Looking..." : "Find laughs and other sounds"}
+          </button>
+        </p>
+      )}
+      {labelNote && <p className="hint" aria-live="polite">{labelNote}</p>}
       {clips !== null && clips.length > 0 && (
         <ul aria-label="Clips" className="clip-list">
           {[...clips].sort((a, b) => b.index - a.index).map((clip) => (

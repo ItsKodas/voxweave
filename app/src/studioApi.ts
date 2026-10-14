@@ -16,7 +16,11 @@ export type Clip = {
   source: "recorded" | "imported";
   prompt: number | null;
   origin: string | null;
+  /** What kind of sound it is. Live mode trains on every kind; text to speech only uses "speech". */
+  kind?: ClipKind;
 };
+export const CLIP_KINDS = ["speech", "laugh", "cough", "breath", "hum", "filler", "noise"] as const;
+export type ClipKind = (typeof CLIP_KINDS)[number];
 /** `index` is null once every sentence has been recorded. */
 export type PromptKind = "sentences" | "paragraphs";
 /** `number` is the position within the kind, from 1; `index` is what a recording is started with. */
@@ -47,6 +51,10 @@ export const studioApi = {
   deleteVoice: (id: string) => call<{ deleted: boolean }>("DELETE", voicePath(id)),
   clips: (id: string) => call<Clip[]>("GET", `${voicePath(id)}/clips`),
   editClip: (id: string, index: number, text: string) => call<Clip>("PATCH", `${voicePath(id)}/clips/${index}`, { text }),
+  setClipKind: (id: string, index: number, kind: ClipKind) =>
+    call<Clip>("PUT", `${voicePath(id)}/clips/${index}/kind`, { kind }),
+  /** Labels the voice's existing clips (laugh, cough, ...) from their transcripts and sound. */
+  labelSounds: (id: string) => call<{ labelled: Record<string, number>; clips: number }>("POST", `${voicePath(id)}/label-sounds`),
   deleteClip: (id: string, index: number) => call<{ deleted: boolean }>("DELETE", `${voicePath(id)}/clips/${index}`),
   /**
    * Fetches the clip (fetch always names the app's origin, which the backend requires for /library) and returns

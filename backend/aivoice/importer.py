@@ -3,6 +3,8 @@ from pathlib import Path
 
 import soxr
 
+from aivoice.nonverbal import classify
+
 from aivoice.audiofile import AudioFileError, read_audio
 from aivoice.dataset import level_problem, split_on_silence
 from aivoice.library import SAMPLE_RATE, TRAIN_RATE, Library, LibraryError
@@ -115,11 +117,18 @@ class Importer:
                 self._bump(job, "skipped")
                 continue
             try:
-                text = self._transcriber.transcribe(soxr.resample(piece, SAMPLE_RATE, TRAIN_RATE))
+                audio16k = soxr.resample(piece, SAMPLE_RATE, TRAIN_RATE)
+                detailed = getattr(self._transcriber, "transcribe_detailed", None)
+                if detailed is not None:
+                    raw, no_speech = detailed(audio16k)
+                else:
+                    raw, no_speech = self._transcriber.transcribe(audio16k), None
             except Exception as exc:  # noqa: BLE001
                 raise _StopJob(f"Transcription failed: {exc}") from exc
+            # Laughs, coughs and other sounds are labelled: live mode trains on them, text to speech never uses them.
+            kind, text = classify(raw, piece, SAMPLE_RATE, no_speech)
             try:
-                self._library.add_clip(voice_id, piece, text, "imported", origin=path.name)
+                self._library.add_clip(voice_id, piece, text, "imported", origin=path.name, kind=kind)
             except Exception:
                 self._check_voice(voice_id)  # a deleted voice ends the job; any other cause is this file's
                 raise

@@ -8,6 +8,7 @@ from typing import Callable
 import numpy as np
 
 from aivoice.audiofile import read_wav
+from aivoice.nonverbal import usable_as_reference
 from aivoice.library import Clip, Library, LibraryError, Voice
 
 MIN_SECONDS = 3.0
@@ -26,7 +27,9 @@ _levels_lock = threading.Lock()
 
 
 def _usable(clip: Clip) -> bool:
-    return bool(clip.text and clip.text.strip()) and MIN_SECONDS <= clip.seconds <= MAX_SECONDS
+    # Only plain speech: a laugh, a cough or a clip with a bracketed sound in it would be copied into every sentence.
+    return (bool(clip.text and clip.text.strip()) and MIN_SECONDS <= clip.seconds <= MAX_SECONDS
+            and usable_as_reference(getattr(clip, "kind", "speech"), clip.text))
 
 
 def too_quiet(indexes: list[int]) -> str:

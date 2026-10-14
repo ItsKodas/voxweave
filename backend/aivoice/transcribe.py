@@ -33,6 +33,22 @@ class WhisperTranscriber:
         self._model = None
         self._language: str | None = None
 
+    def transcribe_detailed(self, audio16k: np.ndarray) -> tuple[str, float]:
+        """The transcript with non-speech annotations allowed ("(laughs)", "[coughing]"), and how sure Whisper is
+        that there was no speech at all (0 to 1). Used to label laughs, coughs and other sounds."""
+        if self._model is None:
+            name = self._name()
+            self._model = self._factory(name, self._root)
+            self._language = "en" if name.endswith(".en") else None
+        segments, _ = self._model.transcribe(
+            np.asarray(audio16k, dtype=np.float32), language=self._language, beam_size=5,
+            condition_on_previous_text=False, suppress_tokens=[],
+        )
+        segments = list(segments)
+        text = " ".join(s.text.strip() for s in segments).strip()
+        no_speech = max((float(getattr(s, "no_speech_prob", 0.0)) for s in segments), default=1.0)
+        return text, no_speech
+
     def transcribe(self, audio16k: np.ndarray) -> str:
         if self._model is None:
             name = self._name()

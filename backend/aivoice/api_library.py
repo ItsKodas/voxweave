@@ -39,6 +39,10 @@ class ImportBody(BaseModel):
     paths: list[str]
 
 
+class KindBody(BaseModel):
+    kind: str
+
+
 class ExportBody(BaseModel):
     include_reference: bool = True
 
@@ -173,6 +177,33 @@ def library_router(studio: Studio, library: Library, importer: Importer, live_ru
     @router.patch("/voices/{voice_id}/clips/{index}")
     def edit_clip(voice_id: str, index: int, body: TextBody) -> dict:
         return asdict(library.update_text(voice_id, index, body.text))
+
+    @router.put("/voices/{voice_id}/clips/{index}/kind")
+    def set_clip_kind(voice_id: str, index: int, body: KindBody) -> dict:
+        """Corrects what kind of sound a clip is. Live mode trains on every kind; text to speech uses only speech."""
+        return asdict(library.set_kind(voice_id, index, body.kind))
+
+    @router.post("/voices/{voice_id}/label-sounds")
+    def label_sounds(voice_id: str) -> dict:
+        """Labels the voice's existing clips (laugh, cough, hum, ...) from their transcripts and their sound.
+        Only clips still marked as speech are looked at, so a label set by hand is never undone; transcripts and
+        audio are left as they are."""
+        from aivoice.nonverbal import classify
+
+        voice = library.get(voice_id)
+        found: dict[str, int] = {}
+        for clip in voice.clips:
+            if clip.kind != "speech":
+                continue
+            try:
+                audio, sr = read_wav(library.clip_audio_path(voice_id, clip.index))
+            except ValueError:
+                continue
+            kind, _ = classify(clip.text, audio, sr)
+            if kind != "speech":
+                library.set_kind(voice_id, clip.index, kind)
+                found[kind] = found.get(kind, 0) + 1
+        return {"labelled": found, "clips": len(voice.clips)}
 
     @router.delete("/voices/{voice_id}/clips/{index}")
     def delete_clip(voice_id: str, index: int) -> dict:

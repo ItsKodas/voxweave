@@ -10,6 +10,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import numpy as np
+
+from aivoice.nonverbal import KINDS
 import soxr
 
 from aivoice.audiofile import replace_file, write_wav
@@ -26,6 +28,9 @@ CLIP_SUFFIXES = (".orig.wav", ".wav", ".txt")
 _LOCK = threading.RLock()
 
 
+_CLIP_FIELDS = ("index", "text", "seconds", "source", "prompt", "origin", "kind")
+
+
 class LibraryError(ValueError):
     pass
 
@@ -38,6 +43,7 @@ class Clip:
     source: str
     prompt: int | None = None
     origin: str | None = None
+    kind: str = "speech"  # or laugh, cough, breath, hum, filler, noise: see aivoice.nonverbal
 
 
 @dataclass
@@ -144,7 +150,7 @@ class Library:
         """Raises LibraryError for an id that is not one, and the underlying error for a voice.json that is unusable."""
         folder = self._dir(voice_id)
         raw = json.loads((folder / "voice.json").read_text(encoding="utf-8"))
-        clips = [Clip(**c) for c in raw["clips"]]
+        clips = [Clip(**{k: v for k, v in c.items() if k in _CLIP_FIELDS}) for c in raw["clips"]]
         floor = max((c.index for c in clips), default=0) + 1
         return Voice(voice_id, str(raw["name"]), str(raw["created"]), clips,
                      max(int(raw.get("next_index", 1)), floor), rvc_model_sample_rate(folder))
@@ -252,7 +258,7 @@ class Library:
             self._write_summary()
 
     def add_clip(self, voice_id, audio: np.ndarray, text: str, source: str,
-                 prompt: int | None = None, origin: str | None = None) -> Clip:
+                 prompt: int | None = None, origin: str | None = None, kind: str = "speech") -> Clip:
         audio = np.asarray(audio, dtype=np.float32).reshape(-1)
         if len(audio) == 0:
             raise LibraryError("There is no audio to save")
@@ -270,7 +276,9 @@ class Library:
             write_wav(clips / f"{stem}.wav", soxr.resample(audio, SAMPLE_RATE, TRAIN_RATE), TRAIN_RATE)
             text = (text or "").strip()[:MAX_TEXT]
             _atomic_text(clips / f"{stem}.txt", text)
-            clip = Clip(index, text, round(len(audio) / SAMPLE_RATE, 2), source, prompt, origin)
+            if kind not in KINDS:
+                raise LibraryError(f"A clip's kind must be one of {', '.join(KINDS)}")
+            clip = Clip(index, text, round(len(audio) / SAMPLE_RATE, 2), source, prompt, origin, kind)
             voice.clips.append(clip)
             voice.next_index = index + 1
             self._save(voice)
@@ -281,6 +289,17 @@ class Library:
         if clip is None:
             raise LibraryError("Unknown clip")
         return clip
+
+    def set_kind(self, voice_id, index: int, kind: str) -> Clip:
+        """Corrects what kind of sound a clip is (speech, laugh, cough, ...). The audio and transcript stay."""
+        if kind not in KINDS:
+            raise LibraryError(f"A clip's kind must be one of {', '.join(KINDS)}")
+        with self._lock:
+            voice = self._load(voice_id)
+            clip = self._find(voice, index)
+            clip.kind = kind
+            self._save(voice)
+            return clip
 
     def update_text(self, voice_id, index: int, text: str) -> Clip:
         text = (text or "").strip()

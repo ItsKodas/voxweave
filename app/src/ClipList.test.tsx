@@ -1,10 +1,11 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ClipList } from "./ClipList";
 
-vi.mock("./studioApi", () => ({
-  studioApi: { clips: vi.fn(), editClip: vi.fn(), deleteClip: vi.fn(), clipAudioUrl: vi.fn() },
+vi.mock("./studioApi", async (original) => ({
+  ...(await original<typeof import("./studioApi")>()),
+  studioApi: { clips: vi.fn(), editClip: vi.fn(), deleteClip: vi.fn(), clipAudioUrl: vi.fn(), setClipKind: vi.fn(), labelSounds: vi.fn() },
 }));
 import { studioApi } from "./studioApi";
 
@@ -213,5 +214,32 @@ describe("ClipList", () => {
     rerender(<ClipList voiceId="v-2" version={0} onChanged={() => {}} />);
     await vi.waitFor(() => expect(screen.queryByLabelText("Clip player")).not.toBeInTheDocument());
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:x/2");
+  });
+});
+
+describe("kinds of sound", () => {
+  it("shows each clip's kind and saves a correction", async () => {
+    vi.mocked(studioApi.clips).mockResolvedValue([
+      { index: 2, text: "[laugh] hahaha", seconds: 1.5, source: "imported", prompt: null, origin: "stream.mp3", kind: "laugh" },
+      { index: 1, text: "Hello there.", seconds: 2, source: "recorded", prompt: 0, origin: null },
+    ]);
+    vi.mocked(studioApi.setClipKind).mockResolvedValue({} as never);
+    render(<ClipList voiceId="v-1" version={0} onChanged={() => {}} />);
+    const laugh = await screen.findByLabelText("Kind of sound in clip 2");
+    expect(laugh).toHaveValue("laugh");
+    expect(screen.getByLabelText("Kind of sound in clip 1")).toHaveValue("speech"); // clips from before kinds existed
+    fireEvent.change(laugh, { target: { value: "cough" } });
+    await waitFor(() => expect(studioApi.setClipKind).toHaveBeenCalledWith("v-1", 2, "cough"));
+  });
+
+  it("labels existing clips on request and reloads the list", async () => {
+    vi.mocked(studioApi.clips).mockResolvedValue([
+      { index: 1, text: "Hahaha", seconds: 1, source: "imported", prompt: null, origin: "a.mp3", kind: "speech" },
+    ]);
+    vi.mocked(studioApi.labelSounds).mockResolvedValue({ labelled: { laugh: 1 }, clips: 1 });
+    render(<ClipList voiceId="v-1" version={0} onChanged={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Find laughs and other sounds" }));
+    expect(await screen.findByText("Labelled 1 laugh.")).toBeInTheDocument();
+    await waitFor(() => expect(studioApi.clips).toHaveBeenCalledTimes(2));
   });
 });
