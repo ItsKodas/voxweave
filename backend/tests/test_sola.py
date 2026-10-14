@@ -72,3 +72,48 @@ def test_a_window_too_short_for_a_full_search_searches_what_it_has():
     p = StreamProcessor(FreshPhase(), SR, params)
     assert p.search == 0
     assert len(p.process(np.zeros(p.chunk, np.float32))) == p.chunk
+
+
+def simulate(level, capacity, infer_blocks=0):
+    """A live session fed in 10 ms blocks, with each conversion finishing infer_blocks blocks after its input is
+    complete. Returns the output buffer's overflows and its underruns once audio flows."""
+    from aivoice.live import LiveSession
+    from aivoice.router import Router
+
+    class Half:
+        def convert(self, a, sr, p, params):
+            return np.asarray(a, np.float32) * 0.5
+
+    params = resolve("balanced", QUALITY_LEVELS[level])
+    proc = StreamProcessor(Half(), SR, params)
+    router = Router(capacity)
+    router.add_output("mic")
+    session = LiveSession(proc, router, SR, None, 0, {"mic": 1})
+    router.prime(proc.chunk)
+    block = 480
+    pending = []
+    for i in range(int(30 * SR / block)):
+        session.feed(np.full((block, 1), 0.3, np.float32))
+        if session._inbuf.available >= proc.chunk:
+            pending.append(i + infer_blocks)
+        while pending and pending[0] <= i:
+            pending.pop(0)
+            session.pump()
+        session._fill("mic", block)
+    buffer = router._outputs["mic"].buffer
+    return buffer.overflows, buffer.underruns
+
+
+def test_every_quality_level_fits_its_output_buffer_whatever_the_conversion_time():
+    from aivoice.manager import buffer_samples
+
+    for level in range(len(QUALITY_LEVELS)):
+        chunk = SR * QUALITY_LEVELS[level]["chunk_ms"] // 1000
+        for infer_fraction in (0.0, 0.5, 0.9):
+            blocks = int(chunk * infer_fraction / 480)
+            overflows, underruns = simulate(level, buffer_samples(SR, chunk), blocks)
+            assert (overflows, underruns) == (0, 0), (level + 1, infer_fraction)
+
+
+def test_the_old_fixed_two_seconds_was_too_little_for_long_chunks():
+    assert simulate(6, SR * 2)[0] > 0

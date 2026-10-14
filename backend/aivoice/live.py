@@ -33,7 +33,7 @@ class LiveSession:
         self._factory = stream_factory
         self._input_device = input_device
         self._output_devices = output_devices
-        self._inbuf = RingBuffer(sample_rate * 4)
+        self._inbuf = RingBuffer(self._input_capacity())
         self._streams: list = []
         self._thread: threading.Thread | None = None
         self._failed = False
@@ -45,6 +45,11 @@ class LiveSession:
         # _close_streams idempotent when the worker and stop() both try to close.
         self._lifecycle = threading.RLock()
         self._streams_lock = threading.Lock()
+
+    def _input_capacity(self) -> int:
+        """Microphone audio waiting to be converted: a chunk being collected while the previous one is converted,
+        with room to spare. Four seconds, or more for long chunks."""
+        return max(self.sample_rate * 4, 3 * self.processor.chunk + self.sample_rate)
 
     def _fail(self, message: str) -> None:
         if self.error is None:
@@ -107,7 +112,7 @@ class LiveSession:
             self.error = None
             self._failed = False
             self._in_level = self._out_level = 0.0
-            self._inbuf = RingBuffer(self.sample_rate * 4)
+            self._inbuf = RingBuffer(self._input_capacity())
             self._flowing = False
             self.router.prime(self.processor.chunk)
             streams: list = []

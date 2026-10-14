@@ -46,6 +46,13 @@ def _check_gain(value: float) -> None:
         raise ValueError("monitor_gain must be between 0 and 2")
 
 
+def buffer_samples(sample_rate: int, chunk: int) -> int:
+    """How much converted audio each output may hold. The output runs one chunk ahead of the device, so up to two
+    chunks wait there at once; a fixed two seconds was too little for chunks of a second or more, and the audio
+    then cut out. Room for three chunks plus a second, and never less than the two seconds it always had."""
+    return max(sample_rate * 2, 3 * chunk + sample_rate)
+
+
 _RMVPE: dict = {}
 
 
@@ -149,7 +156,7 @@ class LiveManager:
                 # model that cannot run.
                 processor.engine = self._calibration.wrap(engine)
             processor.pitch_shift = cfg.pitch_shift
-            router = Router(self._sr * 2)
+            router = Router(buffer_samples(self._sr, processor.chunk))
             if "mic" in outputs:
                 router.add_output("mic")
             if "monitor" in outputs:
