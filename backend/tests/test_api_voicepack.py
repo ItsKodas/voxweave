@@ -58,7 +58,7 @@ def test_a_voice_is_exported_to_a_file_and_imported_back_as_a_new_voice(tmp_path
     assert back.status_code == 200
     assert back.json()["name"] == "Ada" and back.json()["models"] == ["rvc"] and back.json()["clips"] == 1
     assert back.json()["id"] != voice.id and len(client.get("/library/voices").json()) == 2
-    assert {v["name"] for v in client.get("/voices").json()} == {"Ada"}  # both show up for live mode
+    assert [v["name"] for v in client.get("/voices").json() if not v["id"].startswith("@")] == ["Ada", "Ada"]  # both show up for live mode
 
 
 def test_export_without_the_reference_clip(tmp_path, monkeypatch):

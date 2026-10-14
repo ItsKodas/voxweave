@@ -6,7 +6,9 @@ from typing import Callable
 
 import numpy as np
 
+from aivoice import feminize
 from aivoice.config import SAMPLE_RATE, dml_device_id
+from aivoice.engine_guard import GuardedEngine
 from aivoice.devices import Device, get_device
 from aivoice.live import LiveSession
 from aivoice.presets import resolve
@@ -45,7 +47,6 @@ def _check_gain(value: float) -> None:
 
 
 def default_engine_factory(data: Path) -> Callable[[PretrainedVoice], object]:
-    from aivoice.engine_guard import GuardedEngine
     from aivoice.engines.rvc import RvcEngine, make_session
 
     def build(voice: PretrainedVoice):
@@ -100,18 +101,26 @@ class LiveManager:
                 device = get_device(devices, index)
                 if device.max_output < 1:
                     raise ValueError(f"{device.name} is not an output device")
-            voice = next((v for v in list_voices(self._data) if v.id == cfg.voice), None)
-            if voice is None:
-                raise ValueError(f"Unknown voice: {cfg.voice}")
+            if cfg.voice == feminize.PREVIEW_ID:
+                # No model: the speaker's own voice, feminized by signal processing, with the settings last saved.
+                voice = None
+            else:
+                voice = next((v for v in list_voices(self._data) if v.id == cfg.voice), None)
+                if voice is None:
+                    raise ValueError(f"Unknown voice: {cfg.voice}")
 
             self._stop_locked()
             self._last_error = None
             try:
-                engine = self._engine_factory(voice)
+                if voice is None:
+                    engine = GuardedEngine(feminize.FeminizeEngine(feminize.load_settings(self._data)))
+                else:
+                    engine = self._engine_factory(voice)
                 processor = StreamProcessor(engine, self._sr, params)
                 engine.convert(np.zeros(processor.window, dtype=np.float32), self._sr, 0.0, params)
             except Exception as exc:  # noqa: BLE001
-                raise ValueError(f"Could not load voice {voice.name}: {exc}") from exc
+                name = feminize.PREVIEW_NAME if voice is None else voice.name
+                raise ValueError(f"Could not load voice {name}: {exc}") from exc
             if cfg.use_calibration and self._calibration is not None:
                 # After the model has proved itself on the warm-up above: a closed gate would have hidden a
                 # model that cannot run.

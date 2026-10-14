@@ -12,6 +12,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from aivoice import feminize
 from aivoice.devices import Device, find_virtual_mic
 from aivoice.manager import LiveManager, StartConfig
 from aivoice.presets import PRESETS
@@ -150,7 +151,9 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
 
     @app.get("/voices")
     def voices() -> list[dict]:
-        return [{"id": v.id, "name": v.name, "has_index": v.index_path is not None} for v in list_voices(data)]
+        voices = [{"id": v.id, "name": v.name, "has_index": v.index_path is not None} for v in list_voices(data)]
+        # Always last, always there: live mode can feminize the speaker's own voice without any trained model.
+        return voices + [{"id": feminize.PREVIEW_ID, "name": feminize.PREVIEW_NAME, "has_index": False}]
 
     @app.get("/presets")
     def presets() -> dict:

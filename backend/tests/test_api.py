@@ -64,7 +64,10 @@ def test_refresh_devices_is_refused_while_live(tmp_path):
 
 def test_voices(tmp_path):
     client, _ = make_client(tmp_path)
-    assert client.get("/voices").json() == [{"id": "demo", "name": "Demo", "has_index": True}]
+    # The feminized preview of the speaker's own voice is always offered last, with no model behind it.
+    assert client.get("/voices").json() == [{"id": "demo", "name": "Demo", "has_index": True},
+                                            {"id": "@feminize", "name": "My voice, feminized (preview, no training)",
+                                             "has_index": False}]
 
 
 def test_presets(tmp_path):

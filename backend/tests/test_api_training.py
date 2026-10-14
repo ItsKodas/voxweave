@@ -183,7 +183,7 @@ def test_training_routes_refuse_foreign_origins(s):
 
 
 def test_trained_voice_is_listed_by_voices_after_the_job_completes(s):
-    assert [v["id"] for v in s.client.get("/voices").json()] == ["demo"]
+    assert [v["id"] for v in s.client.get("/voices").json() if v["id"] != "@feminize"] == ["demo"]
     s.start_training()
     models = s.data / "voices" / s.voice / "models" / "rvc"
     models.mkdir(parents=True)
@@ -191,7 +191,7 @@ def test_trained_voice_is_listed_by_voices_after_the_job_completes(s):
     (models / "voice.json").write_text(json.dumps({"sample_rate": 40000}), encoding="utf-8")
     s.rig.finish(s.voice, 0, ok=True, percent=100.0)
     assert s.client.get("/training/status").json()["state"] == "done"
-    assert [v["id"] for v in s.client.get("/voices").json()] == ["demo", s.voice]
+    assert [v["id"] for v in s.client.get("/voices").json() if v["id"] != "@feminize"] == ["demo", s.voice]
 
 
 def test_without_a_training_manager_there_are_no_training_routes(tmp_path):

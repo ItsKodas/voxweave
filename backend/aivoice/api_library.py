@@ -7,11 +7,12 @@ from typing import Callable
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
-from aivoice import tts_reference, voicepack
+from aivoice import feminize, tts_reference, voicepack
 from aivoice.api import log_refused
+from aivoice.audiofile import read_wav
 from aivoice.importer import Importer
 from aivoice.library import Library, Voice
 from aivoice.studio import Studio
@@ -44,6 +45,36 @@ class ExportBody(BaseModel):
 
 class PackBody(BaseModel):
     path: str
+
+
+class FeminizeBody(BaseModel):
+    pitch_semitones: float = 5.0
+    formant_shift: float = 1.15
+    breathiness: float = 0.15
+
+    def settings(self) -> "feminize.FeminizeSettings":
+        return feminize.FeminizeSettings(self.pitch_semitones, self.formant_shift, self.breathiness).validated()
+
+
+class FeminizeStartBody(FeminizeBody):
+    name: str | None = None
+
+
+def wav_bytes(audio, sr: int) -> bytes:
+    """16-bit PCM WAV in memory, for a sample the screen plays at once."""
+    import io
+    import wave
+
+    import numpy as np
+
+    pcm = (np.clip(np.asarray(audio, dtype=np.float32), -1.0, 1.0) * 32767.0).astype("<i2")
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(sr)
+        out.writeframes(pcm.tobytes())
+    return buffer.getvalue()
 
 
 def downloads_folder() -> Path:
@@ -151,6 +182,56 @@ def library_router(studio: Studio, library: Library, importer: Importer, live_ru
     @router.get("/voices/{voice_id}/clips/{index}/audio")
     def clip_audio(voice_id: str, index: int) -> FileResponse:
         return FileResponse(library.clip_audio_path(voice_id, index), media_type="audio/wav")
+
+    feminizer = feminize.FeminizeJob(library)
+
+    def sample_clip(voice_id: str):
+        """The clip a sample is made from: the one text to speech would choose, else the first of 3 to 12 seconds."""
+        voice = library.get(voice_id)
+        try:
+            return tts_reference.choose(voice, tts_reference.library_levels(library, voice.id))
+        except ValueError:
+            for clip in voice.clips:
+                if 3.0 <= clip.seconds <= 12.0:
+                    return clip
+        raise ValueError("This voice has no clip of 3 to 12 seconds to make a sample from")
+
+    @router.post("/voices/{voice_id}/feminize/preview")
+    def feminize_preview(voice_id: str, body: FeminizeBody) -> Response:
+        """One of the voice's clips, feminized with these settings, as a WAV to listen to."""
+        settings = body.settings()
+        clip = sample_clip(voice_id)
+        audio, sr = read_wav(library.clip_audio_path(voice_id, clip.index))
+        return Response(content=wav_bytes(feminize.feminize(audio, sr, settings), sr), media_type="audio/wav",
+                        headers={"X-Clip-Index": str(clip.index)})
+
+    @router.post("/voices/{voice_id}/feminize")
+    def feminize_start(voice_id: str, body: FeminizeStartBody) -> dict:
+        """Starts making a new voice from this voice's clips, feminized. The new voice is then trained."""
+        with voices_lock:
+            return feminizer.start(voice_id, body.settings(), body.name)
+
+    @router.get("/feminize/status")
+    def feminize_status() -> dict:
+        return feminizer.status()
+
+    @router.post("/feminize/cancel")
+    def feminize_cancel() -> dict:
+        feminizer.cancel()
+        return feminizer.status()
+
+    @router.get("/feminize/settings")
+    def feminize_settings() -> dict:
+        if data is None:
+            raise ValueError("Settings are not available")
+        return asdict(feminize.load_settings(data))
+
+    @router.put("/feminize/settings")
+    def feminize_save(body: FeminizeBody) -> dict:
+        """The settings the live feminized preview uses from its next start."""
+        if data is None:
+            raise ValueError("Settings are not available")
+        return asdict(feminize.save_settings(data, body.settings()))
 
     @router.post("/voices/{voice_id}/export")
     def export_pack(voice_id: str, body: ExportBody) -> dict:
