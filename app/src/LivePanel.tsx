@@ -704,6 +704,12 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
           <Meter label="Input" level={stats.in_level} />
           <Meter label="Output" level={stats.out_level} />
           {stats.suggest_faster && <p className="hint">The GPU is not keeping up. Move Quality further left.</p>}
+          {stats.clipping && (
+            <p className="hint" role="status">
+              Your microphone is clipping: it is set too loud, and the distorted sound comes out harsh. Turn its level
+              down in the Windows sound settings, then calibrate again.
+            </p>
+          )}
         </div>
       )}
       <LiveInsight running={stats.running} voiceName={voiceName} />

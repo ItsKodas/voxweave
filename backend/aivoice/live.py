@@ -8,6 +8,9 @@ from aivoice.ringbuffer import RingBuffer
 from aivoice.router import Router
 
 SLOW_CHUNK_LIMIT = 10
+CLIPPING_LEVEL = 0.99  # a sample this close to full scale: the microphone ran out of range
+CLIPPING_SAMPLES = 3  # in one block, so a single stray sample is not reported
+CLIPPING_SHOWN_S = 3.0
 JOIN_TIMEOUT_S = 2.0
 
 
@@ -42,6 +45,7 @@ class LiveSession:
         self._flowing = False
         self._in_level = 0.0
         self._out_level = 0.0
+        self._clipped_at: float | None = None  # when the microphone last clipped (time.monotonic)
         # start()/stop() are serialized by _lifecycle. The worker thread never takes it, so stop()
         # can hold it while joining. _streams_lock only guards swapping the stream list, which makes
         # _close_streams idempotent when the worker and stop() both try to close.
@@ -65,6 +69,8 @@ class LiveSession:
                 return
             mono = indata if indata.ndim == 1 else indata.mean(axis=1)
             self._in_level = float(np.max(np.abs(mono))) if len(mono) else 0.0
+            if self._in_level >= CLIPPING_LEVEL and int(np.sum(np.abs(mono) >= CLIPPING_LEVEL)) >= CLIPPING_SAMPLES:
+                self._clipped_at = time.monotonic()
             self._inbuf.write(mono)
         except Exception as exc:  # noqa: BLE001 - must not propagate into the audio thread
             self._fail(f"Audio input failed: {exc}")
@@ -201,4 +207,7 @@ class LiveSession:
             "underruns": self.router.underruns(),
             "slow_chunks": p.slow_chunks,
             "suggest_faster": p.slow_chunks >= SLOW_CHUNK_LIMIT,
+            # The microphone hit full scale in the last few seconds: its level is set too high (Windows sound
+            # settings), and the clipped sound comes out of the model harsh.
+            "clipping": self._clipped_at is not None and time.monotonic() - self._clipped_at < CLIPPING_SHOWN_S,
         }

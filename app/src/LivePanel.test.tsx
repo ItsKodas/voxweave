@@ -737,3 +737,11 @@ describe("deep calibration", () => {
     expect(screen.queryByRole("button", { name: "Find best settings" })).not.toBeInTheDocument();
   });
 });
+
+
+describe("clipping", () => {
+  it("says when the microphone clips", async () => {
+    render(<LivePanel stats={{ ...IDLE, running: true, mode: "converted", clipping: true }} />);
+    expect(await screen.findByText(/Your microphone is clipping/)).toBeInTheDocument();
+  });
+});

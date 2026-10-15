@@ -19,7 +19,7 @@ from aivoice.router import Router
 MODES = ("converted", "muted")
 _IDLE = {
     "running": False, "mode": "off", "error": None, "infer_ms": 0.0, "latency_ms": 0.0,
-    "in_level": 0.0, "out_level": 0.0, "underruns": 0, "slow_chunks": 0, "suggest_faster": False,
+    "in_level": 0.0, "out_level": 0.0, "underruns": 0, "slow_chunks": 0, "suggest_faster": False, "clipping": False,
 }
 
 

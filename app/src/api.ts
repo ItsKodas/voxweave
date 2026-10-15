@@ -29,6 +29,8 @@ export type Stats = {
   underruns: number;
   slow_chunks: number;
   suggest_faster: boolean;
+  /** The microphone hit full scale in the last few seconds. */
+  clipping?: boolean;
 };
 export type StartRequest = {
   input_device: number;

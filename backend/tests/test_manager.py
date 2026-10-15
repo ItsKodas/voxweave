@@ -43,7 +43,7 @@ def test_start_and_stop(setup):
     manager.stop()
     assert manager.stats() == {
         "running": False, "mode": "off", "error": None, "infer_ms": 0.0, "latency_ms": 0.0,
-        "in_level": 0.0, "out_level": 0.0, "underruns": 0, "slow_chunks": 0, "suggest_faster": False,
+        "in_level": 0.0, "out_level": 0.0, "underruns": 0, "slow_chunks": 0, "suggest_faster": False, "clipping": False,
     }
     assert all(s.closed for s in streams.streams)
 

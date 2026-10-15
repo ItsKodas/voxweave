@@ -261,7 +261,7 @@ def test_stats_shape():
     session.pump()
     stats = session.stats()
     assert set(stats) == {"running", "mode", "error", "infer_ms", "latency_ms", "in_level", "out_level",
-                          "underruns", "slow_chunks", "suggest_faster"}
+                          "underruns", "slow_chunks", "suggest_faster", "clipping"}
     assert stats["in_level"] == 0.5 and stats["mode"] == "converted"
     assert stats["latency_ms"] >= PARAMS.chunk_ms + PARAMS.crossfade_ms
 
@@ -348,3 +348,27 @@ def test_monitor_only_session_reports_latency_from_the_monitor_buffer():
         assert stats["latency_ms"] >= PARAMS.chunk_ms + PARAMS.crossfade_ms + PARAMS.chunk_ms
     finally:
         session.stop()
+
+
+def test_a_microphone_that_clips_is_reported_for_a_few_seconds(monkeypatch):
+    import aivoice.live as live
+
+    now = [100.0]
+    monkeypatch.setattr(live.time, "monotonic", lambda: now[0])
+    session, proc, _, _ = make()
+    session.feed(np.full(proc.chunk, 0.5, dtype=np.float32))
+    assert session.stats()["clipping"] is False
+    loud = np.full(proc.chunk, 0.5, dtype=np.float32)
+    loud[:10] = 1.0  # the microphone hit full scale
+    session.feed(loud)
+    assert session.stats()["clipping"] is True
+    now[0] += live.CLIPPING_SHOWN_S + 0.1
+    assert session.stats()["clipping"] is False
+
+
+def test_one_full_scale_sample_is_not_called_clipping():
+    session, proc, _, _ = make()
+    block = np.full(proc.chunk, 0.5, dtype=np.float32)
+    block[0] = 1.0
+    session.feed(block)
+    assert session.stats()["clipping"] is False
