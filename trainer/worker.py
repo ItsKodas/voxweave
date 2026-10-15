@@ -102,6 +102,26 @@ class _Unstable(Exception):
     """The trainer's losses turned into NaN or infinity."""
 
 
+def _venv_python(venv: Path, env: dict) -> Path:
+    """The Python to start a virtual environment with: the interpreter it was made from, told which environment to
+    use the way the venv's own python.exe launcher tells it (__PYVENV_LAUNCHER__). Started from the app, that
+    launcher failed every time with "No Python at '<the interpreter>'" although the interpreter was there and the
+    same launcher worked from a shell; this does what the launcher does, without it. Falls back to the launcher
+    when the environment's pyvenv.cfg cannot be read or its interpreter is gone."""
+    launcher = venv / "Scripts" / "python.exe"
+    try:
+        lines = (venv / "pyvenv.cfg").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return launcher
+    home = next((line.split("=", 1)[1].strip() for line in lines
+                 if "=" in line and line.split("=", 1)[0].strip().lower() == "home"), "")
+    base = Path(home) / "python.exe" if home else None
+    if base is None or not base.is_file():
+        return launcher
+    env["__PYVENV_LAUNCHER__"] = str(launcher)
+    return base
+
+
 class JobError(Exception):
     """A failure with a message meant for the user. `resumable` says whether running again with --resume could
     get further than this run did (False when only a new training run can help)."""
@@ -381,8 +401,8 @@ class Job:
             seen = {name: env.get(name) for name in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV", "__PYVENV_LAUNCHER__",
                                                      "PYTHONEXECUTABLE", "UV_PYTHON_INSTALL_DIR")}
             self._log("worker", "the exporter could not start its Python (exit code %s); trying once more. "
-                                "Environment: %s; PATH starts %s" % (code, json.dumps(seen),
-                                                                     (env.get("PATH") or "")[:300]))
+                                "Environment: %s; PATH starts %s; variables set: %s" % (
+                                    code, json.dumps(seen), (env.get("PATH") or "")[:300], ", ".join(sorted(env))))
             code = self._run_simple(argv, cwd=TOOLS_DIR.parent, env=env)
         return code
 
@@ -888,7 +908,7 @@ class Job:
                     "PYTHONUNBUFFERED": "1"})
         try:
             code = self._run_export([
-                TOOLS_DIR / ".rvc" / "venv" / "Scripts" / "python.exe", TOOLS_DIR / "export_rvc_onnx.py",
+                _venv_python(TOOLS_DIR / ".rvc" / "venv", env), TOOLS_DIR / "export_rvc_onnx.py",
                 self.weights, self.experiment, "--index", self._added_index(),
                 # One argument: as two, a name such as "-x" or "--cool" would be read as an option.
                 "--name=" + (self.args.name or self.experiment)], env)
@@ -928,7 +948,7 @@ class Job:
             self._emit(1.0, "Exporting the version at epoch %d" % epoch)
             try:
                 code = self._run_simple([
-                    TOOLS_DIR / ".rvc" / "venv" / "Scripts" / "python.exe", TOOLS_DIR / "export_rvc_onnx.py",
+                    _venv_python(TOOLS_DIR / ".rvc" / "venv", env), TOOLS_DIR / "export_rvc_onnx.py",
                     path, self.experiment, "--name=%s (epoch %d)" % (self.args.name or self.experiment, epoch)],
                     cwd=TOOLS_DIR.parent, env=env)
                 size = (new / "model.onnx").stat().st_size if (new / "model.onnx").exists() else 0

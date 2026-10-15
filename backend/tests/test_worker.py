@@ -1937,3 +1937,25 @@ def test_an_exporter_that_fails_for_another_reason_is_not_retried(rig):
     rig.runner.stages["export"] = export
     rig.run()
     assert len(tries) == 1 and rig.final()["ok"] is False
+
+
+def test_the_exporter_runs_on_its_environments_own_python_without_the_venv_launcher(rig, tmp_path):
+    # The venv's python.exe is a launcher that, started from the app, failed every time with "No Python at ...";
+    # the worker starts the Python the venv was made from and points it at the venv itself, as the launcher would.
+    home = tmp_path / "uv python" / "cpython-3.10"
+    home.mkdir(parents=True)
+    (home / "python.exe").write_bytes(b"")
+    venv = rig.tools / ".rvc" / "venv"
+    (venv / "Scripts").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text(f"home = {home}\nversion_info = 3.10.21\n", encoding="utf-8")
+    assert rig.run() == 0
+    export = next(c for c in rig.runner.calls if c.stage == "export")
+    assert Path(export.argv[0]) == home / "python.exe"
+    assert Path(export.env["__PYVENV_LAUNCHER__"]) == venv / "Scripts" / "python.exe"
+
+
+def test_without_a_readable_venv_config_the_launcher_is_used_as_before(rig):
+    assert rig.run() == 0
+    export = next(c for c in rig.runner.calls if c.stage == "export")
+    assert Path(export.argv[0]) == rig.tools / ".rvc" / "venv" / "Scripts" / "python.exe"
+    assert "__PYVENV_LAUNCHER__" not in export.env
