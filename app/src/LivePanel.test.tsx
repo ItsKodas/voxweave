@@ -17,6 +17,7 @@ vi.mock("./api", () => ({
   api: {
     devices: vi.fn(), refreshDevices: vi.fn(), voices: vi.fn(), presets: vi.fn(),
     start: vi.fn(), stop: vi.fn(), mode: vi.fn(), settings: vi.fn(),
+    learning: vi.fn(), setLearning: vi.fn(), saveLearning: vi.fn(),
   },
 }));
 import { api } from "./api";
@@ -784,5 +785,52 @@ describe("voice quality extras", () => {
     await waitFor(() => expect(screen.getByLabelText(/Join smoothing/)).not.toBeChecked());
     await userEvent.click(screen.getByRole("button", { name: "Reset to recommended" }));
     await waitFor(() => expect(screen.getByLabelText(/Join smoothing/)).toBeChecked());
+  });
+});
+
+
+describe("live learning", () => {
+  const RUNNING = { ...IDLE, running: true, mode: "converted" as const };
+  const ON = { enabled: true, speech_seconds: 52, passes: 1, message: "1 tuning pass done", last_change: "likeness 30% to 40%",
+               saved: false, learned: null, current: { pitch_shift: 8, likeness: 0.4, advanced: { creak_repair: true } } };
+  beforeEach(() => {
+    localStorage.clear();
+    vi.mocked(calibrationApi.status).mockResolvedValue({ ...NO_PROFILE, profile: MY_VOICE } as never);
+    vi.mocked(calibrationApi.suggestion).mockResolvedValue({ pitch_shift: 7, reason: null, speaker_hz: 118, target_hz: 177 });
+    vi.mocked(api.setLearning).mockResolvedValue(ON);
+    vi.mocked(api.learning).mockResolvedValue(ON);
+  });
+
+  it("can be switched on while live mode runs and says what it has done", async () => {
+    render(<LivePanel stats={RUNNING} />);
+    await userEvent.click(await screen.findByLabelText("Keep learning while I talk"));
+    expect(api.setLearning).toHaveBeenCalledWith(true);
+    expect(await screen.findByText(/Heard 52 s of your speech\. 1 tuning pass done\. Last change: likeness 30% to 40%\./)).toBeInTheDocument();
+  });
+
+  it("saves what it learned for the voice", async () => {
+    vi.mocked(api.saveLearning).mockResolvedValue({ settings: { pitch_shift: 8, likeness: 0.4, advanced: { creak_repair: false } } });
+    render(<LivePanel stats={RUNNING} />);
+    await userEvent.click(await screen.findByLabelText("Keep learning while I talk"));
+    await userEvent.click(await screen.findByRole("button", { name: "Save learned calibration" }));
+    expect(await screen.findByText(/Saved\. Your calibration now follows how you talk live/)).toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem("voice-settings:demo")!)).toMatchObject({ pitch: 8, likeness: 0.4, advanced: { creak_repair: false } });
+  });
+
+  it("turning it off says unsaved changes were put back", async () => {
+    vi.mocked(api.setLearning).mockResolvedValueOnce(ON).mockResolvedValueOnce({ enabled: false });
+    render(<LivePanel stats={RUNNING} />);
+    const toggle = await screen.findByLabelText("Keep learning while I talk");
+    await userEvent.click(toggle);
+    await userEvent.click(toggle);
+    expect(api.setLearning).toHaveBeenLastCalledWith(false);
+    expect(await screen.findByText(/did not save was put back/)).toBeInTheDocument();
+  });
+
+  it("is not offered without a calibration or while live mode is off", async () => {
+    vi.mocked(calibrationApi.status).mockResolvedValue(NO_PROFILE as never);
+    render(<LivePanel stats={RUNNING} />);
+    await screen.findByRole("button", { name: "Stop" });
+    expect(screen.queryByLabelText("Keep learning while I talk")).not.toBeInTheDocument();
   });
 });

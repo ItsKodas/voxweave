@@ -115,3 +115,5 @@ main > h1 { display: inline-block; margin-right: 24px; vertical-align: middle; }
 .insight progress { width: 100%; }
 .key { display: inline-block; width: 10px; height: 3px; vertical-align: middle; margin-right: 3px; }
 @media (max-width: 760px) { .insight-row { grid-template-columns: 1fr; } }
+
+.learning { margin-top: 12px; padding: 10px 12px; background: #1b1e24; border-radius: 8px; }

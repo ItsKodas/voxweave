@@ -88,6 +88,30 @@ def _usual_pitch(f0: np.ndarray) -> tuple[float, float, float] | None:
     return float(mid), float(low), float(high)
 
 
+def measure_speech(audio: np.ndarray, sr: int) -> dict | None:
+    """The speaker's usual pitch, pitch range, speaking level and the input boost for it, from speech alone (live
+    learning's pool of speech, which has no quiet part). None when too little of it has a pitch."""
+    audio = np.nan_to_num(np.asarray(audio, dtype=np.float32).reshape(-1))
+    if len(audio) < int(MIN_VOICED_SECONDS * sr):
+        return None
+    f0, wav16 = pitch_of(audio, sr)
+    usual = _usual_pitch(f0)
+    if usual is None:
+        return None
+    frames = _frame_db(wav16, 16000, 0.01)
+    voiced = frames[: len(f0)][f0[: len(frames)] > 0]
+    if len(voiced) == 0:
+        return None
+    level = float(10.0 * np.log10(np.mean(10.0 ** (voiced / 10.0))))
+    peak = float(np.percentile(np.abs(audio), 99.9))
+    gain = 10.0 ** ((TARGET_LEVEL_DB - level) / 20.0)
+    if peak > 0:
+        gain = min(gain, 0.98 / peak)
+    pitch, low, high = usual
+    return {"pitch_hz": round(float(pitch), 1), "low_hz": round(float(low), 1), "high_hz": round(float(high), 1),
+            "level_db": round(level, 1), "input_gain": round(float(min(MAX_GAIN, max(MIN_GAIN, gain))), 3)}
+
+
 def analyse(audio: np.ndarray, sr: int, device: str, now: float) -> Profile:
     """Measures a calibration recording: QUIET_SECONDS of silence, then reading aloud."""
     audio = np.nan_to_num(np.asarray(audio, dtype=np.float32).reshape(-1))
@@ -197,6 +221,25 @@ class Calibration:
                 (self._folder / name).unlink()
             except FileNotFoundError:
                 pass
+
+    def save_learned(self, learned: dict, sample: np.ndarray | None) -> Profile:
+        """Makes what live learning measured the calibration: the speaker's pitch, range, level and boost from how
+        they talk live (the quiet gate and noise floor stay as calibrated), and recent speech as the reading deep
+        calibration converts."""
+        with self._lock:
+            profile = self.profile()
+            if profile is None:
+                raise CalibrationError("Calibrate first: live learning refines a calibration")
+            updated = Profile(learned["pitch_hz"], learned["low_hz"], learned["high_hz"], learned["level_db"],
+                              profile.noise_db, profile.gate_db, learned["input_gain"], profile.device, self._clock())
+            self._folder.mkdir(parents=True, exist_ok=True)
+            part = self._folder / "profile.json.part"
+            part.write_text(json.dumps(asdict(updated)), encoding="utf-8")
+            part.replace(self._folder / "profile.json")
+            if sample is not None and len(sample) >= int(MIN_VOICED_SECONDS * SAMPLE_RATE):
+                write_wav(self._folder / "sample.wav.part", np.asarray(sample, dtype=np.float32), SAMPLE_RATE)
+                (self._folder / "sample.wav.part").replace(self._folder / "sample.wav")
+            return updated
 
     def sample(self) -> np.ndarray | None:
         """The speaker's calibration reading (the part after the quiet), at SAMPLE_RATE. None when there is none:

@@ -53,7 +53,21 @@ export type StartRequest = {
   /** Whether the speaker's calibration (quiet gate, input level) is applied. Sent only when one exists. */
   use_calibration?: boolean;
 };
-export type SettingsPatch = { pitch_shift?: number; monitor_enabled?: boolean; monitor_gain?: number };
+export type SettingsPatch = {
+  pitch_shift?: number; monitor_enabled?: boolean; monitor_gain?: number; overrides?: Partial<Params>;
+};
+/** Live learning (backend/aivoice/learner.py): what it has heard and what it has changed. */
+export type LearnedSettings = { pitch_shift: number; likeness: number; advanced: Record<string, number | string | boolean> };
+export type Learning = {
+  enabled: boolean;
+  speech_seconds?: number;
+  passes?: number;
+  message?: string;
+  last_change?: string | null;
+  saved?: boolean;
+  learned?: { pitch_hz: number; low_hz: number; high_hz: number; level_db: number; input_gain: number } | null;
+  current?: LearnedSettings;
+};
 
 let port: number | null = null;
 
@@ -90,5 +104,8 @@ export const api = {
   stop: () => call<Stats>("POST", "/live/stop"),
   mode: (mode: Mode) => call<Stats>("POST", "/live/mode", { mode }),
   settings: (patch: SettingsPatch) => call<Stats>("PATCH", "/live/settings", patch),
+  learning: () => call<Learning>("GET", "/live/learning"),
+  setLearning: (enabled: boolean) => call<Learning>("POST", "/live/learning", { enabled }),
+  saveLearning: () => call<{ settings: LearnedSettings }>("POST", "/live/learning/save"),
   wsUrl: async () => `ws://${await origin()}/ws`,
 };

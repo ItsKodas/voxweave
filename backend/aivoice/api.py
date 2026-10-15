@@ -68,6 +68,11 @@ class SettingsBody(BaseModel):
     pitch_shift: float | None = None
     monitor_enabled: bool | None = None
     monitor_gain: float | None = None
+    overrides: dict | None = None  # likeness and the advanced settings (aivoice.presets.LIVE_CHANGEABLE)
+
+
+class LearningBody(BaseModel):
+    enabled: bool
 
 
 def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list[Device]],
@@ -188,6 +193,18 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
                 raise ValueError("Wait for deep calibration to finish before starting live mode")
             manager.start(StartConfig(**body.model_dump()))
         return manager.stats()
+
+    @app.get("/live/learning")
+    def learning() -> dict:
+        return manager.learning()
+
+    @app.post("/live/learning")
+    def set_learning(body: LearningBody) -> dict:
+        return manager.set_learning(body.enabled)
+
+    @app.post("/live/learning/save")
+    def save_learning() -> dict:
+        return manager.save_learning()
 
     @app.get("/live/insight")
     def insight() -> dict:

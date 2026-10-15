@@ -235,3 +235,48 @@ def test_deep_calibration_and_live_mode_never_run_together(tmp_path):
     tuner.active = True
     res = client.post("/live/start", json={"input_device": 1, "mic_device": 3, "voice": "demo"})
     assert res.status_code == 400 and "deep calibration" in res.json()["detail"]
+
+
+def test_live_learning_is_switched_on_reported_and_off_through_the_api(tmp_path):
+    import json
+
+    add_voice(tmp_path, "demo")
+    (tmp_path / "calibration").mkdir()
+    (tmp_path / "calibration" / "profile.json").write_text(json.dumps(dict(
+        pitch_hz=110, pitch_low_hz=90, pitch_high_hz=140, level_db=-37.0, noise_db=-70, gate_db=-64,
+        input_gain=4.0, device="Headset Mic", created=5)))
+
+    class Levelled(Identity):
+        speech_level_db = None
+
+    made = []
+
+    def learner_factory(voice, params, gain):
+        made.append((voice.id, params.chunk_ms, gain()))
+        return (lambda audio: None), None
+
+    calibration = Calibration(tmp_path, FakeRecorder(), lambda: DEVICES)
+    manager = LiveManager(tmp_path, lambda: DEVICES, lambda v: Levelled(), FakeStreams(), calibration=calibration,
+                          learner_factory=learner_factory)
+    client = TestClient(create_app(manager, tmp_path, lambda: DEVICES, [], allowed_hosts=["testserver"],
+                                   calibration=calibration))
+    res = client.post("/live/learning", json={"enabled": True})
+    assert res.status_code == 400 and "not running" in res.json()["detail"]
+    assert client.post("/live/start", json={"input_device": 1, "mic_device": 3, "voice": "demo"}).status_code == 200
+    on = client.post("/live/learning", json={"enabled": True}).json()
+    assert on["enabled"] is True and on["speech_seconds"] == 0 and made == [("demo", 250, 4.0)]
+    res = client.post("/live/learning/save")
+    assert res.status_code == 400 and "Keep talking" in res.json()["detail"]
+    assert client.post("/live/learning", json={"enabled": False}).json() == {"enabled": False}
+    client.post("/live/stop")
+
+
+def test_live_learning_needs_the_calibration_in_use(tmp_path):
+    add_voice(tmp_path, "demo")
+    manager = LiveManager(tmp_path, lambda: DEVICES, lambda v: Identity(), FakeStreams(),
+                          learner_factory=lambda voice, params, gain: ((lambda a: None), None))
+    client = TestClient(create_app(manager, tmp_path, lambda: DEVICES, [], allowed_hosts=["testserver"]))
+    client.post("/live/start", json={"input_device": 1, "mic_device": 3, "voice": "demo"})
+    res = client.post("/live/learning", json={"enabled": True})
+    assert res.status_code == 400 and "Calibrate" in res.json()["detail"]
+    client.post("/live/stop")

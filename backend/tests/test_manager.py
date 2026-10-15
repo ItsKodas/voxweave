@@ -293,3 +293,22 @@ def test_a_start_that_is_refused_does_not_change_the_listen_volume(setup):
         with pytest.raises(ValueError):
             manager.start(cfg(**bad))
     assert manager.monitor_gain == 0.5
+
+
+def test_likeness_and_the_advanced_settings_can_change_while_running(setup):
+    manager, _, _ = setup
+    manager.start(cfg())
+    manager.update(overrides={"index_rate": 0.6, "creak_repair": False, "f0_method": "dio", "protect": 0.45})
+    params = manager._session.processor.params
+    assert (params.index_rate, params.creak_repair, params.f0_method, params.protect) == (0.6, False, "dio", 0.45)
+
+
+def test_the_timing_cannot_change_while_running_and_bad_values_change_nothing(setup):
+    manager, _, _ = setup
+    manager.start(cfg())
+    before = manager._session.processor.params
+    with pytest.raises(ValueError, match="chunk_ms"):
+        manager.update(overrides={"chunk_ms": 500})
+    with pytest.raises(ValueError, match="protect"):
+        manager.update(overrides={"index_rate": 0.9, "protect": 3.0})
+    assert manager._session.processor.params == before

@@ -187,13 +187,7 @@ class Tuner:
                  advanced: tuple = ()) -> np.ndarray:
         """The reading as live mode would turn it out at these settings."""
         params = resolve("balanced", dict(QUALITY_LEVELS[quality], index_rate=likeness, **dict(advanced)))
-        processor = StreamProcessor(engine, self._sr, params)
-        processor.engine = self._calibration.wrap(engine)
-        processor.pitch_shift = pitch_shift
-        padded = np.concatenate([sample, np.zeros(processor.chunk * 2 + processor.crossfade, np.float32)])
-        out = np.concatenate([processor.process(padded[i:i + processor.chunk])
-                              for i in range(0, len(padded) - processor.chunk + 1, processor.chunk)])
-        return out[processor.crossfade: processor.crossfade + len(sample)]
+        return convert_like_live(engine, self._calibration.wrap(engine), sample, params, pitch_shift, self._sr)
 
     def _run(self, voice, sample, clips, quality, start_shift, start_likeness, start_advanced: tuple,
              cancel: threading.Event) -> None:
@@ -214,41 +208,25 @@ class Tuner:
             reference = self._transcriber.transcribe(
                 soxr.resample(np.clip(sample * gain, -1, 1), self._sr, 16000).astype(np.float32))
 
-            tried: dict[tuple, Candidate] = {}
+            def convert(shift, likeness, level, advanced):
+                return self._convert(engine, sample, level, shift, likeness, advanced)
 
-            def score(shift: int, likeness: float, level: int, advanced: tuple, trying: str | None = None) -> Candidate:
-                key = (shift, likeness, level, advanced)
-                if key not in tried:
-                    if cancel.is_set():
-                        raise _Stopped()
-                    self._set(step=len(tried) + 1, message=trying or (
-                        f"Trying pitch {shift:+d}, likeness {round(likeness * 100)}%, quality {level + 1}"))
-                    out = self._convert(engine, sample, level, shift, likeness, advanced)
-                    heard = self._transcriber.transcribe(soxr.resample(out, self._sr, 16000).astype(np.float32))
-                    tried[key] = Candidate(shift, likeness, round(similarity(speaker.embedding(out, self._sr), target), 4),
-                                           round(max(0.0, 1.0 - word_error_rate(reference, heard)), 3), level, advanced)
-                return tried[key]
+            def measure(out):
+                heard = self._transcriber.transcribe(soxr.resample(out, self._sr, 16000).astype(np.float32))
+                return (similarity(speaker.embedding(out, self._sr), target),
+                        max(0.0, 1.0 - word_error_rate(reference, heard)))
 
-            # Pitch, then likeness at the best pitch, then the quality level at both, then each advanced setting.
-            adv = start_advanced
-            baseline = score(start_shift, start_likeness, quality, adv)
-            shifts = [score(start_shift + d, start_likeness, quality, adv) for d in PITCH_STEPS]
-            best = choose(shifts, baseline)
-            likeness = [score(best.pitch_shift, r, quality, adv) for r in sorted(set(LIKENESS_STEPS) | {start_likeness})]
-            best = choose(likeness, best)
-            levels = [score(best.pitch_shift, best.likeness, q, adv) for q in range(len(QUALITY_LEVELS))]
-            best = choose(levels, best, prefer_faster=True)
-            for name, options in ADVANCED_STEPS.items():
-                current = dict(best.advanced)
-                values = list(dict.fromkeys([current[name], *options]))
-                tries = [score(best.pitch_shift, best.likeness, best.quality,
-                               tuple(sorted({**current, name: value}.items())),
-                               f"Trying {ADVANCED_LABELS[name]}: {_shown(value)}") for value in values]
-                best = choose(tries, best)
+            def progress(step, message):
+                if cancel.is_set():
+                    raise _Stopped()
+                self._set(step=step, message=message)
+
+            best, baseline, tried = search(convert, measure, start_shift, start_likeness, quality, start_advanced,
+                                           progress)
             result = {"voice_id": voice.id, "pitch_shift": best.pitch_shift, "likeness": best.likeness,
                       "similarity": best.similarity, "clarity": best.clarity, "quality": best.quality,
                       "advanced": dict(best.advanced), "baseline": baseline.as_dict(),
-                      "tried": [c.as_dict() for c in tried.values()], "created": time.time()}
+                      "tried": [c.as_dict() for c in tried], "created": time.time()}
             folder = self._data / "calibration" / "tuned"
             folder.mkdir(parents=True, exist_ok=True)
             part = folder / f"{voice.id}.json.part"
@@ -263,6 +241,76 @@ class Tuner:
 
 class _Stopped(Exception):
     pass
+
+
+def convert_like_live(engine, wrapped, sample: np.ndarray, params, pitch_shift: float, sample_rate: int) -> np.ndarray:
+    """Speech as live mode would turn it out with these parameters: chunk by chunk through a StreamProcessor, the
+    engine wrapped as live mode wraps it (the calibration's gate and boost)."""
+    processor = StreamProcessor(engine, sample_rate, params)
+    processor.engine = wrapped
+    processor.pitch_shift = pitch_shift
+    padded = np.concatenate([sample, np.zeros(processor.chunk * 2 + processor.crossfade, np.float32)])
+    out = np.concatenate([processor.process(padded[i:i + processor.chunk])
+                          for i in range(0, len(padded) - processor.chunk + 1, processor.chunk)])
+    return out[processor.crossfade: processor.crossfade + len(sample)]
+
+
+def live_tuner(engine, wrap, speaker, target: np.ndarray, transcriber, timing: dict, gain: Callable[[], float],
+               sample_rate: int = SAMPLE_RATE):
+    """The tune function live learning runs (aivoice.learner): the search on recent speech at the session's own
+    chunk timing, without the quality step (quality cannot change while live mode runs)."""
+    def tune(audio: np.ndarray, settings: dict, progress) -> dict:
+        reference = transcriber.transcribe(
+            soxr.resample(np.clip(audio * gain(), -1, 1), sample_rate, 16000).astype(np.float32))
+
+        def convert(shift, likeness, level, advanced):
+            params = resolve("balanced", dict(timing, index_rate=likeness, **dict(advanced)))
+            return convert_like_live(engine, wrap(engine), audio, params, shift, sample_rate)
+
+        def measure(out):
+            heard = transcriber.transcribe(soxr.resample(out, sample_rate, 16000).astype(np.float32))
+            return (similarity(speaker.embedding(out, sample_rate), target),
+                    max(0.0, 1.0 - word_error_rate(reference, heard)))
+
+        best, _, _ = search(convert, measure, settings["pitch_shift"], settings["likeness"], 0,
+                            tuple(sorted(settings["advanced"].items())), progress, levels=False)
+        return {"pitch_shift": best.pitch_shift, "likeness": best.likeness, "advanced": dict(best.advanced)}
+
+    return tune
+
+
+def search(convert, measure, start_shift: int, start_likeness: float, quality: int, start_advanced: tuple,
+           progress=lambda step, message: None, levels: bool = True) -> tuple[Candidate, Candidate, list[Candidate]]:
+    """The search behind deep calibration, for any audio: `convert(shift, likeness, level, advanced)` turns the
+    speech out at those settings and `measure(audio)` scores it as (likeness to the voice, clarity). Pitch first,
+    then likeness at the best pitch, then the quality level, then each advanced setting in turn. `progress(step,
+    message)` is called before each try, and may raise to stop. Returns (best, the starting point, all tried)."""
+    tried: dict[tuple, Candidate] = {}
+
+    def score(shift: int, likeness: float, level: int, advanced: tuple, trying: str | None = None) -> Candidate:
+        key = (shift, likeness, level, advanced)
+        if key not in tried:
+            progress(len(tried) + 1, trying or f"Trying pitch {shift:+d}, likeness {round(likeness * 100)}%, "
+                                               f"quality {level + 1}")
+            sim, clarity = measure(convert(shift, likeness, level, advanced))
+            tried[key] = Candidate(shift, likeness, round(float(sim), 4), round(float(clarity), 3), level, advanced)
+        return tried[key]
+
+    adv = start_advanced
+    baseline = score(start_shift, start_likeness, quality, adv)
+    best = choose([score(start_shift + d, start_likeness, quality, adv) for d in PITCH_STEPS], baseline)
+    best = choose([score(best.pitch_shift, r, quality, adv) for r in sorted(set(LIKENESS_STEPS) | {start_likeness})],
+                  best)
+    if levels:
+        best = choose([score(best.pitch_shift, best.likeness, q, adv) for q in range(len(QUALITY_LEVELS))], best,
+                      prefer_faster=True)
+    for name, options in ADVANCED_STEPS.items():
+        current = dict(best.advanced)
+        values = list(dict.fromkeys([current[name], *options]))
+        best = choose([score(best.pitch_shift, best.likeness, best.quality,
+                             tuple(sorted({**current, name: value}.items())),
+                             f"Trying {ADVANCED_LABELS[name]}: {_shown(value)}") for value in values], best)
+    return best, baseline, list(tried.values())
 
 
 def _shown(value) -> str:

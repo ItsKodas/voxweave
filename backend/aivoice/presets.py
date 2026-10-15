@@ -77,6 +77,21 @@ def _validate(p: LiveParams) -> None:
         raise ValueError("lookahead_ms must be between 0 and the smaller of 500 and context_ms")
 
 
+# What may change while live mode runs: everything but the timing, which sets the chunk size of the session.
+LIVE_CHANGEABLE = ("index_rate", "f0_method", "protect", "volume_follow", "background_cut_db", "natural_variation_st",
+                   "pitch_cleanup", "creak_repair", "join_smoothing")
+
+
+def changed_live(params: LiveParams, changes: dict) -> LiveParams:
+    """The running session's parameters with these changes, checked as a start would check them."""
+    fixed = sorted(set(changes) - set(LIVE_CHANGEABLE))
+    if fixed:
+        raise ValueError(f"{', '.join(fixed)} cannot change while live mode runs: stop and start it again")
+    updated = replace(params, **changes)
+    _validate(updated)
+    return updated
+
+
 def resolve(preset: str, overrides: dict | None = None) -> LiveParams:
     if preset not in PRESETS:
         raise ValueError(f"Unknown preset: {preset}")

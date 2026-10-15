@@ -11,7 +11,7 @@ from aivoice.config import SAMPLE_RATE, dml_device_id
 from aivoice.engine_guard import GuardedEngine
 from aivoice.devices import Device, get_device
 from aivoice.live import LiveSession
-from aivoice.presets import resolve
+from aivoice.presets import changed_live, resolve
 from aivoice.pretrained import PretrainedVoice, base_voice_id, list_voices, vec_model_path
 from aivoice.processor import StreamProcessor
 from aivoice.router import Router
@@ -88,7 +88,7 @@ def default_engine_factory(data: Path) -> Callable[[PretrainedVoice], object]:
 class LiveManager:
     def __init__(self, data: Path, list_devices: Callable[[], list[Device]], engine_factory, stream_factory,
                  sample_rate: int = SAMPLE_RATE, refresh_devices: Callable[[], None] | None = None,
-                 calibration=None, insight_factory=None):
+                 calibration=None, insight_factory=None, learner_factory=None):
         self._data = data
         self._list_devices = list_devices
         self._engine_factory = engine_factory
@@ -98,6 +98,11 @@ class LiveManager:
         self._calibration = calibration
         # Makes the collector behind the Live tab's graphs for a voice (aivoice.insight); None for no graphs.
         self._insight_factory = insight_factory
+        # Makes live learning's (measure_voice, tune) for a voice and the session's parameters (aivoice.learner).
+        self._learner_factory = learner_factory
+        self._learner = None
+        self._voice = None
+        self._learned_saved = False
         self._lock = threading.Lock()
         self._session: LiveSession | None = None
         self._last_error: str | None = None
@@ -182,9 +187,11 @@ class LiveManager:
             except Exception as exc:  # noqa: BLE001
                 raise ValueError(f"Could not open audio devices: {exc}") from exc
             self._session = session
+            self._voice = voice
             self.monitor_gain = float(cfg.monitor_gain)
 
     def _stop_locked(self) -> None:
+        self._end_learning(revert=False)
         if self._session is not None:
             self._session.stop()
             self._session = None
@@ -218,8 +225,11 @@ class LiveManager:
         self._require().processor.mode = mode
 
     def update(self, pitch_shift: float | None = None, monitor_enabled: bool | None = None,
-               monitor_gain: float | None = None) -> None:
+               monitor_gain: float | None = None, overrides: dict | None = None) -> None:
         session = self._require()
+        if overrides:
+            # Checked whole before anything changes; the engine reads the parameters at each conversion.
+            session.processor.params = changed_live(session.processor.params, overrides)
         if pitch_shift is not None:
             _check_pitch(pitch_shift)
             session.processor.pitch_shift = pitch_shift
@@ -230,6 +240,83 @@ class LiveManager:
                 self.monitor_gain = float(monitor_gain)
             if monitor_enabled is not None:
                 session.router.set_enabled("monitor", monitor_enabled)
+
+    # ---- live learning
+
+    def _end_learning(self, revert: bool) -> None:
+        learner, self._learner = self._learner, None
+        if learner is None:
+            return
+        if self._session is not None:
+            self._session.learner = None
+        learner.stop()
+        if revert and not self._learned_saved:
+            try:
+                learner.revert()
+            except ValueError:
+                pass  # live mode stopped meanwhile
+
+    def _apply_learned(self, changes: dict) -> None:
+        session = self._session
+        if session is None or not session.running:
+            return
+        self.update(pitch_shift=changes.get("pitch_shift"), overrides=changes.get("overrides"))
+        engine = session.processor.engine
+        if "input_gain" in changes and hasattr(engine, "_gain"):
+            engine._gain = float(changes["input_gain"])
+        if "speech_level_db" in changes and hasattr(engine, "speech_level_db"):
+            engine.speech_level_db = changes["speech_level_db"]
+
+    def set_learning(self, enabled: bool) -> dict:
+        with self._lock:
+            session = self._require()
+            if not enabled:
+                self._end_learning(revert=True)
+                return self.learning()
+            if self._learner is not None:
+                return self.learning()
+            if self._learner_factory is None or self._voice is None:
+                raise ValueError("Live learning is not available for this voice")
+            engine = session.processor.engine
+            if not hasattr(engine, "_gain") or getattr(engine, "speech_level_db", None) is None:
+                raise ValueError("Calibrate your voice first, and keep Use my calibration on: learning refines it")
+            from aivoice.deeptune import ADVANCED_STEPS
+            from aivoice.learner import Learner
+
+            params = session.processor.params
+            start = {"pitch_shift": int(round(session.processor.pitch_shift)), "likeness": params.index_rate,
+                     "advanced": {name: getattr(params, name) for name in ADVANCED_STEPS},
+                     "input_gain": float(engine._gain), "speech_level_db": float(engine.speech_level_db)}
+            measure_voice, tune = self._learner_factory(self._voice, params, lambda: float(engine._gain))
+            slow = [session.processor.slow_chunks]
+
+            def behind() -> bool:
+                now, slow[0] = session.processor.slow_chunks, session.processor.slow_chunks
+                return now > slow[0] or session.processor.infer_ms > 0.8 * params.chunk_ms
+
+            learner = Learner(self._sr, start, measure_voice, tune, self._apply_learned, behind=behind)
+            self._learned_saved = False
+            self._learner = learner
+            session.learner = learner
+            learner.start()
+            return self.learning()
+
+    def learning(self) -> dict:
+        learner = self._learner
+        return {"enabled": False} if learner is None else {**learner.status(), "saved": self._learned_saved}
+
+    def save_learning(self) -> dict:
+        """Makes what was learned the calibration, and returns the settings to save for the voice."""
+        learner = self._learner
+        if learner is None:
+            raise ValueError("Live learning is not on")
+        saved = learner.saved()
+        if saved["profile"] is None:
+            raise ValueError("Keep talking: learning needs at least 15 seconds of your speech first")
+        if self._calibration is not None:
+            self._calibration.save_learned(saved["profile"], saved["sample"])
+        self._learned_saved = True
+        return {"settings": saved["settings"], "profile": saved["profile"]}
 
     def insight(self) -> dict | None:
         """The recent history behind the Live tab's graphs, while live mode runs with them."""

@@ -31,6 +31,8 @@ class LiveSession:
         self.processor = processor
         # Collects what each chunk did for the Live tab's graphs (aivoice.insight); optional.
         self.insight = insight
+        # Learns the speaker's voice while live mode runs (aivoice.learner); set and cleared by the manager.
+        self.learner = None
         self.router = router
         self.sample_rate = sample_rate
         self.running = False
@@ -84,12 +86,16 @@ class LiveSession:
             self._out_level = float(np.max(np.abs(out)))
             self.router.push(out)
             self._flowing = True
-            if self.insight is not None:
-                try:
-                    self.insight.add(block, out, getattr(self.processor.engine, "insight", None),
-                                     self.processor.infer_ms, self.processor.params.chunk_ms)
-                except Exception:  # noqa: BLE001 - the graphs must never stop the voice
-                    pass
+            if self.insight is not None or self.learner is not None:
+                engine_insight = getattr(self.processor.engine, "insight", None)
+                for listener, args in ((self.insight, (block, out, engine_insight, self.processor.infer_ms,
+                                                       self.processor.params.chunk_ms)),
+                                       (self.learner, (block, engine_insight))):
+                    if listener is not None:
+                        try:
+                            listener.add(*args)
+                        except Exception:  # noqa: BLE001 - the graphs and learning must never stop the voice
+                            pass
             return True
         except Exception as exc:  # noqa: BLE001 - any fault must fail closed, never reach the worker
             self._fail(str(exc) or type(exc).__name__)

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { LiveInsight } from "./LiveInsight";
+import type { Learning } from "./api";
 import { api, Device, DeviceList, Params, Stats, Voice } from "./api";
 import { CalibrationPanel } from "./CalibrationPanel";
 import { calibrationApi, VoiceProfile } from "./calibrationApi";
@@ -200,6 +201,9 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
   // Deep calibration: tries settings on the calibration reading and keeps the most alike (aivoice.deeptune).
   const [tuning, setTuning] = useState<string | null>(null); // the progress line while it runs
   const [tuneNote, setTuneNote] = useState<string | null>(null);
+  // Live learning: re-measures the voice and re-tunes slowly while live mode runs (backend/aivoice/learner.py).
+  const [learning, setLearning] = useState<Learning | null>(null);
+  const [learnNote, setLearnNote] = useState<string | null>(null);
 
   // The quality level sets the chunk timing; the Advanced fields can still override each value by hand.
   useEffect(() => {
@@ -453,6 +457,59 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
       setError((e as Error).message);
     } finally {
       setTuning(null);
+    }
+  };
+
+  // While learning is on, its status is fetched every two seconds, and what it changed is shown on the controls.
+  const learningOn = !!learning?.enabled;
+  useEffect(() => {
+    if (!stats.running) {
+      setLearning(null);
+      return;
+    }
+    if (!learningOn) return;
+    let gone = false;
+    const timer = setInterval(async () => {
+      try {
+        const next = await api.learning();
+        if (gone) return;
+        setLearning(next);
+        if (next.current) {
+          const current = next.current;
+          setPitch(current.pitch_shift);
+          setOverrides((o) => ({ ...o, index_rate: current.likeness, ...(validAdvanced(current.advanced) ?? {}) }));
+        }
+      } catch {
+        // the next poll may succeed
+      }
+    }, 2000);
+    return () => {
+      gone = true;
+      clearInterval(timer);
+    };
+  }, [stats.running, learningOn]);
+
+  const toggleLearning = async (on: boolean) => {
+    setLearnNote(null);
+    try {
+      setLearning(await api.setLearning(on));
+      if (!on) setLearnNote("Learning is off. Anything it changed and you did not save was put back.");
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const saveLearning = async () => {
+    try {
+      const { settings: learned } = await api.saveLearning();
+      const settings = { pitch: learned.pitch_shift, quality, likeness: learned.likeness,
+                         advanced: validAdvanced(learned.advanced) ?? advanced };
+      storeSettings(voice, settings);
+      setSaved(settings);
+      setLearnNote(`Saved. Your calibration now follows how you talk live, and these settings are saved for ${voiceName}.`);
+      setLearning(await api.learning());
+    } catch (e) {
+      setError((e as Error).message);
     }
   };
 
@@ -788,6 +845,28 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
               down in the Windows sound settings, then calibrate again.
             </p>
           )}
+        </div>
+      )}
+      {stats.running && profile !== null && voice !== PREVIEW_VOICE_ID && (
+        <div className="learning">
+          <label className="row">
+            <input type="checkbox" checked={learningOn} onChange={(e) => toggleLearning(e.target.checked)} />
+            Keep learning while I talk
+          </label>
+          <p className="hint">
+            Listens to how you really talk, measures your voice again and slowly re-tunes the settings in the
+            background, changing them only in your pauses and only a little at a time. Nothing is kept unless you save.
+          </p>
+          {learningOn && learning && (
+            <>
+              <p className="hint" aria-live="polite">
+                Heard {Math.round(learning.speech_seconds ?? 0)} s of your speech. {learning.message}.
+                {learning.last_change ? ` Last change: ${learning.last_change}.` : ""}
+              </p>
+              <button className="secondary" onClick={saveLearning}>Save learned calibration</button>
+            </>
+          )}
+          {learnNote && <p className="hint">{learnNote}</p>}
         </div>
       )}
       <LiveInsight running={stats.running} voiceName={voiceName} />
