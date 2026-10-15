@@ -70,8 +70,11 @@ class LiveSession:
             if self._failed:
                 return
             mono = indata if indata.ndim == 1 else indata.mean(axis=1)
-            self._in_level = float(np.max(np.abs(mono))) if len(mono) else 0.0
-            if self._in_level >= CLIPPING_LEVEL and int(np.sum(np.abs(mono) >= CLIPPING_LEVEL)) >= CLIPPING_SAMPLES:
+            # The meter shows the voice, not the microphone's offset or slow drift (inaudible, but as loud as the
+            # voice on some headsets): the block's own mean taken out. Clipping is judged on the raw samples.
+            self._in_level = float(np.max(np.abs(mono - np.mean(mono)))) if len(mono) else 0.0
+            raw_peak = float(np.max(np.abs(mono))) if len(mono) else 0.0
+            if raw_peak >= CLIPPING_LEVEL and int(np.sum(np.abs(mono) >= CLIPPING_LEVEL)) >= CLIPPING_SAMPLES:
                 self._clipped_at = time.monotonic()
             self._inbuf.write(mono)
         except Exception as exc:  # noqa: BLE001 - must not propagate into the audio thread

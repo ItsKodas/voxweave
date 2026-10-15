@@ -166,3 +166,11 @@ def test_a_broken_insight_never_stops_the_voice(tmp_path):
     session.insight = Broken()
     session.feed(np.full(session.processor.chunk, 0.1, np.float32))
     assert session.pump() is True and session.error is None
+
+
+def test_the_input_level_shown_leaves_out_the_microphones_inaudible_drift():
+    insight = Insight(SR)
+    t = np.arange(CHUNK) / SR
+    drift = (0.05 * np.sin(2 * np.pi * 5 * t)).astype(np.float32)  # as loud as speech, never heard
+    insight.add(drift, np.zeros(CHUNK, np.float32), engine_insight(1), 50.0, 250)
+    assert max(insight.snapshot()["in_db"]) < -50  # the graph shows silence, not a voice

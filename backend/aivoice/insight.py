@@ -11,6 +11,8 @@ from typing import Callable
 
 import numpy as np
 
+from aivoice.dsp import remove_rumble
+
 WINDOW_SECONDS = 10
 FPS = 50  # points a second in the graphs
 MATCH_SECONDS = 3.0
@@ -66,7 +68,8 @@ class Insight:
             gated = _resample(engine_insight["gated"], count)
         else:  # the quiet gate kept the engine from running: nothing was converted
             heard, sent, corrected, gated = [0.0] * count, [0.0] * count, [False] * count, [True] * count
-        in_db, out_db = _levels(block, count), _levels(out, count)
+        # The microphone's level without its inaudible drift and hum, which can be as loud as the voice.
+        in_db, out_db = _levels(remove_rumble(np.asarray(block, dtype=np.float32), self._sr), count), _levels(out, count)
         with self._lock:
             self._samples += len(block)
             now = self._samples / self._sr

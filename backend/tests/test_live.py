@@ -1,3 +1,4 @@
+import pytest
 import time
 
 import numpy as np
@@ -257,12 +258,12 @@ def test_start_after_failure_resets_state_and_runs_again():
 
 def test_stats_shape():
     session, proc, _, _ = make()
-    session.feed(np.full(proc.chunk, 0.5, dtype=np.float32))
+    session.feed((0.5 * np.sin(2 * np.pi * 220 * np.arange(proc.chunk) / SR)).astype(np.float32))
     session.pump()
     stats = session.stats()
     assert set(stats) == {"running", "mode", "error", "infer_ms", "latency_ms", "in_level", "out_level",
                           "underruns", "slow_chunks", "suggest_faster", "clipping"}
-    assert stats["in_level"] == 0.5 and stats["mode"] == "converted"
+    assert stats["in_level"] == pytest.approx(0.5, rel=0.02) and stats["mode"] == "converted"
     assert stats["latency_ms"] >= PARAMS.chunk_ms + PARAMS.crossfade_ms
 
 
@@ -372,3 +373,10 @@ def test_one_full_scale_sample_is_not_called_clipping():
     block[0] = 1.0
     session.feed(block)
     assert session.stats()["clipping"] is False
+
+
+def test_the_input_meter_leaves_out_the_microphones_inaudible_drift():
+    session, proc, _, _ = make()
+    t = np.arange(480) / SR
+    session.feed((0.3 + 0.001 * np.sin(2 * np.pi * 5 * t)).astype(np.float32))  # an offset, near silence
+    assert session.stats()["in_level"] < 0.01
