@@ -4,6 +4,21 @@ rem Close the app with Quit in its tray menu; closing the window only hides it.
 setlocal
 cd /d "%~dp0app"
 
+rem This file runs Voxweave from its source code, which needs the developer tools. On any other PC, install
+rem Voxweave with its installer (Voxweave_..._x64-setup.exe) instead.
+where cargo >nul 2>&1
+if errorlevel 1 (
+  echo This launcher builds Voxweave from its source code and needs Rust, which is not installed on this PC.
+  echo To use Voxweave here, run its installer instead: Voxweave_..._x64-setup.exe
+  goto :failed
+)
+where npm >nul 2>&1
+if errorlevel 1 (
+  echo This launcher builds Voxweave from its source code and needs Node.js, which is not installed on this PC.
+  echo To use Voxweave here, run its installer instead: Voxweave_..._x64-setup.exe
+  goto :failed
+)
+
 if not exist node_modules (
   echo Installing the app's packages the first time. This takes a minute.
   call npm install || goto :failed
