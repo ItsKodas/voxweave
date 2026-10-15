@@ -52,6 +52,31 @@ def protect_consonants(phone: np.ndarray, phone0: np.ndarray, pitchf: np.ndarray
     return (phone * mask + phone0 * (1.0 - mask)).astype(np.float32)
 
 
+ENVELOPE_FRAME_S = 0.04
+ENVELOPE_HOP_S = 0.01
+MAX_ENVELOPE_GAIN = 4.0  # before the follow strength: a near-silent output is never lifted into loud noise
+
+
+def _envelope(audio: np.ndarray, sample_rate: int) -> np.ndarray:
+    """RMS level around each sample (40 ms frames every 10 ms, interpolated)."""
+    frame, hop = int(sample_rate * ENVELOPE_FRAME_S), int(sample_rate * ENVELOPE_HOP_S)
+    padded = np.pad(audio.astype(np.float32), (frame // 2, frame // 2))
+    squares = np.concatenate([[0.0], np.cumsum(padded.astype(np.float64) ** 2)])
+    starts = np.arange(0, len(padded) - frame + 1, hop)
+    rms = np.sqrt(np.maximum(squares[starts + frame] - squares[starts], 0.0) / frame)
+    return np.interp(np.arange(len(audio)), starts, rms)
+
+
+def follow_envelope(out: np.ndarray, audio: np.ndarray, sample_rate: int, follow: float) -> np.ndarray:
+    """The output with its loudness moved toward the input's: `follow` 0 leaves it, 1 gives it the input's envelope.
+    The change is limited to MAX_ENVELOPE_GAIN either way."""
+    if follow <= 0.0:
+        return out
+    ratio = (_envelope(audio, sample_rate) + 1e-5) / (_envelope(out, sample_rate) + 1e-5)
+    gain = np.clip(ratio, 1.0 / MAX_ENVELOPE_GAIN, MAX_ENVELOPE_GAIN) ** follow
+    return (out * gain).astype(np.float32)
+
+
 class RvcEngine:
     def __init__(self, model_path, vec_path, model_sample_rate: int, index_path=None,
                  session_factory: Callable[[str], object] | None = None, rmvpe=None):
@@ -121,4 +146,4 @@ class RvcEngine:
         out = np.asarray(self._net.run(None, feed)[0], dtype=np.float32).reshape(-1)
         if self._model_sr != sample_rate:
             out = soxr.resample(out, self._model_sr, sample_rate).astype(np.float32)
-        return _fit(out, n)
+        return follow_envelope(_fit(out, n), audio, sample_rate, params.volume_follow)

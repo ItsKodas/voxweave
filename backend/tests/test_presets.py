@@ -62,3 +62,9 @@ def test_builtin_presets_use_rmvpe_and_protect_consonants():
         with pytest.raises(ValueError, match="protect"):
             resolve("balanced", {"protect": bad})
     assert resolve("balanced", {"f0_method": "harvest"}).f0_method == "harvest"
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.1])
+def test_volume_follow_must_be_between_0_and_1(value):
+    with pytest.raises(ValueError, match="volume_follow"):
+        resolve("balanced", {"volume_follow": value})

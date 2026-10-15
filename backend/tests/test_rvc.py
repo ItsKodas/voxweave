@@ -137,3 +137,34 @@ def test_make_session_refuses_cpu_fallback(monkeypatch):
     monkeypatch.setattr(ort, "InferenceSession", CpuOnly)
     with pytest.raises(RuntimeError, match="DirectML is not available"):
         make_session("model.onnx")
+
+
+def _rms(x):
+    return float(np.sqrt(np.mean(x * x)))
+
+
+def test_output_loudness_follows_the_input():
+    # The model's own loudness can dip where the speaker's does not; the output follows the input's envelope.
+    engine, _ = make()
+    audio = np.concatenate([sine(220, SR // 2), 0.2 * sine(220, SR // 2)])
+    out = engine.convert(audio, SR, 0.0, PARAMS)
+    loud, quiet = out[SR // 8: 3 * SR // 8], out[5 * SR // 8: 7 * SR // 8]
+    expected = (0.2 ** PARAMS.volume_follow)
+    assert _rms(quiet) / _rms(loud) == pytest.approx(expected, rel=0.1)
+
+
+def test_volume_follow_zero_keeps_the_models_loudness():
+    from dataclasses import replace
+
+    engine, _ = make()
+    audio = np.concatenate([sine(220, SR // 2), 0.2 * sine(220, SR // 2)])
+    out = engine.convert(audio, SR, 0.0, replace(PARAMS, volume_follow=0.0))
+    assert np.allclose(out[SR // 10: -SR // 10], 0.25, atol=1e-3)  # resampling rings only at the edges
+
+
+def test_volume_follow_never_lifts_a_near_silent_output_far():
+    from aivoice.engines.rvc import follow_envelope
+
+    out = np.full(SR, 1e-4, dtype=np.float32)
+    lifted = follow_envelope(out, sine(220), SR, 1.0)
+    assert np.max(np.abs(lifted)) <= 1e-4 * 4.0 + 1e-7

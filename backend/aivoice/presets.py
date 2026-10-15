@@ -12,6 +12,9 @@ class LiveParams:
     index_rate: float
     protect: float = 0.33  # consonants keep this much of the index's pull; 0.5 or more protects nothing
     lookahead_ms: int = 0  # the played audio ends this far before the newest input: the model has heard past it
+    # How far the output's loudness follows the speaker's (0 keeps the model's own, 1 copies the speaker's). A model's
+    # own loudness can drop mid-sentence where the speaker's does not; RVC calls a quarter of it "rms_mix_rate".
+    volume_follow: float = 0.75
 
 
 # Every preset uses RMVPE, the neural pitch tracker the voices were trained with (it falls back to "dio" when its
@@ -51,6 +54,8 @@ def _validate(p: LiveParams) -> None:
         raise ValueError("index_rate must be between 0 and 1")
     if not 0.0 <= p.protect <= 0.5:
         raise ValueError("protect must be between 0 and 0.5")
+    if not 0.0 <= p.volume_follow <= 1.0:
+        raise ValueError("volume_follow must be between 0 and 1")
     if not 0 <= p.lookahead_ms <= min(500, p.context_ms):
         raise ValueError("lookahead_ms must be between 0 and the smaller of 500 and context_ms")
 
