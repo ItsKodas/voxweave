@@ -151,6 +151,12 @@ class LiveManager:
                     engine.pitch_range = self._calibration.voice_pitch_range(base_voice_id(voice.id))
                 except Exception:  # noqa: BLE001 - without a range the engine works as before
                     engine.pitch_range = None
+            if voice is not None and hasattr(engine, "speech_level_db"):
+                # Background sound is judged against the speaker's calibrated level (after the calibration's gain);
+                # without a calibration in use the engine learns it from the speech it hears.
+                profile = self._calibration.profile() if cfg.use_calibration and self._calibration is not None else None
+                engine.speech_level_db = None if profile is None else (
+                    profile.level_db + 20.0 * float(np.log10(profile.input_gain)))
             if cfg.use_calibration and self._calibration is not None:
                 # After the model has proved itself on the warm-up above: a closed gate would have hidden a
                 # model that cannot run.

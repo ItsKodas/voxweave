@@ -144,3 +144,26 @@ def test_live_mode_gives_the_engine_the_voices_pitch_range(tmp_path):
     low, high = engine.pitch_range
     assert low == pytest.approx(220, rel=0.05) and high == pytest.approx(220, rel=0.05)
     manager.stop()
+
+
+def test_live_mode_gives_the_engine_the_speakers_calibrated_level(tmp_path):
+    import json
+
+    add_voice(tmp_path, "demo")
+    (tmp_path / "calibration").mkdir()
+    (tmp_path / "calibration" / "profile.json").write_text(json.dumps(dict(
+        pitch_hz=110, pitch_low_hz=90, pitch_high_hz=140, level_db=-37.0, noise_db=-70, gate_db=-64,
+        input_gain=4.0, device="Headset Mic", created=5)))
+
+    class Levelled(Identity):
+        speech_level_db = None
+
+    engine = Levelled()
+    calibration = Calibration(tmp_path, FakeRecorder(), lambda: DEVICES)
+    manager = LiveManager(tmp_path, lambda: DEVICES, lambda v: engine, FakeStreams(), calibration=calibration)
+    manager.start(StartConfig(input_device=1, mic_device=3, voice="demo"))
+    assert engine.speech_level_db == pytest.approx(-37.0 + 20 * np.log10(4.0))  # the level after the gain
+    manager.stop()
+    manager.start(StartConfig(input_device=1, mic_device=3, voice="demo", use_calibration=False))
+    assert engine.speech_level_db is None  # learned from speech instead
+    manager.stop()

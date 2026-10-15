@@ -68,3 +68,9 @@ def test_builtin_presets_use_rmvpe_and_protect_consonants():
 def test_volume_follow_must_be_between_0_and_1(value):
     with pytest.raises(ValueError, match="volume_follow"):
         resolve("balanced", {"volume_follow": value})
+
+
+@pytest.mark.parametrize("value", [-1.0, 61.0])
+def test_background_cut_must_be_between_0_and_60_db(value):
+    with pytest.raises(ValueError, match="background_cut_db"):
+        resolve("balanced", {"background_cut_db": value})

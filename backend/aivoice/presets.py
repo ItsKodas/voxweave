@@ -15,6 +15,9 @@ class LiveParams:
     # How far the output's loudness follows the speaker's (0 keeps the model's own, 1 copies the speaker's). A model's
     # own loudness can drop mid-sentence where the speaker's does not; RVC calls a quarter of it "rms_mix_rate".
     volume_follow: float = 0.75
+    # How far the output is turned down where the input is background sound, not speech: no pitch, and well below
+    # the speaker's level. A model turns quiet room sounds into breathy mumbling. 0 switches it off.
+    background_cut_db: float = 30.0
 
 
 # Every preset uses RMVPE, the neural pitch tracker the voices were trained with (it falls back to "dio" when its
@@ -54,6 +57,8 @@ def _validate(p: LiveParams) -> None:
         raise ValueError("index_rate must be between 0 and 1")
     if not 0.0 <= p.protect <= 0.5:
         raise ValueError("protect must be between 0 and 0.5")
+    if not 0.0 <= p.background_cut_db <= 60.0:
+        raise ValueError("background_cut_db must be between 0 and 60")
     if not 0.0 <= p.volume_follow <= 1.0:
         raise ValueError("volume_follow must be between 0 and 1")
     if not 0 <= p.lookahead_ms <= min(500, p.context_ms):

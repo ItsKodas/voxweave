@@ -184,3 +184,40 @@ def test_live_windows_carry_their_pitch_into_the_next_join():
     # where this window's played audio begins, it starts from the pitch the last window used for that moment
     assert second[head] == pytest.approx(first[head + chunk_ms // 10], rel=0.03)
     assert second[-1] == pytest.approx(240.0, rel=0.03)
+
+
+def _quiet_after_speech(rng_seed=0):
+    rng = np.random.default_rng(rng_seed)
+    speech = sine(220, SR // 2)
+    pause = (0.002 * rng.standard_normal(SR // 2)).astype(np.float32)  # room sound: no pitch, far below speech
+    return np.concatenate([speech, pause])
+
+
+def test_background_sound_in_a_pause_is_cut():
+    from dataclasses import replace
+
+    engine, _ = make()
+    engine.speech_level_db = -9.0  # a 0.5 sine
+    params = replace(PARAMS, volume_follow=0.0)
+    out = engine.convert(_quiet_after_speech(), SR, 0.0, params)
+    speech, pause = out[SR // 8: 3 * SR // 8], out[3 * SR // 4:]
+    assert 20 * np.log10(_rms(pause) / _rms(speech)) < -25
+
+
+def test_the_end_of_a_word_just_after_speech_is_kept():
+    from dataclasses import replace
+
+    engine, _ = make()
+    engine.speech_level_db = -9.0
+    out = engine.convert(_quiet_after_speech(), SR, 0.0, replace(PARAMS, volume_follow=0.0))
+    just_after = out[SR // 2 + SR // 50: SR // 2 + SR // 10]  # 20 to 100 ms after the speech stops
+    assert _rms(just_after) > 0.2
+
+
+def test_background_cut_can_be_switched_off():
+    from dataclasses import replace
+
+    engine, _ = make()
+    engine.speech_level_db = -9.0
+    out = engine.convert(_quiet_after_speech(), SR, 0.0, replace(PARAMS, volume_follow=0.0, background_cut_db=0.0))
+    assert np.allclose(out[SR // 10: -SR // 10], 0.25, atol=1e-3)

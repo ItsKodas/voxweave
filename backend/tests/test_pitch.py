@@ -121,11 +121,12 @@ def test_voice_like_frames_tells_voice_from_hiss_and_silence():
 def test_creak_where_the_tracker_lost_the_pitch_holds_the_last_good_pitch():
     from aivoice.engines.pitch import repair_creak
 
-    f0 = np.array([110.0] * 20 + [0.0] * 10 + [50.0] * 5 + [105.0] * 5, np.float32)
+    f0 = np.array([110.0] * 20 + [0.0] * 10 + [50.0] * 5 + [105.0] * 15, np.float32)
     voice_like = np.ones(len(f0), bool)
     out = repair_creak(f0, voice_like)
-    assert np.all(out[20:35] == 110.0)  # lost and far-too-low frames held at the last good pitch
-    assert np.all(out[35:] == 105.0)
+    # lost and far-too-low frames held near the last good pitch, falling a little as speech does
+    assert np.all((out[20:35] <= 110.0) & (out[20:35] >= 110.0 * 2 ** (-1.5 / 12)))
+    assert np.all(out[-3:] == 105.0)  # and back on the real pitch once it returns
 
 
 def test_consonants_pauses_and_long_stretches_are_left_alone():
@@ -137,7 +138,8 @@ def test_consonants_pauses_and_long_stretches_are_left_alone():
     assert np.all(repair_creak(f0, hissing)[20:30] == 0)
     long_gap = np.array([110.0] * 20 + [0.0] * 60, np.float32)
     out = repair_creak(long_gap, np.ones(len(long_gap), bool), max_frames=40)
-    assert np.all(out[20:60] == 110.0) and np.all(out[60:] == 0)  # held for 0.4 s, no longer
+    held = out[20:60]
+    assert np.all((held <= 110.0) & (held >= 110.0 * 2 ** (-1.5 / 12))) and np.all(out[60:] == 0)  # 0.4 s, no longer
     assert not repair_creak(np.zeros(10, np.float32), np.ones(10, bool)).any()  # nothing good to hold
 
 
@@ -208,3 +210,71 @@ def test_join_blend_leaves_unvoiced_frames_and_missing_overlap_alone():
     out = blend_join(current, previous, offset=20, start=10, length=20)
     assert out[12] == 0.0
     assert np.array_equal(blend_join(current, previous, offset=60, start=10, length=20), current)  # no overlap
+
+
+def test_a_creak_hold_does_not_flip_between_the_held_pitch_and_a_sagging_one():
+    from aivoice.engines.pitch import repair_creak
+
+    f0 = np.concatenate([np.full(30, 200.0), np.tile([135.0, 145.0], 10)]).astype(np.float32)
+    out = repair_creak(f0, np.ones(len(f0), bool))
+    steps = np.abs(np.diff(12 * np.log2(out)))
+    assert steps.max() < 1.0  # no snapping between 200 Hz held and 145 Hz real
+
+
+def test_a_held_creak_falls_a_little_instead_of_locking_on_one_note():
+    from aivoice.engines.pitch import repair_creak
+
+    f0 = np.concatenate([np.full(30, 200.0), np.zeros(20)]).astype(np.float32)
+    out = repair_creak(f0, np.ones(len(f0), bool))
+    tail = 12 * np.log2(out[30:] / 200.0)
+    assert np.all(np.diff(tail) <= 0) and -1.5 <= tail[-1] < -0.5
+
+
+def test_letting_go_of_a_hold_eases_back_to_the_real_pitch():
+    from aivoice.engines.pitch import repair_creak
+
+    f0 = np.concatenate([np.full(30, 200.0), np.zeros(8), np.full(20, 170.0)]).astype(np.float32)
+    out = repair_creak(f0, np.ones(len(f0), bool))
+    assert np.abs(np.diff(12 * np.log2(out))).max() < 1.0
+    assert out[-1] == pytest.approx(170.0)
+
+
+def test_natural_variation_is_added_where_the_pitch_is_dead_flat_only():
+    from aivoice.engines.pitch import natural_variation
+
+    flat = np.full(80, 200.0, np.float32)
+    out = natural_variation(flat, start=0)
+    st = 12 * np.log2(out / 200.0)
+    assert 0.04 < np.std(st[10:-10]) < 0.35 and np.abs(st).max() < 0.8
+    glide = np.geomspace(150, 300, 80).astype(np.float32)  # a real rise: left alone
+    assert np.allclose(natural_variation(glide, start=0), glide)
+    gapped = flat.copy()
+    gapped[30:40] = 0
+    assert np.all(natural_variation(gapped, start=0)[30:40] == 0)
+
+
+def test_natural_variation_agrees_between_overlapping_windows():
+    from aivoice.engines.pitch import natural_variation
+
+    flat = np.full(200, 200.0, np.float32)
+    a = natural_variation(flat, start=1000)
+    b = natural_variation(flat[50:], start=1050)
+    assert np.allclose(a[80:150], b[30:100])
+
+
+def test_natural_variation_handles_voiced_stretches_shorter_than_its_smoothing():
+    from aivoice.engines.pitch import natural_variation
+
+    for length in range(1, 8):
+        f0 = np.concatenate([np.zeros(5), np.full(length, 200.0), np.zeros(5)]).astype(np.float32)
+        out = natural_variation(f0, start=0)
+        assert out.shape == f0.shape and np.all(out[5:5 + length] > 0)
+
+
+def test_a_rise_at_the_end_of_a_word_is_intonation_not_a_spike():
+    from aivoice.engines.pitch import fix_octave_errors
+
+    question = np.concatenate([np.full(40, 100.0), np.geomspace(100, 140, 7)[1:]]).astype(np.float32)  # 5.8 st up
+    assert np.allclose(fix_octave_errors(question), question)
+    start = question[::-1].copy()  # and a fall into the start of a word
+    assert np.allclose(fix_octave_errors(start), start)

@@ -5,7 +5,7 @@ import numpy as np
 import soxr
 
 from aivoice.engines.f0 import extract_f0, shift_f0, to_coarse
-from aivoice.engines.pitch import blend_join, fix_octave_errors, smooth_pitch, fill_gaps, fit_to_range, repair_creak, voice_like_frames
+from aivoice.engines.pitch import blend_join, fix_octave_errors, natural_variation, smooth_pitch, fill_gaps, fit_to_range, repair_creak, voice_like_frames
 from aivoice.presets import LiveParams
 
 
@@ -78,6 +78,36 @@ def follow_envelope(out: np.ndarray, audio: np.ndarray, sample_rate: int, follow
     return (out * gain).astype(np.float32)
 
 
+BACKGROUND_BELOW_SPEECH_DB = 10.0  # unvoiced input more than this far below the speaker's level is background
+SPEECH_LEAD_FRAMES = 10  # kept before speech (100 ms): the breath and consonant a word starts with
+SPEECH_TAIL_FRAMES = 15  # and after it (150 ms): the end of a word
+SPEECH_LEVEL_SMOOTHING = 0.9  # how slowly the level learned from voiced speech follows it, without a calibration
+
+
+def _frame_levels(audio: np.ndarray, frames: int) -> np.ndarray:
+    """The level (dB) of the input under each pitch frame."""
+    edges = np.linspace(0, len(audio), frames + 1).astype(int)
+    squares = np.concatenate([[0.0], np.cumsum(audio.astype(np.float64) ** 2)])
+    counts = np.maximum(edges[1:] - edges[:-1], 1)
+    return 10.0 * np.log10((squares[edges[1:]] - squares[edges[:-1]]) / counts + 1e-12)
+
+
+def background_gain(audio: np.ndarray, voiced: np.ndarray, speech_db: float, cut_db: float) -> np.ndarray:
+    """Per input sample: 1 where the speaker is speaking (a pitch, or not far below their level, with a little
+    before and after each stretch of speech), and cut_db lower elsewhere, with smooth changes between the two."""
+    frames = len(voiced)
+    active = np.asarray(voiced, dtype=bool) | (_frame_levels(audio, frames) >= speech_db - BACKGROUND_BELOW_SPEECH_DB)
+    kept = active.copy()
+    for shift in range(1, SPEECH_TAIL_FRAMES + 1):
+        kept[shift:] |= active[:-shift]
+    for shift in range(1, SPEECH_LEAD_FRAMES + 1):
+        kept[:-shift] |= active[shift:]
+    gain = np.where(kept, 1.0, 10.0 ** (-cut_db / 20.0))
+    gain = np.convolve(np.pad(gain, 1, mode="edge"), np.ones(3) / 3, mode="valid")
+    centres = (np.arange(frames) + 0.5) * len(audio) / frames
+    return np.interp(np.arange(len(audio)), centres, gain).astype(np.float32)
+
+
 class RvcEngine:
     def __init__(self, model_path, vec_path, model_sample_rate: int, index_path=None,
                  session_factory: Callable[[str], object] | None = None, rmvpe=None):
@@ -95,6 +125,10 @@ class RvcEngine:
         # The pitch the last live window used and where it started (in frames since live mode started), so the next
         # window's join starts from the same pitch.
         self._last_pitch: tuple[float, np.ndarray] | None = None
+        # The speaker's speaking level (dB, as the engine receives the audio), from the calibration when there is
+        # one; otherwise learned from the voiced speech heard so far. Background sound is judged against it.
+        self.speech_level_db: float | None = None
+        self._learned_speech_db: float | None = None
         self._vec = factory(str(vec_path))
         self._net = factory(str(model_path))
         self._vec_input = self._vec.get_inputs()[0].name
@@ -151,6 +185,10 @@ class RvcEngine:
         pitchf = fill_gaps(extract_f0(wav16, params.f0_method, frames, rmvpe=self._rmvpe))
         pitchf = repair_creak(pitchf, voice_like_frames(wav16, frames))
         pitchf = smooth_pitch(fix_octave_errors(pitchf))
+        rate = frames * sample_rate / n  # frames a second
+        start = 0 if self.noise_position is None else round(self.noise_position * rate / sample_rate)
+        pitchf = natural_variation(pitchf, start)
+        voiced = pitchf > 0
         pitchf = shift_f0(pitchf, pitch_shift)
         if self.pitch_range is not None:
             pitchf = fit_to_range(pitchf, *self.pitch_range)
@@ -168,4 +206,17 @@ class RvcEngine:
         out = np.asarray(self._net.run(None, feed)[0], dtype=np.float32).reshape(-1)
         if self._model_sr != sample_rate:
             out = soxr.resample(out, self._model_sr, sample_rate).astype(np.float32)
-        return follow_envelope(_fit(out, n), audio, sample_rate, params.volume_follow)
+        out = follow_envelope(_fit(out, n), audio, sample_rate, params.volume_follow)
+        speech_db = self._speech_level(audio, voiced)
+        if params.background_cut_db > 0 and speech_db is not None:
+            out = (out * background_gain(audio, voiced, speech_db, params.background_cut_db)).astype(np.float32)
+        return out
+
+    def _speech_level(self, audio: np.ndarray, voiced: np.ndarray) -> float | None:
+        """The level background sound is judged against: the calibration's, or the one learned from voiced speech."""
+        if voiced.sum() >= 10:
+            level = float(np.median(_frame_levels(audio, len(voiced))[voiced]))
+            learned = self._learned_speech_db
+            self._learned_speech_db = level if learned is None else (
+                SPEECH_LEVEL_SMOOTHING * learned + (1 - SPEECH_LEVEL_SMOOTHING) * level)
+        return self.speech_level_db if self.speech_level_db is not None else self._learned_speech_db

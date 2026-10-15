@@ -128,32 +128,58 @@ def voice_like_frames(audio16k: np.ndarray, frames: int) -> np.ndarray:
     return flags[np.round(np.linspace(0, len(flags) - 1, frames)).astype(int)]
 
 
+CREAK_FALL_ST = 0.06  # a held pitch falls this much per frame, as the end of a sentence does
+CREAK_MAX_FALL_ST = 1.2
+RELEASE_FRAMES = 3  # good frames in a row before a hold lets go, so a creak hovering at the edge does not flip
+EASE_FRAMES = 6  # frames over which the pitch moves from a hold back to the real one
+
+
 def repair_creak(f0: np.ndarray, voice_like: np.ndarray, max_frames: int = CREAK_MAX_FRAMES) -> np.ndarray:
     """Where the sound is plainly voice but the tracker found no pitch, or a pitch far below the speaker's recent
     one (creaky voice when breath runs out, or an octave error), the last good pitch is held for up to max_frames
-    instead of the model getting "no pitch" or a pitch that jumps down an octave, which is what sounds robotic."""
-    f0 = np.asarray(f0, dtype=np.float32).copy()
+    instead of the model getting "no pitch" or a pitch that jumps down an octave, which is what sounds robotic.
+
+    The held pitch falls gently (a locked note sounds robotic too), the hold lets go only after a few good frames
+    in a row, and the pitch then eases back to the real one: a creak at the end of a word hovers around the
+    "far too low" line, and switching at every frame between the held pitch and the real one was heard as a wobble."""
+    f0 = np.asarray(f0, dtype=np.float32)
+    out = f0.copy()
     voice_like = np.asarray(voice_like, dtype=bool)
-    good = f0 > 0
-    if good.sum() < 5:
-        return f0
+    if (f0 > 0).sum() < 5:
+        return out
     recent: list[float] = []
-    held = 0
     last_good = 0.0
+    holding, held, good_run, exhausted = False, 0, 0, False
+    ease_from, eased = 0.0, EASE_FRAMES
     for i in range(len(f0)):
         reference = float(np.median(recent)) if recent else 0.0
         bad = voice_like[i] and (f0[i] <= 0 or (reference > 0 and f0[i] < TOO_LOW * reference))
-        if bad and last_good > 0 and held < max_frames:
-            f0[i] = last_good
-            held += 1
+        good = f0[i] > 0 and not bad
+        if holding:
+            good_run = good_run + 1 if good else 0
+            if good_run >= RELEASE_FRAMES or held >= max_frames or (f0[i] <= 0 and not voice_like[i]):
+                holding = False
+                exhausted = held >= max_frames and not good
+                ease_from, eased = float(out[i - 1]), 0
+            else:
+                out[i] = last_good * 2.0 ** (-min(CREAK_MAX_FALL_ST, CREAK_FALL_ST * held) / 12.0)
+                held += 1
+                continue
+        if bad and last_good > 0 and not exhausted:
+            holding, held, good_run = True, 1, 0
+            out[i] = last_good
             continue
-        if f0[i] > 0 and not bad:
+        if f0[i] > 0 and eased < EASE_FRAMES and ease_from > 0:
+            eased += 1
+            w = eased / EASE_FRAMES
+            out[i] = np.float32(np.exp(np.log(ease_from) * (1.0 - w) + np.log(f0[i]) * w))
+        if good:
+            exhausted = False
             last_good = float(f0[i])
             recent.append(last_good)
             if len(recent) > 50:
                 recent.pop(0)
-        held = 0 if f0[i] > 0 else held
-    return f0
+    return out
 
 
 # ---- octave errors, wobble and blips
@@ -177,8 +203,8 @@ def _local_median(x: np.ndarray, reach: int) -> np.ndarray:
 
 def fix_octave_errors(f0: np.ndarray, reach: int = OCTAVE_REACH) -> np.ndarray:
     """Within each voiced stretch, a frame about an octave (or two) away from the speaker's pitch around it is moved
-    back by whole octaves, up or down; a short stretch still far from it afterwards (a tracker error that is not an
-    octave) takes the pitch around it. Rises and falls that take the time real speech takes are left as they are."""
+    back by whole octaves, up or down; a short stretch still far from it afterwards, inside the stretch (a tracker
+    error that is not an octave), takes the pitch around it. Rises and falls that take the time real speech takes are left as they are."""
     f0 = np.asarray(f0, dtype=np.float32).copy()
     for a, b in _voiced_runs(f0):
         if b - a < 5:
@@ -191,7 +217,9 @@ def fix_octave_errors(f0: np.ndarray, reach: int = OCTAVE_REACH) -> np.ndarray:
         reference = _local_median(st, reach)
         far = np.abs(st - reference) > SPIKE_ST
         for s, e in _voiced_runs(far.astype(np.float32)):
-            if e - s <= SPIKE_MAX_FRAMES:
+            # A spike comes back: a stretch that ends the word (or starts it) is a real rise or fall into silence,
+            # like the rise of a question, and is kept. Octave errors there were already put right above.
+            if e - s <= SPIKE_MAX_FRAMES and s > 0 and e < len(st):
                 st[s:e] = reference[s:e]
         f0[a:b] = (2.0 ** (st / 12.0)).astype(np.float32)
     return f0
@@ -230,3 +258,46 @@ def blend_join(current: np.ndarray, previous: np.ndarray, offset: int, start: in
         w = 0.0 if j < start else (j - start) / max(1, length - 1)
         out[j] = np.float32(np.exp(np.log(p) * (1.0 - w) + np.log(out[j]) * w))
     return out
+
+
+# ---- natural variation where the pitch is dead flat
+
+VARIATION_ST = 0.25  # typical size of the variation added (one standard deviation, in semitones)
+FLAT_REACH = 7  # frames either side looked at to decide whether the pitch is flat
+FLAT_BELOW_ST = 0.15  # a spread this small is fully flat
+FLAT_ABOVE_ST = 0.7  # and this large gets nothing added
+_VARIATION_FRAMES = 6000  # one minute, repeated
+
+
+def _variation_sequence() -> np.ndarray:
+    """Slow, smooth random movement (mostly 3 to 15 Hz, like the small wavering of a real voice), one value per
+    frame, the same every time so overlapping live windows add the same variation to the same moment."""
+    rng = np.random.default_rng(20261015)
+    x = rng.standard_normal(_VARIATION_FRAMES + 64)
+    smooth = np.convolve(x, np.ones(5) / 5, mode="same")
+    slow = np.convolve(smooth, np.ones(31) / 31, mode="same")
+    band = (smooth - slow)[32:-32]
+    return np.clip(band / band.std(), -3.0, 3.0)
+
+
+_VARIATION = _variation_sequence()
+
+
+def natural_variation(f0: np.ndarray, start: int, amount_st: float = VARIATION_ST) -> np.ndarray:
+    """A real voice never holds one exact pitch; a pitch tracker's smooth output can, and a model given a dead flat
+    pitch sounds like a machine. Where a voiced stretch is flat, a small smooth variation is added, fading in as the
+    pitch gets flatter. `start` is the first frame's place in time (frames since live mode started), so two windows
+    covering the same moment add the same variation to it."""
+    f0 = np.asarray(f0, dtype=np.float32).copy()
+    if amount_st <= 0:
+        return f0
+    for a, b in _voiced_runs(f0):
+        st = 12.0 * np.log2(f0[a:b].astype(np.float64))
+        spread = np.array([np.ptp(st[max(0, i - FLAT_REACH):i + FLAT_REACH + 1]) for i in range(len(st))])
+        weight = np.clip((FLAT_ABOVE_ST - spread) / (FLAT_ABOVE_ST - FLAT_BELOW_ST), 0.0, 1.0)
+        if not weight.any():
+            continue
+        weight = np.convolve(np.pad(weight, 2, mode="edge"), np.ones(5) / 5, mode="valid")  # same length, any run
+        index = (start + a + np.arange(b - a)) % _VARIATION_FRAMES
+        f0[a:b] = (f0[a:b] * 2.0 ** (amount_st * weight * _VARIATION[index] / 12.0)).astype(np.float32)
+    return f0
