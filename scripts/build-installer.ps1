@@ -9,6 +9,16 @@
 # The bundle resources live in a separate Tauri config on purpose: Tauri copies resources next to development
 # binaries too and fails when one is missing, so the main config (used by "npm run tauri dev") has none.
 $ErrorActionPreference = "Stop"
+# Started from PowerShell 7 (as on the GitHub runners), Windows PowerShell inherits its module path and then cannot
+# load its own Get-FileHash, Invoke-WebRequest or Expand-Archive. Its own module folders are put back first; the
+# scripts this one starts inherit them.
+if ($PSVersionTable.PSEdition -eq "Desktop") {
+    $env:PSModulePath = @(
+        (Join-Path ([Environment]::GetFolderPath("MyDocuments")) "WindowsPowerShell\Modules"),
+        (Join-Path $env:ProgramFiles "WindowsPowerShell\Modules"),
+        (Join-Path $env:SystemRoot "system32\WindowsPowerShell\v1.0\Modules")
+    ) -join ";"
+}
 $Repo = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $App = Join-Path $Repo "app"
 
