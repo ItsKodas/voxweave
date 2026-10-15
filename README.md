@@ -104,8 +104,8 @@ One-time exporter setup (from the repo root). The patch is required: the stock e
 ```bash
 git -c core.autocrlf=false clone --depth 1 --branch 2.2.231006 https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI tools/.rvc/repo
 git -C tools/.rvc/repo apply --ignore-whitespace ../../rvc_onnx_export.patch
-uv venv --python 3.10 tools/.rvc/venv
-uv pip install --python tools/.rvc/venv torch==2.6.0 numpy==1.26.4 onnx scipy --extra-index-url https://download.pytorch.org/whl/cpu
+uv venv --python 3.12 tools/.rvc/venv
+uv pip install --python tools/.rvc/venv torch==2.6.0 numpy==1.26.4 onnx==1.23.2 scipy --extra-index-url https://download.pytorch.org/whl/cpu
 ```
 
 Export a voice (the optional `.index` file enables the index blend):

@@ -4,8 +4,8 @@ One-time setup (run from the repo root; needs the patch because the stock export
 this tag fails and bakes a fixed 200-frame length into the graph):
     git -c core.autocrlf=false clone --depth 1 --branch 2.2.231006 https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI tools/.rvc/repo
     git -C tools/.rvc/repo apply --ignore-whitespace ../../rvc_onnx_export.patch
-    uv venv --python 3.10 tools/.rvc/venv
-    uv pip install --python tools/.rvc/venv torch==2.6.0 numpy==1.26.4 onnx scipy --extra-index-url https://download.pytorch.org/whl/cpu
+    uv venv --python 3.12 tools/.rvc/venv
+    uv pip install --python tools/.rvc/venv torch==2.6.0 numpy==1.26.4 onnx==1.23.2 scipy --extra-index-url https://download.pytorch.org/whl/cpu
 
 Usage:
     tools/.rvc/venv/Scripts/python tools/export_rvc_onnx.py <voice.pth> <voice-id> [--index file.index] [--name="Display Name"]

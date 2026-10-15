@@ -396,6 +396,15 @@ class Job:
         """The exporter, tried once more when its Python could not even start. That happened once on the
         development PC ("No Python at ..." from the export environment's launcher) and did not happen again with the
         same command; what the environment looked like is logged, so a repeat can be looked into."""
+        venv = TOOLS_DIR / ".rvc" / "venv"
+        try:
+            home = next((line.split("=", 1)[1].strip() for line in (venv / "pyvenv.cfg").read_text(
+                encoding="utf-8").splitlines() if line.split("=", 1)[0].strip().lower() == "home"), "")
+            base = Path(home) / "python.exe"
+            self._log("worker", "exporter Python: %s (home %r: exists %s, is_file %s, readable %s)" % (
+                argv[0], home, base.exists(), base.is_file(), os.access(base, os.R_OK)))
+        except OSError as exc:
+            self._log("worker", "exporter Python: %s (pyvenv.cfg could not be read: %s)" % (argv[0], exc))
         code = self._run_simple(argv, cwd=TOOLS_DIR.parent, env=env)
         if code != 0 and any("No Python at" in line for line in self.tail):
             seen = {name: env.get(name) for name in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV", "__PYVENV_LAUNCHER__",
