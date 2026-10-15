@@ -285,3 +285,105 @@ def test_the_real_studio_offers_the_shipped_paragraphs_after_the_200_sentences(t
     first = studio.prompt(voice.id, kind="paragraphs")
     assert (first["index"], first["total"], first["number"]) == (200, 40, 1)
     assert studio.prompt(voice.id, kind="sentences")["total"] == 200
+
+
+# ---- reading a full page
+
+PAGES = (("A Page", "One two three. " * 40), ("Another Page", "Four five six. " * 40))
+
+
+def make_pages(tmp_path):
+    lib = Library(tmp_path)
+    streams = CapturingStreams()
+    importer = Importer(lib, NoTranscriber())
+    studio = Studio(lib, Recorder(streams), importer, lambda: DEVICES, prompts=PROMPTS, pages=PAGES,
+                    recordings=tmp_path / "page-recordings")
+    return studio, lib, streams, importer, lib.create("V")
+
+
+def talk_with_pauses(streams, sentences=12, seconds=2.5, amp=0.3):
+    rng = np.random.default_rng(7)
+    for _ in range(sentences):
+        streams.on_audio(rng.uniform(-amp, amp, (int(seconds * SR), 1)).astype(np.float32))
+        streams.on_audio(np.zeros((int(0.8 * SR), 1), dtype=np.float32))
+
+
+def test_pages_are_listed_with_their_length(tmp_path):
+    studio, *_ = make_pages(tmp_path)
+    pages = studio.pages()
+    assert [p["title"] for p in pages] == ["A Page", "Another Page"]
+    assert pages[0]["index"] == 0 and pages[0]["words"] == 120 and pages[0]["minutes"] == pytest.approx(0.8, abs=0.1)
+    assert pages[0]["text"].startswith("One two three.")
+
+
+def test_a_read_page_is_kept_and_sliced_into_clips_by_the_importer(tmp_path):
+    studio, lib, streams, importer, voice = make_pages(tmp_path)
+    studio.start_page(voice.id, 1, 1)
+    talk_with_pauses(streams)
+    result = studio.stop_recording()
+    assert result["accepted"] is True and result["imported"] is True and result["clip"] is None
+    assert result["seconds"] > 35
+    importer.wait(10)
+    clips = lib.get(voice.id).clips
+    assert len(clips) >= 5 and all(c.source == "imported" for c in clips)
+    saved = list((tmp_path / "page-recordings").glob("*.wav"))
+    assert len(saved) == 1 and clips[0].origin == saved[0].name
+
+
+def test_a_page_take_can_run_much_longer_than_a_sentence(tmp_path):
+    studio, _, streams, importer, voice = make_pages(tmp_path)
+    studio.start_page(voice.id, 1, 0)
+    talk_with_pauses(streams, sentences=12, seconds=2.5)  # about 40 s, past a sentence take's 30 s limit
+    assert studio.status()["full"] is False
+    studio.stop_recording()
+    importer.wait(10)
+    studio.start_recording(voice.id, 1, 0)  # and a sentence take afterwards has its usual limit again
+    streams.on_audio(np.zeros((31 * SR, 1), dtype=np.float32))
+    assert studio.status()["full"] is True
+    studio.cancel_recording()
+
+
+def test_a_page_read_too_short_is_rejected_and_nothing_is_kept(tmp_path):
+    studio, lib, streams, _, voice = make_pages(tmp_path)
+    studio.start_page(voice.id, 1, 0)
+    talk_with_pauses(streams, sentences=2)
+    result = studio.stop_recording()
+    assert result["accepted"] is False and result["reason"] == "too_short" and "page" in result["message"]
+    assert lib.get(voice.id).clips == [] and not list((tmp_path / "page-recordings").glob("*.wav"))
+
+
+def test_page_start_validation(tmp_path):
+    studio, _, _, importer, voice = make_pages(tmp_path)
+    with pytest.raises(ValueError, match="Unknown page"):
+        studio.start_page(voice.id, 1, 5)
+    with pytest.raises(ValueError, match="not an input device"):
+        studio.start_page(voice.id, 2, 0)
+    assert not studio.recording
+
+
+def test_a_page_cannot_start_while_an_import_runs(tmp_path, monkeypatch):
+    studio, _, _, importer, voice = make_pages(tmp_path)
+    monkeypatch.setattr(importer, "status", lambda: {"active": True})
+    with pytest.raises(ValueError, match="import"):
+        studio.start_page(voice.id, 1, 0)
+    assert not studio.recording
+
+
+def test_only_the_newest_page_recordings_are_kept(tmp_path):
+    studio, _, streams, importer, voice = make_pages(tmp_path)
+    folder = tmp_path / "page-recordings"
+    folder.mkdir()
+    for i in range(12):
+        (folder / f"old-{i:02d}.wav").write_bytes(b"x")
+    studio.start_page(voice.id, 1, 0)
+    talk_with_pauses(streams)
+    studio.stop_recording()
+    importer.wait(10)
+    assert len(list(folder.glob("*.wav"))) == 10
+
+
+def test_the_real_studio_offers_the_shipped_pages(tmp_path):
+    lib = Library(tmp_path)
+    studio = Studio(lib, Recorder(CapturingStreams()), Importer(lib, NoTranscriber()), lambda: DEVICES)
+    pages = studio.pages()
+    assert len(pages) >= 5 and all(p["words"] >= 300 and p["title"] for p in pages)

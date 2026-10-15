@@ -15,6 +15,7 @@ class Recorder:
     def __init__(self, stream_factory, sample_rate: int = SAMPLE_RATE, max_seconds: float = 30.0):
         self._factory = stream_factory
         self._sr = sample_rate
+        self._max_seconds = max_seconds
         self._max = int(max_seconds * sample_rate)
         self._lock = threading.Lock()        # start / stop / cancel
         self._data_lock = threading.Lock()   # blocks shared with the audio callback
@@ -64,11 +65,13 @@ class Recorder:
             except Exception:  # noqa: BLE001 - an unplugged device must not block stopping
                 pass
 
-    def start(self, device: int) -> None:
+    def start(self, device: int, max_seconds: float | None = None) -> None:
+        """Starts a take of at most max_seconds (the recorder's own limit when not given)."""
         with self._lock:
             if self._stream is not None:
                 raise RecorderError("Already recording")
             self._reset()
+            self._max = int((self._max_seconds if max_seconds is None else max_seconds) * self._sr)
             try:
                 stream = self._factory.input(device, self._sr, self._on_audio)
                 with self._data_lock:

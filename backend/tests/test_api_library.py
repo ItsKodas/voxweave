@@ -563,3 +563,20 @@ def test_allowed_library_requests_log_no_refusal_and_long_headers_are_cut(tmp_pa
         assert client.get("/library/voices", headers={"Referer": "https://evil.example/" + "x" * 5000}).status_code == 403
     lines = _refusals(caplog)
     assert len(lines) == 1 and len(lines[0]) < 600
+
+
+def test_pages_are_listed_and_a_page_read_is_guarded_like_a_take(tmp_path):
+    client, mic, importer = make(tmp_path)
+    voice = new_voice(client)
+    pages = client.get("/library/pages").json()
+    assert len(pages) >= 5 and {"index", "title", "text", "words", "minutes"} <= set(pages[0])
+    body = {"voice_id": voice["id"], "input_device": 1, "page": 0}
+    assert client.post("/live/start", json={"input_device": 1, "mic_device": 3, "voice": "demo"}).status_code == 200
+    res = client.post("/library/record/page", json=body)
+    assert res.status_code == 400 and res.json()["detail"] == "Stop live mode before recording"
+    client.post("/live/stop")
+    res = client.post("/library/record/page", json=body)
+    assert res.status_code == 200 and res.json()["recording"] is True
+    stopped = client.post("/library/record/stop").json()  # nothing was read: refused, nothing imported
+    assert stopped["accepted"] is False
+    assert client.get("/library/status").json()["recording"] is False

@@ -15,6 +15,19 @@ def load_paragraphs() -> tuple[str, ...]:
     return tuple(line.strip() for line in text.splitlines() if line.strip())
 
 
+@lru_cache(maxsize=1)
+def load_pages() -> tuple[tuple[str, str], ...]:
+    """Full pages to read in one go, as (title, text): each "# Title" line starts a page."""
+    text = Path(__file__).with_name("pages_en.txt").read_text(encoding="utf-8")
+    pages: list[tuple[str, list[str]]] = []
+    for line in text.splitlines():
+        if line.startswith("# "):
+            pages.append((line[2:].strip(), []))
+        elif pages:
+            pages[-1][1].append(line.rstrip())
+    return tuple((title, "\n".join(lines).strip()) for title, lines in pages)
+
+
 def next_prompt(recorded: set[int], total: int, after: int | None = None) -> int | None:
     """The next sentence to read: the first one not yet recorded after `after`, wrapping round."""
     if after is None or not 0 <= after < total:

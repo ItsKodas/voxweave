@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, Device, DeviceList } from "./api";
 import { Clip, Prompt, PromptKind, studioApi } from "./studioApi";
+import { PageReader } from "./PageReader";
 import { useStudioStatus } from "./useStudioStatus";
 
 /** Takes with more than 20 s of speech are rejected, so the warning comes while there is time to finish. */
@@ -19,6 +20,8 @@ export function RecordSession({ voiceId, active, devicesVersion = 0, onSaved }: 
   const [prompt, setPrompt] = useState<Prompt | null>(null);
   // Paragraphs are two or three sentences in one take: more speech per press of Record.
   const [kind, setKind] = useState<PromptKind>("sentences");
+  // A whole page read in one go, cut into clips afterwards (PageReader).
+  const [pageMode, setPageMode] = useState(false);
   const kindRef = useRef(kind);
   const [recording, setRecording] = useState(false);
   const [saved, setSaved] = useState<{ clip: Clip; url: string | null } | null>(null);
@@ -194,17 +197,46 @@ export function RecordSession({ voiceId, active, devicesVersion = 0, onSaved }: 
     <div role="radiogroup" aria-label="What to read" className="kind">
       {(["sentences", "paragraphs"] as const).map((k) => (
         <label key={k}>
-          <input type="radio" name="prompt-kind" checked={kind === k} disabled={recording || busy}
+          <input type="radio" name="prompt-kind" checked={!pageMode && kind === k} disabled={recording || busy}
             onChange={() => {
               kindRef.current = k;
               setKind(k);
+              setPageMode(false);
               run(() => loadPrompt());
             }} />
           {k === "sentences" ? "Sentences" : "Paragraphs"}
         </label>
       ))}
+      <label>
+        <input type="radio" name="prompt-kind" checked={pageMode} disabled={recording || busy}
+          onChange={() => setPageMode(true)} />
+        A full page
+      </label>
     </div>
   );
+
+  const microphone = (
+    <>
+      <label>
+        Microphone
+        <select value={input ?? ""} disabled={recording} onChange={(e) => setInput(Number(e.target.value))}>
+          {inputs.map((d) => <option key={d.index} value={d.index}>{d.name}</option>)}
+        </select>
+      </label>
+      {inputs.length === 0 && <p className="hint">No microphone was found. Plug one in and use Refresh devices on the Live tab.</p>}
+    </>
+  );
+
+  if (pageMode) {
+    return (
+      <section className="record">
+        {error && <p role="alert" className="error">{error}</p>}
+        {microphone}
+        {chooser}
+        <PageReader voiceId={voiceId} input={input} active={active} onSaved={onSaved} />
+      </section>
+    );
+  }
 
   if (prompt && prompt.index === null) {
     return (
@@ -221,13 +253,7 @@ export function RecordSession({ voiceId, active, devicesVersion = 0, onSaved }: 
   return (
     <section className="record">
       {error && <p role="alert" className="error">{error}</p>}
-      <label>
-        Microphone
-        <select value={input ?? ""} disabled={recording} onChange={(e) => setInput(Number(e.target.value))}>
-          {inputs.map((d) => <option key={d.index} value={d.index}>{d.name}</option>)}
-        </select>
-      </label>
-      {inputs.length === 0 && <p className="hint">No microphone was found. Plug one in and use Refresh devices on the Live tab.</p>}
+      {microphone}
 
       {chooser}
       {paragraphs && <p className="hint">Paragraphs take 10 to 15 seconds to read. Keep each take under 20 seconds.</p>}

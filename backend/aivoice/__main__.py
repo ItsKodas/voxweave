@@ -50,7 +50,7 @@ def build_app():
                           refresh_devices=refresh_devices, calibration=calibration)
     # The model name is read when an import first needs it, so a bad setting cannot stop startup.
     importer = Importer(library, WhisperTranscriber(lambda: config.whisper_model(data), data / "pretrained" / "whisper"))
-    studio = Studio(library, Recorder(streams), importer, list_devices)
+    studio = Studio(library, Recorder(streams), importer, list_devices, recordings=data / "page-recordings")
     root = Path(__file__).resolve().parents[2]
     no_training, no_tts = unavailable_parts()
     training = TrainingManager(data, library, root / "trainer", unavailable=no_training)

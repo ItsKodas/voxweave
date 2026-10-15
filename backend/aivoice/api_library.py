@@ -35,6 +35,12 @@ class RecordBody(BaseModel):
     prompt: int
 
 
+class PageBody(BaseModel):
+    voice_id: str
+    input_device: int
+    page: int
+
+
 class ImportBody(BaseModel):
     paths: list[str]
 
@@ -288,19 +294,36 @@ def library_router(studio: Studio, library: Library, importer: Importer, live_ru
     def prompt(voice_id: str, after: int | None = None, kind: str | None = None) -> dict:
         return studio.prompt(voice_id, after, kind)
 
+    def _refuse_recording() -> None:
+        """Called under the audio lock: what stops a take (or a page) from starting."""
+        if live_running():
+            raise ValueError("Stop live mode before recording")
+        if training is not None and training.is_active():  # a read only: never a kill under the audio lock
+            raise ValueError("Training is running. Wait for it to finish or cancel it before recording")
+        if tts is not None and tts.is_active():  # also a read only; speak checks and starts under this lock
+            raise ValueError("Stop the speech before recording")
+        if calibrating():
+            raise ValueError("Finish the calibration recording before recording a clip")
+
     @router.post("/record/start")
     def record_start(body: RecordBody) -> dict:
         with exclusive:
-            if live_running():
-                raise ValueError("Stop live mode before recording")
-            if training is not None and training.is_active():  # a read only: never a kill under the audio lock
-                raise ValueError("Training is running. Wait for it to finish or cancel it before recording")
-            if tts is not None and tts.is_active():  # also a read only; speak checks and starts under this lock
-                raise ValueError("Stop the speech before recording")
-            if calibrating():
-                raise ValueError("Finish the calibration recording before recording a clip")
+            _refuse_recording()
             with voices_lock:  # so a delete cannot check "not recording" and then lose the voice to a new take
                 studio.start_recording(body.voice_id, body.input_device, body.prompt)
+        return studio.status()
+
+    @router.get("/pages")
+    def pages() -> list[dict]:
+        """Full pages to read aloud in one go; the reading is sliced into clips like an imported file."""
+        return studio.pages()
+
+    @router.post("/record/page")
+    def record_page(body: PageBody) -> dict:
+        with exclusive:
+            _refuse_recording()
+            with voices_lock:
+                studio.start_page(body.voice_id, body.input_device, body.page)
         return studio.status()
 
     @router.post("/record/stop")

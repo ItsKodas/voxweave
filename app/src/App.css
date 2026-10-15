@@ -93,3 +93,15 @@ main > h1 { display: inline-block; margin-right: 24px; vertical-align: middle; }
   .voices { grid-template-columns: 1fr; }
   .voices > .studio { grid-column: 1; grid-row: auto; }
 }
+
+/* Reading a full page: the list of pages, and the page itself over the whole window. */
+.page-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.page-reader { position: fixed; inset: 0; z-index: 50; background: #15171c; overflow-y: auto; padding: 0 16px 48px; }
+.page-bar { position: sticky; top: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 0;
+  background: #15171c; border-bottom: 1px solid #2c303a; max-width: 52rem; margin: 0 auto; }
+.page-bar strong { margin-right: auto; font-size: 1.05rem; }
+.page-bar progress { width: 120px; }
+.page-clock { font-variant-numeric: tabular-nums; min-width: 3.5em; }
+.page-reader > .error, .page-reader > .hint, .page-reader > .ok { max-width: 52rem; margin: 10px auto; }
+.page-text { max-width: 52rem; margin: 0 auto; font-size: 1.4rem; line-height: 1.75; }
+.page-text p { margin: 1.1em 0; }

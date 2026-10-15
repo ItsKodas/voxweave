@@ -9,6 +9,9 @@ vi.mock("./studioApi", () => ({
 }));
 const status = vi.hoisted(() => ({ current: null as null | { recording: boolean; level: number; seconds: number; full: boolean } }));
 vi.mock("./useStudioStatus", () => ({ useStudioStatus: () => status.current }));
+vi.mock("./PageReader", () => ({
+  PageReader: ({ input }: { input: number | null }) => <p>Page reader with microphone {String(input)}</p>,
+}));
 import { api } from "./api";
 import { studioApi } from "./studioApi";
 
@@ -424,5 +427,18 @@ describe("RecordSession", () => {
     unmount();
     arrive("blob:late");
     await vi.waitFor(() => expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:late"));
+  });
+});
+
+
+describe("a full page", () => {
+  it("is offered beside sentences and paragraphs and opens the page reader with the chosen microphone", async () => {
+    render(<RecordSession voiceId="v-1" active onSaved={() => {}} />);
+    await ready();
+    await userEvent.click(screen.getByLabelText("A full page"));
+    expect(screen.getByText("Page reader with microphone 4")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Record" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByLabelText("Sentences"));
+    expect(await ready()).toBeInTheDocument();
   });
 });

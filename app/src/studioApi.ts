@@ -27,7 +27,13 @@ export type PromptKind = "sentences" | "paragraphs";
 export type Prompt = {
   index: number | null; text: string | null; total: number; recorded: number; kind?: PromptKind; number?: number | null;
 };
-export type TakeResult = { accepted: boolean; reason: string | null; message: string | null; clip: Clip | null };
+export type TakeResult = {
+  accepted: boolean; reason: string | null; message: string | null; clip: Clip | null;
+  /** Set for a full page: the reading was handed to the importer, which slices it into clips. */
+  imported?: boolean; seconds?: number;
+};
+/** A full page to read aloud in one go (GET /library/pages). */
+export type Page = { index: number; title: string; text: string; words: number; minutes: number };
 export type ImportStatus = {
   active: boolean;
   finished: boolean;
@@ -70,6 +76,9 @@ export const studioApi = {
   recordStart: (voiceId: string, inputDevice: number, prompt: number) =>
     call<StudioStatus>("POST", "/library/record/start", { voice_id: voiceId, input_device: inputDevice, prompt }),
   recordStop: () => call<TakeResult>("POST", "/library/record/stop"),
+  pages: () => call<Page[]>("GET", "/library/pages"),
+  recordPage: (voiceId: string, inputDevice: number, page: number) =>
+    call<StudioStatus>("POST", "/library/record/page", { voice_id: voiceId, input_device: inputDevice, page }),
   recordCancel: () => call<StudioStatus>("POST", "/library/record/cancel"),
   /** Saves the trained voice as one .voxweave file in the Downloads folder. */
   exportPack: (id: string, includeReference: boolean) =>
