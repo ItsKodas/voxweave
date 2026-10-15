@@ -167,3 +167,71 @@ def test_live_mode_gives_the_engine_the_speakers_calibrated_level(tmp_path):
     manager.start(StartConfig(input_device=1, mic_device=3, voice="demo", use_calibration=False))
     assert engine.speech_level_db is None  # learned from speech instead
     manager.stop()
+
+
+class FakeTuner:
+    def __init__(self, active=False):
+        self.active = active
+        self.started = []
+
+    def start(self, voice_id, quality, pitch_shift, likeness):
+        self.started.append((voice_id, quality, pitch_shift, likeness))
+        self.active = True
+
+    def status(self):
+        return {"active": self.active, "voice_id": "demo", "step": 0, "steps": 10, "message": None, "error": None,
+                "result": None}
+
+    def cancel(self):
+        self.active = False
+
+
+def tuner_rig(tmp_path, tuner, model=True):
+    import hashlib
+    from aivoice import speaker
+
+    add_voice(tmp_path, "demo")
+    calibration = Calibration(tmp_path, FakeRecorder(), lambda: DEVICES)
+    manager = LiveManager(tmp_path, lambda: DEVICES, lambda voice: Identity(), FakeStreams(), calibration=calibration)
+    app = create_app(manager, tmp_path, lambda: DEVICES, [], allowed_hosts=["testserver"], calibration=calibration,
+                     tuner=tuner)
+    if model:
+        path = speaker.model_path(tmp_path)
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"x" * speaker.MODEL_SIZE)
+    return TestClient(app), manager
+
+
+TUNE = {"voice_id": "demo", "quality": 3, "pitch_shift": 12, "likeness": 0.3}
+
+
+def test_deep_calibration_says_whether_the_speaker_model_is_there_and_needs_it(tmp_path):
+    tuner = FakeTuner()
+    client, _ = tuner_rig(tmp_path, tuner, model=False)
+    info = client.get("/calibration/speaker-model").json()
+    assert info["ready"] is False and info["size_mb"] == 26.5 and "huggingface.co/Wespeaker" in info["source"]
+    assert "CC BY 4.0" in info["licence"]
+    res = client.post("/calibration/tune", json=TUNE, headers=ORIGIN)
+    assert res.status_code == 400 and "Download the speaker model" in res.json()["detail"]
+    assert tuner.started == []
+
+
+def test_deep_calibration_starts_and_reports_and_can_be_cancelled(tmp_path):
+    tuner = FakeTuner()
+    client, _ = tuner_rig(tmp_path, tuner)
+    started = client.post("/calibration/tune", json=TUNE, headers=ORIGIN).json()
+    assert started["active"] is True and tuner.started == [("demo", 3, 12, 0.3)]
+    assert client.get("/calibration/tune/status").json()["active"] is True
+    assert client.post("/calibration/tune/cancel", headers=ORIGIN).json()["active"] is False
+
+
+def test_deep_calibration_and_live_mode_never_run_together(tmp_path):
+    tuner = FakeTuner()
+    client, _ = tuner_rig(tmp_path, tuner)
+    assert client.post("/live/start", json={"input_device": 1, "mic_device": 3, "voice": "demo"}).status_code == 200
+    res = client.post("/calibration/tune", json=TUNE, headers=ORIGIN)
+    assert res.status_code == 400 and "Stop live mode" in res.json()["detail"]
+    client.post("/live/stop")
+    tuner.active = True
+    res = client.post("/live/start", json={"input_device": 1, "mic_device": 3, "voice": "demo"})
+    assert res.status_code == 400 and "deep calibration" in res.json()["detail"]

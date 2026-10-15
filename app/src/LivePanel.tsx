@@ -153,6 +153,8 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
   const [monitor, setMonitor] = useState<number | null>(null);
   const [monitorGain, setMonitorGain] = useState(1);
   const [voice, setVoice] = useState("");
+  const voiceRef = useRef(voice); // for work that finishes after the voice may have been changed
+  voiceRef.current = voice;
   const [preset] = useState("balanced");
   const [quality, setQuality] = useState(storedQuality);
   const [overrides, setOverrides] = useState<Partial<Params>>({});
@@ -166,6 +168,9 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
   const [pitchNote, setPitchNote] = useState<string | null>(null);
   const [saved, setSaved] = useState<VoiceSettings | null>(null);
   const [resets, setResets] = useState(0); // counts Reset to recommended, which applies the voice's defaults again
+  // Deep calibration: tries settings on the calibration reading and keeps the most alike (aivoice.deeptune).
+  const [tuning, setTuning] = useState<string | null>(null); // the progress line while it runs
+  const [tuneNote, setTuneNote] = useState<string | null>(null);
 
   // The quality level sets the chunk timing; the Advanced fields can still override each value by hand.
   useEffect(() => {
@@ -352,6 +357,67 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
     storeSettings(voice, settings);
     setSaved(settings);
   };
+  const findBestSettings = async () => {
+    const name = voiceName;
+    const tunedVoice = voice;
+    setTuneNote(null);
+    setError(null);
+    try {
+      const cal = await calibrationApi.status();
+      if (!cal.has_sample) {
+        setTuneNote("Calibrate your voice again first: Find best settings converts the reading from your calibration, and calibrations made before this version kept only their measurements.");
+        return;
+      }
+      const model = await calibrationApi.speakerModel();
+      if (!model.ready) {
+        const ok = window.confirm(
+          `Find best settings needs a speaker-recognition model (${model.size_mb} MB) from Hugging Face: the ` +
+          `WeSpeaker ResNet34 model, licensed CC BY 4.0. It is downloaded once and checked before it is used.\n\n` +
+          "Download it now?",
+        );
+        if (!ok) return;
+        setTuning("Downloading the speaker model...");
+        await calibrationApi.downloadSpeakerModel();
+      }
+      setTuning("Getting ready...");
+      let status = await calibrationApi.tune({ voice_id: tunedVoice, quality, pitch_shift: pitch, likeness });
+      while (status.active) {
+        if (status.steps > 0 && status.step > 0) setTuning(`${status.message} (${status.step} of ${status.steps})`);
+        else if (status.message) setTuning(`${status.message}...`);
+        await new Promise((r) => setTimeout(r, 600));
+        status = await calibrationApi.tuneStatus();
+      }
+      if (status.error) throw new Error(status.error);
+      const result = status.result;
+      if (!result) {
+        setTuneNote(status.message ?? "Stopped.");
+        return;
+      }
+      const settings = { pitch: result.pitch_shift, quality, likeness: result.likeness };
+      storeSettings(tunedVoice, settings);
+      if (tunedVoice === voiceRef.current) {
+        setPitch(result.pitch_shift);
+        setPitchNote(null);
+        setOverrides((o) => ({ ...o, index_rate: result.likeness }));
+        setSaved(settings);
+      }
+      const pct = (x: number) => Math.round(x * 100);
+      const same = result.pitch_shift === result.baseline.pitch_shift && result.likeness === result.baseline.likeness;
+      setTuneNote(
+        (same
+          ? `Your settings were already the best found for ${name}: pitch ${result.pitch_shift > 0 ? "+" : ""}${result.pitch_shift}, likeness ${pct(result.likeness)}%. `
+          : `Best for ${name}: pitch ${result.pitch_shift > 0 ? "+" : ""}${result.pitch_shift}, likeness ${pct(result.likeness)}%. `) +
+          `It sounds ${pct(result.similarity)}% like ${name} (${pct(result.baseline.similarity)}% with your settings before), ` +
+          `with ${pct(result.clarity)}% of the words clear. Saved for this voice; how robotic it sounds is still for your ears.`,
+      );
+    } catch (e) {
+      setTuneNote(null);
+      setError((e as Error).message);
+    } finally {
+      setTuning(null);
+    }
+  };
+
   const resetToRecommended = () => {
     storeSettings(voice, null);
     storeLikeness(voice, null);
@@ -550,8 +616,18 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
         <>
           <div className="row">
             <button className="secondary" onClick={saveForVoice}>Save for this voice</button>
-            <button className="secondary" disabled={stats.running} onClick={resetToRecommended}>Reset to recommended</button>
+            <button className="secondary" disabled={stats.running || tuning !== null} onClick={resetToRecommended}>Reset to recommended</button>
+            {profile !== null && (
+              <button className="secondary" disabled={stats.running || tuning !== null} onClick={findBestSettings}>Find best settings</button>
+            )}
           </div>
+          {tuning !== null && (
+            <p className="hint" aria-live="polite">
+              {tuning}{" "}
+              <button className="secondary" onClick={() => calibrationApi.tuneCancel().catch(reportFailure)}>Stop</button>
+            </p>
+          )}
+          {tuneNote && <p className="hint" aria-live="polite">{tuneNote}</p>}
           <p className="hint">
             {saved === null
               ? "Save keeps this pitch, quality and likeness for this voice and puts them back whenever you choose it. Reset goes back to the pitch from your calibration, quality 2 and the usual likeness."

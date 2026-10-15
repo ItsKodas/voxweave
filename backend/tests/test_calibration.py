@@ -285,3 +285,27 @@ def test_a_voices_range_measured_by_an_older_version_is_measured_again(tmp_path)
     cal, _ = make(tmp_path, library=library)
     low, high = cal.voice_pitch_range(voice.id)
     assert low == pytest.approx(200, rel=0.05) and high == pytest.approx(300, rel=0.05)
+
+
+def test_the_reading_is_kept_for_deep_calibration_and_forgotten_with_the_profile(tmp_path):
+    from aivoice.calibration import QUIET_SECONDS
+
+    cal, _ = make(tmp_path)
+    assert cal.sample() is None and cal.status()["has_sample"] is False
+    cal.start(1)
+    cal.finish()
+    sample = cal.sample()
+    recorded = take()
+    assert sample is not None and len(sample) == len(recorded) - int(QUIET_SECONDS * 48000)  # the reading only
+    assert np.allclose(sample, recorded[int(QUIET_SECONDS * 48000):], atol=1e-4)
+    assert cal.status()["has_sample"] is True
+    cal.forget()
+    assert cal.sample() is None
+
+
+def test_a_failed_calibration_keeps_no_reading(tmp_path):
+    cal, _ = make(tmp_path, recorder=FakeRecorder(np.zeros(48000, np.float32)))
+    cal.start(1)
+    with pytest.raises(Exception):
+        cal.finish()
+    assert cal.sample() is None

@@ -23,7 +23,7 @@ from typing import Callable
 import numpy as np
 import soxr
 
-from aivoice.audiofile import read_wav
+from aivoice.audiofile import read_wav, write_wav
 from aivoice.config import SAMPLE_RATE
 from aivoice.engines.f0 import extract_f0
 
@@ -192,10 +192,25 @@ class Calibration:
             return None
 
     def forget(self) -> None:
+        for name in ("profile.json", "sample.wav"):
+            try:
+                (self._folder / name).unlink()
+            except FileNotFoundError:
+                pass
+
+    def sample(self) -> np.ndarray | None:
+        """The speaker's calibration reading (the part after the quiet), at SAMPLE_RATE. None when there is none:
+        calibrations made before the reading was kept have only their measurements."""
+        path = self._folder / "sample.wav"
+        if self.profile() is None or not path.is_file():
+            return None
         try:
-            (self._folder / "profile.json").unlink()
-        except FileNotFoundError:
-            pass
+            audio, sr = read_wav(path)
+        except (ValueError, OSError):
+            return None
+        if sr != SAMPLE_RATE:
+            audio = soxr.resample(audio, sr, SAMPLE_RATE).astype(np.float32)
+        return audio
 
     def wrap(self, engine):
         """The engine with the speaker's gate and gain, or the engine itself when there is no profile."""
@@ -249,6 +264,10 @@ class Calibration:
                 part = self._folder / "profile.json.part"
                 part.write_text(json.dumps(asdict(profile)), encoding="utf-8")
                 part.replace(self._folder / "profile.json")
+                # The reading itself is kept too: deep calibration converts it with each voice to compare settings.
+                sample = np.nan_to_num(np.asarray(audio, dtype=np.float32).reshape(-1))[int(QUIET_SECONDS * SAMPLE_RATE):]
+                write_wav(self._folder / "sample.wav.part", sample, SAMPLE_RATE)
+                (self._folder / "sample.wav.part").replace(self._folder / "sample.wav")
             except CalibrationError as exc:
                 self._error = str(exc)
                 raise
@@ -267,6 +286,7 @@ class Calibration:
                     "phase": None if not active else ("quiet" if seconds < QUIET_SECONDS else "reading"),
                     "quiet_seconds": QUIET_SECONDS, "total_seconds": QUIET_SECONDS + READ_SECONDS,
                     "text": READING, "error": self._error,
+                    "has_sample": profile is not None and (self._folder / "sample.wav").is_file(),
                     "profile": None if profile is None else asdict(profile)}
 
     # ---- the target voices

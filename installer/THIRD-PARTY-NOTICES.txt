@@ -29,3 +29,11 @@ Downloaded at first run, not shipped in the installer
 The first-run setup downloads, to this computer only: a Python 3.12 build (python-build-standalone, via uv),
 the Python packages pinned in setup\requirements.lock from the Python Package Index, each under its own
 license, and the ContentVec base speech model vec-768-layer-12.onnx from Hugging Face.
+
+Downloaded only when asked for
+------------------------------
+Deep calibration on the Live tab downloads, when the person agrees on screen, the WeSpeaker ResNet34 speaker
+model voxceleb_resnet34_LM.onnx (trained on VoxCeleb2) from Hugging Face,
+https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM, by the WeSpeaker project
+(https://github.com/wenet-e2e/wespeaker). It is licensed under the Creative Commons Attribution 4.0
+International license, https://creativecommons.org/licenses/by/4.0/. It is used unmodified.

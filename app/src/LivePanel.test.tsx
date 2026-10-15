@@ -5,7 +5,10 @@ import { LivePanel } from "./LivePanel";
 import { IDLE } from "./useStats";
 
 vi.mock("./calibrationApi", () => ({
-  calibrationApi: { status: vi.fn(), start: vi.fn(), finish: vi.fn(), cancel: vi.fn(), forget: vi.fn(), suggestion: vi.fn() },
+  calibrationApi: {
+    status: vi.fn(), start: vi.fn(), finish: vi.fn(), cancel: vi.fn(), forget: vi.fn(), suggestion: vi.fn(),
+    speakerModel: vi.fn(), downloadSpeakerModel: vi.fn(), tune: vi.fn(), tuneStatus: vi.fn(), tuneCancel: vi.fn(),
+  },
 }));
 const NO_PROFILE = { recording: false, seconds: 0, level: 0, phase: null, quiet_seconds: 3, total_seconds: 18, text: "Read me.", error: null, profile: null };
 const MY_VOICE = { pitch_hz: 118, pitch_low_hz: 95, pitch_high_hz: 160, level_db: -22, noise_db: -62, gate_db: -56, input_gain: 1.3, device: "Headset Mic", created: 5 };
@@ -659,5 +662,77 @@ describe("saved settings per voice", () => {
   it("cannot reset while live mode runs, since quality and likeness are set before Start", async () => {
     render(<LivePanel stats={{ ...IDLE, running: true, mode: "converted" }} />);
     expect(await screen.findByRole("button", { name: "Reset to recommended" })).toBeDisabled();
+  });
+});
+
+describe("deep calibration", () => {
+  const TUNED = {
+    voice_id: "demo", pitch_shift: 9, likeness: 0.5, similarity: 0.86, clarity: 0.95, quality: 1,
+    baseline: { pitch_shift: 7, likeness: 0.3, similarity: 0.84, clarity: 0.96 }, tried: [], created: 1,
+  };
+  const MODEL = { ready: true, size_mb: 26.5, source: "https://huggingface.co/Wespeaker/x", licence: "CC BY 4.0" };
+  beforeEach(() => {
+    localStorage.clear();
+    vi.mocked(calibrationApi.status).mockResolvedValue({ ...NO_PROFILE, profile: MY_VOICE, has_sample: true } as never);
+    vi.mocked(calibrationApi.suggestion).mockResolvedValue({ pitch_shift: 7, reason: null, speaker_hz: 118, target_hz: 177 });
+    vi.mocked(calibrationApi.speakerModel).mockResolvedValue(MODEL);
+    vi.mocked(calibrationApi.tune).mockResolvedValue({ active: true, voice_id: "demo", step: 0, steps: 10, message: "Getting ready", error: null, result: null });
+    vi.mocked(calibrationApi.tuneStatus)
+      .mockResolvedValueOnce({ active: true, voice_id: "demo", step: 3, steps: 10, message: "Trying pitch +8, likeness 30%", error: null, result: null })
+      .mockResolvedValue({ active: false, voice_id: "demo", step: 10, steps: 10, message: "Done", error: null, result: TUNED });
+  });
+
+  it("tries settings for the voice, then uses and saves the best", async () => {
+    render(<LivePanel stats={IDLE} />);
+    await ready();
+    await screen.findByText(/Set from your calibration/);
+    await userEvent.click(screen.getByRole("button", { name: "Find best settings" }));
+    expect(calibrationApi.tune).toHaveBeenCalledWith({ voice_id: "demo", quality: 1, pitch_shift: 7, likeness: 0.3 });
+    expect(await screen.findByText(/Trying pitch \+8, likeness 30% \(3 of 10\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/Best for Demo: pitch \+9, likeness 50%/, {}, { timeout: 4000 })).toBeInTheDocument();
+    expect(screen.getByText(/sounds 86% like Demo \(84% with your settings before\)/)).toBeInTheDocument();
+    expect(screen.getByText("Pitch shift (+9 semitones)")).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Likeness:/).closest("label")).toHaveTextContent("Likeness: 50%");
+    expect(JSON.parse(localStorage.getItem("voice-settings:demo")!)).toEqual({ pitch: 9, quality: 1, likeness: 0.5 });
+  });
+
+  it("asks before downloading the speaker model, and does nothing when declined", async () => {
+    vi.mocked(calibrationApi.speakerModel).mockResolvedValue({ ...MODEL, ready: false });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<LivePanel stats={IDLE} />);
+    await ready();
+    await userEvent.click(screen.getByRole("button", { name: "Find best settings" }));
+    expect(confirm.mock.calls[0][0]).toMatch(/26.5 MB.*Hugging Face.*CC BY 4.0/s);
+    expect(calibrationApi.downloadSpeakerModel).not.toHaveBeenCalled();
+    expect(calibrationApi.tune).not.toHaveBeenCalled();
+    confirm.mockRestore();
+  });
+
+  it("downloads the speaker model once agreed, then runs", async () => {
+    vi.mocked(calibrationApi.speakerModel).mockResolvedValue({ ...MODEL, ready: false });
+    vi.mocked(calibrationApi.downloadSpeakerModel).mockResolvedValue(MODEL);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<LivePanel stats={IDLE} />);
+    await ready();
+    await userEvent.click(screen.getByRole("button", { name: "Find best settings" }));
+    await waitFor(() => expect(calibrationApi.tune).toHaveBeenCalled());
+    expect(calibrationApi.downloadSpeakerModel).toHaveBeenCalled();
+    confirm.mockRestore();
+  });
+
+  it("asks for a new calibration when the old one kept no reading", async () => {
+    vi.mocked(calibrationApi.status).mockResolvedValue({ ...NO_PROFILE, profile: MY_VOICE, has_sample: false } as never);
+    render(<LivePanel stats={IDLE} />);
+    await ready();
+    await userEvent.click(screen.getByRole("button", { name: "Find best settings" }));
+    expect(await screen.findByText(/Calibrate your voice again first/)).toBeInTheDocument();
+    expect(calibrationApi.tune).not.toHaveBeenCalled();
+  });
+
+  it("is not offered without a calibration", async () => {
+    vi.mocked(calibrationApi.status).mockResolvedValue(NO_PROFILE as never);
+    render(<LivePanel stats={IDLE} />);
+    await ready();
+    expect(screen.queryByRole("button", { name: "Find best settings" })).not.toBeInTheDocument();
   });
 });

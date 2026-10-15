@@ -73,7 +73,7 @@ class SettingsBody(BaseModel):
 def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list[Device]],
                providers: list[str], default_devices: Callable[[], dict] | None = None,
                allowed_hosts: list[str] = ALLOWED_HOSTS, studio=None, library=None, importer=None,
-               training=None, tts=None, calibration=None, export_dir=None) -> FastAPI:
+               training=None, tts=None, calibration=None, export_dir=None, tuner=None) -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI):
         yield
@@ -184,6 +184,8 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
                 raise ValueError("Stop the speech before starting live mode")
             if calibration is not None and calibration.active:
                 raise ValueError("Finish the calibration recording before starting live mode")
+            if tuner is not None and tuner.active:
+                raise ValueError("Wait for deep calibration to finish before starting live mode")
             manager.start(StartConfig(**body.model_dump()))
         return manager.stats()
 
@@ -249,6 +251,7 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
         from aivoice.api_calibration import calibration_router
 
         app.include_router(calibration_router(calibration, studio, lambda: bool(manager.stats()["running"]),
-                                              audio_state, ALLOWED_ORIGINS))
+                                              audio_state, ALLOWED_ORIGINS, tuner=tuner, data=data,
+                                              training=training, tts=tts, importer=importer))
 
     return app

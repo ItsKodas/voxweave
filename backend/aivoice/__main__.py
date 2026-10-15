@@ -49,7 +49,8 @@ def build_app():
     manager = LiveManager(data, list_devices, default_engine_factory(data), streams,
                           refresh_devices=refresh_devices, calibration=calibration)
     # The model name is read when an import first needs it, so a bad setting cannot stop startup.
-    importer = Importer(library, WhisperTranscriber(lambda: config.whisper_model(data), data / "pretrained" / "whisper"))
+    transcriber = WhisperTranscriber(lambda: config.whisper_model(data), data / "pretrained" / "whisper")
+    importer = Importer(library, transcriber)
     studio = Studio(library, Recorder(streams), importer, list_devices, recordings=data / "page-recordings")
     root = Path(__file__).resolve().parents[2]
     no_training, no_tts = unavailable_parts()
@@ -57,8 +58,15 @@ def build_app():
     # Speech is played through the same stream factory as live mode. No stream is opened and no worker is
     # started until something is spoken.
     tts = TtsManager(data, library, root / "tts", Player(streams), list_devices, unavailable=no_tts)
+    from aivoice.deeptune import Tuner
+    from aivoice.speaker import SpeakerModel, model_path
+
+    # Deep calibration: the speaker model is small and runs on the processor, the voice on the graphics card.
+    tuner = Tuner(data, library, calibration, default_engine_factory(data), transcriber,
+                  lambda: SpeakerModel(ort.InferenceSession(str(model_path(data)), providers=["CPUExecutionProvider"])))
     return create_app(manager, data, list_devices, ort.get_available_providers(), default_devices=default_devices,
-                      studio=studio, library=library, importer=importer, training=training, tts=tts, calibration=calibration)
+                      studio=studio, library=library, importer=importer, training=training, tts=tts,
+                      calibration=calibration, tuner=tuner)
 
 
 def main() -> None:
