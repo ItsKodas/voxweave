@@ -62,3 +62,4 @@ try {
 finally {
     Remove-Item -Recurse -Force -Path $Work -ErrorAction SilentlyContinue
 }
+exit 0  # callers check the exit code; a failure above has already thrown
