@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LivePanel } from "./LivePanel";
@@ -591,5 +591,73 @@ describe("the shelved feminized preview voice", () => {
     await ready();
     expect(screen.queryByRole("option", { name: /feminized/ })).not.toBeInTheDocument();
     expect(screen.getByRole("option", { name: "Demo" })).toBeInTheDocument();
+  });
+});
+
+describe("saved settings per voice", () => {
+  const TWO_VOICES = [{ id: "demo", name: "Demo", has_index: true }, { id: "other", name: "Other", has_index: true }];
+  beforeEach(() => {
+    localStorage.clear();
+    vi.mocked(api.voices).mockResolvedValue(TWO_VOICES);
+    vi.mocked(calibrationApi.status).mockResolvedValue({ ...NO_PROFILE, profile: MY_VOICE } as never);
+    vi.mocked(calibrationApi.suggestion).mockResolvedValue({ pitch_shift: 7, reason: null, speaker_hz: 118, target_hz: 177 });
+  });
+
+  async function setUp() {
+    render(<LivePanel stats={IDLE} />);
+    await ready();
+    await screen.findByText(/Set from your calibration/);
+    fireEvent.change(screen.getByLabelText(/Pitch shift/), { target: { value: "12" } });
+    fireEvent.change(screen.getByLabelText(/^Quality:/), { target: { value: "4" } });
+    fireEvent.change(screen.getByLabelText(/^Likeness:/), { target: { value: "0.7" } });
+  }
+
+  it("brings back the saved pitch, quality and likeness when switching back to the voice", async () => {
+    await setUp();
+    await userEvent.click(screen.getByRole("button", { name: "Save for this voice" }));
+    expect(screen.getByText("Using your saved settings for Demo.")).toBeInTheDocument();
+    await userEvent.selectOptions(screen.getByLabelText("Voice"), "other");
+    await waitFor(() => expect(screen.getByText("Pitch shift (+7 semitones)")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText(/^Quality:/), { target: { value: "1" } });
+    await userEvent.selectOptions(screen.getByLabelText("Voice"), "demo");
+    await waitFor(() => expect(screen.getByText("Pitch shift (+12 semitones)")).toBeInTheDocument());
+    expect(screen.getByLabelText(/^Quality:/)).toHaveValue("4");
+    expect(screen.getByLabelText(/^Likeness:/).closest("label")).toHaveTextContent("Likeness: 70%");
+    expect(screen.getByText("Using your saved settings for Demo.")).toBeInTheDocument();
+  });
+
+  it("is kept after the app restarts, ahead of the calibration's pitch", async () => {
+    await setUp();
+    await userEvent.click(screen.getByRole("button", { name: "Save for this voice" }));
+    cleanup();
+    render(<LivePanel stats={IDLE} />);
+    await ready();
+    await waitFor(() => expect(screen.getByText("Pitch shift (+12 semitones)")).toBeInTheDocument());
+    await new Promise((r) => setTimeout(r, 20)); // the calibration's suggestion has had time to arrive
+    expect(screen.getByText("Pitch shift (+12 semitones)")).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Quality:/)).toHaveValue("4");
+  });
+
+  it("says when the settings changed since they were saved", async () => {
+    await setUp();
+    await userEvent.click(screen.getByRole("button", { name: "Save for this voice" }));
+    fireEvent.change(screen.getByLabelText(/Pitch shift/), { target: { value: "10" } });
+    expect(screen.getByText(/Changed since you saved/)).toBeInTheDocument();
+  });
+
+  it("Reset goes back to the calibrated pitch, quality 2 and the default likeness, and forgets the saved settings", async () => {
+    await setUp();
+    await userEvent.click(screen.getByRole("button", { name: "Save for this voice" }));
+    await userEvent.click(screen.getByRole("button", { name: "Reset to recommended" }));
+    await waitFor(() => expect(screen.getByText("Pitch shift (+7 semitones)")).toBeInTheDocument());
+    expect(screen.getByLabelText(/^Quality:/)).toHaveValue("1");
+    expect(screen.getByLabelText(/^Likeness:/).closest("label")).toHaveTextContent("Likeness: 30%");
+    expect(screen.queryByText(/Using your saved settings/)).not.toBeInTheDocument();
+    expect(localStorage.getItem("voice-settings:demo")).toBeNull();
+  });
+
+  it("cannot reset while live mode runs, since quality and likeness are set before Start", async () => {
+    render(<LivePanel stats={{ ...IDLE, running: true, mode: "converted" }} />);
+    expect(await screen.findByRole("button", { name: "Reset to recommended" })).toBeDisabled();
   });
 });

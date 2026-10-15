@@ -57,12 +57,15 @@ export const QUALITY_LEVELS = [
   { chunk_ms: 2000, context_ms: 5000, crossfade_ms: 200 },
 ];
 const QUALITY_KEY = "quality-level";
+/** The level a new install starts at, and what Reset to recommended goes back to. */
+const DEFAULT_QUALITY = 1;
+const isQuality = (n: unknown): n is number => Number.isInteger(n) && (n as number) >= 0 && (n as number) < QUALITY_LEVELS.length;
 function storedQuality(): number {
   try {
     const n = Number(localStorage.getItem(QUALITY_KEY));
-    return Number.isInteger(n) && n >= 0 && n < QUALITY_LEVELS.length && localStorage.getItem(QUALITY_KEY) !== null ? n : 1;
+    return isQuality(n) && localStorage.getItem(QUALITY_KEY) !== null ? n : DEFAULT_QUALITY;
   } catch {
-    return 1;
+    return DEFAULT_QUALITY;
   }
 }
 /** Roughly how far behind your voice the converted voice is at a level: a chunk is collected, then converted. */
@@ -86,6 +89,30 @@ function storeLikeness(voiceId: string, value: number | null) {
   try {
     if (value === null) localStorage.removeItem(LIKENESS_KEY(voiceId));
     else localStorage.setItem(LIKENESS_KEY(voiceId), String(value));
+  } catch {
+    // remembered for this session only
+  }
+}
+
+/** Settings saved for a voice with "Save for this voice": put back whenever that voice is chosen. */
+type VoiceSettings = { pitch: number; quality: number; likeness: number };
+const SETTINGS_KEY = (voiceId: string) => `voice-settings:${voiceId}`;
+function savedSettings(voiceId: string): VoiceSettings | null {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY(voiceId));
+    const s = raw === null ? null : JSON.parse(raw);
+    if (s === null || typeof s !== "object") return null;
+    const ok = Number.isInteger(s.pitch) && s.pitch >= -24 && s.pitch <= 24 && isQuality(s.quality)
+      && typeof s.likeness === "number" && s.likeness >= 0 && s.likeness <= 1;
+    return ok ? { pitch: s.pitch, quality: s.quality, likeness: s.likeness } : null;
+  } catch {
+    return null;
+  }
+}
+function storeSettings(voiceId: string, settings: VoiceSettings | null) {
+  try {
+    if (settings === null) localStorage.removeItem(SETTINGS_KEY(voiceId));
+    else localStorage.setItem(SETTINGS_KEY(voiceId), JSON.stringify(settings));
   } catch {
     // remembered for this session only
   }
@@ -137,6 +164,8 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
   const [profile, setProfile] = useState<VoiceProfile | null>(null);
   const [useCalibration, setUseCalibration] = useState(true);
   const [pitchNote, setPitchNote] = useState<string | null>(null);
+  const [saved, setSaved] = useState<VoiceSettings | null>(null);
+  const [resets, setResets] = useState(0); // counts Reset to recommended, which applies the voice's defaults again
 
   // The quality level sets the chunk timing; the Advanced fields can still override each value by hand.
   useEffect(() => {
@@ -149,14 +178,24 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
   }, [quality]);
 
   // Likeness is the index rate, kept per voice: how hard speech is pulled towards sounds of the training voice.
+  // Settings saved for the voice come first: its pitch, quality and likeness, ahead of the calibration's pitch.
   useEffect(() => {
     if (voice === "") return;
+    const settings = savedSettings(voice);
+    setSaved(settings);
+    if (settings !== null) {
+      setQuality(settings.quality);
+      setPitch(settings.pitch);
+      setPitchNote(null);
+      setOverrides((current) => ({ ...current, index_rate: settings.likeness }));
+      return;
+    }
     const remembered = storedLikeness(voice);
     setOverrides((current) => {
       const { index_rate: _dropped, ...rest } = current;
       return remembered === null ? rest : { ...rest, index_rate: remembered };
     });
-  }, [voice]);
+  }, [voice, resets]);
 
   // With a calibration, choosing a voice sets the pitch that moves the speaker onto that voice. Only then: a
   // pitch moved by hand stays until the voice or the calibration changes.
@@ -168,6 +207,7 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
       setPitchNote("The Change gender settings on a voice's page set this preview's pitch. The slider adds to it.");
       return;
     }
+    if (voice !== "" && savedSettings(voice) !== null) return;
     if (calibrated === null || voice === "") {
       setPitchNote(null);
       return;
@@ -189,7 +229,7 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
     return () => {
       stale = true;
     };
-  }, [calibrated, voice]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [calibrated, voice, resets]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (loaded) onMonitorChosen?.(monitor);
@@ -303,6 +343,23 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
   const base = presets[preset];
   const value = <K extends keyof Params>(key: K): Params[K] | "" =>
     (overrides[key] ?? base?.[key] ?? "") as Params[K] | "";
+  const likeness = Number(value("index_rate") || 0);
+  const voiceName = voices.find((v) => v.id === voice)?.name ?? "this voice";
+  const savedChanged = saved !== null
+    && (saved.pitch !== pitch || saved.quality !== quality || Math.abs(saved.likeness - likeness) > 1e-6);
+  const saveForVoice = () => {
+    const settings = { pitch, quality, likeness };
+    storeSettings(voice, settings);
+    setSaved(settings);
+  };
+  const resetToRecommended = () => {
+    storeSettings(voice, null);
+    storeLikeness(voice, null);
+    setSaved(null);
+    setQuality(DEFAULT_QUALITY);
+    if (calibrated === null) setPitch(0);
+    setResets((n) => n + 1); // the likeness and the calibration's pitch are worked out again
+  };
   /** Number fields show the typed override, with the preset value as placeholder. */
   const typed = (key: keyof Params) => overrides[key] ?? "";
   const placeholder = (key: keyof Params) => (base ? String(base[key]) : "");
@@ -485,6 +542,22 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
           <p className="hint">
             Higher sounds more like the voice but breaks up more when you speak differently from its recordings;
             lower is steadier. Remembered for each voice. Set it before pressing Start.
+          </p>
+        </>
+      )}
+
+      {voice !== "" && voice !== PREVIEW_VOICE_ID && (
+        <>
+          <div className="row">
+            <button className="secondary" onClick={saveForVoice}>Save for this voice</button>
+            <button className="secondary" disabled={stats.running} onClick={resetToRecommended}>Reset to recommended</button>
+          </div>
+          <p className="hint">
+            {saved === null
+              ? "Save keeps this pitch, quality and likeness for this voice and puts them back whenever you choose it. Reset goes back to the pitch from your calibration, quality 2 and the usual likeness."
+              : savedChanged
+                ? `Changed since you saved. Press Save to keep these settings for ${voiceName}.`
+                : `Using your saved settings for ${voiceName}.`}
           </p>
         </>
       )}

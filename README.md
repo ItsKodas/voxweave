@@ -436,6 +436,8 @@ What the result sounds like depends on the person, so expect a few rounds of sam
 
 **Likeness** on the Live tab is how strongly your speech is pulled towards sounds of the training voice (the index rate). Higher sounds more like the voice but breaks up more when you speak differently from its recordings; lower is steadier. It is remembered for each voice on this computer and is set before pressing Start. None of this changes the limits of the data: a voice trained on one speaking style still only knows that style.
 
+**Save for this voice** on the Live tab keeps the pitch shift, quality and likeness you have set for the chosen voice, on this computer, and puts them back whenever you choose that voice again (ahead of the pitch your calibration suggests). **Reset to recommended** forgets them and goes back to the calibration's pitch, quality 2 and the usual likeness.
+
 The converted voice's **loudness follows yours**: a model's own loudness can drop mid-sentence where yours does not (most noticeable with voices imported from recordings), so live mode moves the output's volume three quarters of the way to your own speaking volume, moment by moment. It never lifts a near-silent output by more than about nine decibels.
 
 **Calibrating live mode to your own voice.** The voice models only learn the target voice, so nothing is trained on you. Instead, **My voice** on the Live tab makes one recording of about 18 seconds with the microphone chosen there: stay quiet for the first 3 seconds, then read the text on screen aloud. It ends by itself. From it the app keeps (in `data/calibration/profile.json`) your usual pitch, your speaking level, and how loud the room is when you say nothing. Live mode then uses it three ways:
