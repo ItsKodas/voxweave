@@ -1907,3 +1907,33 @@ def test_without_versions_to_compare_the_trainer_saves_no_extra_weights(rig):
     rig.runner.stages["train"] = train
     assert rig.run() == 0
     assert seen["sw"] == "0"
+
+
+def test_an_exporter_whose_python_could_not_start_is_tried_once_more_and_the_reason_logged(rig):
+    tries = []
+
+    def export(c):
+        tries.append(1)
+        if len(tries) == 1:
+            c.line("No Python at '\"C:/Users/me/AppData/Roaming/uv/python/cpython-3.10.21/python.exe'")
+            return 103
+        return FakeRunner.export(rig.runner, c)
+
+    rig.runner.stages["export"] = export
+    assert rig.run() == 0
+    assert len(tries) == 2 and rig.final()["ok"] is True
+    log = rig.log()
+    assert "could not start its Python" in log and "PYTHONHOME" in log  # what to look into next time
+
+
+def test_an_exporter_that_fails_for_another_reason_is_not_retried(rig):
+    tries = []
+
+    def export(c):
+        tries.append(1)
+        c.line("RuntimeError: something else")
+        return 1
+
+    rig.runner.stages["export"] = export
+    rig.run()
+    assert len(tries) == 1 and rig.final()["ok"] is False

@@ -372,6 +372,20 @@ class Job:
         self._log("worker", "%s ended with exit code %s" % (stage, code))
         return code
 
+    def _run_export(self, argv, env):
+        """The exporter, tried once more when its Python could not even start. That happened once on the
+        development PC ("No Python at ..." from the export environment's launcher) and did not happen again with the
+        same command; what the environment looked like is logged, so a repeat can be looked into."""
+        code = self._run_simple(argv, cwd=TOOLS_DIR.parent, env=env)
+        if code != 0 and any("No Python at" in line for line in self.tail):
+            seen = {name: env.get(name) for name in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV", "__PYVENV_LAUNCHER__",
+                                                     "PYTHONEXECUTABLE", "UV_PYTHON_INSTALL_DIR")}
+            self._log("worker", "the exporter could not start its Python (exit code %s); trying once more. "
+                                "Environment: %s; PATH starts %s" % (code, json.dumps(seen),
+                                                                     (env.get("PATH") or "")[:300]))
+            code = self._run_simple(argv, cwd=TOOLS_DIR.parent, env=env)
+        return code
+
     def _require_success(self, code):
         if code != 0:
             raise JobError("The step \"%s\" failed (exit code %s). Its last output:\n%s" % (
@@ -873,11 +887,11 @@ class Job:
         env.update({"AIVOICE_EXPORT_DIR": str(new), "PYTHONDONTWRITEBYTECODE": "1", "PYTHONIOENCODING": "utf-8",
                     "PYTHONUNBUFFERED": "1"})
         try:
-            code = self._run_simple([
+            code = self._run_export([
                 TOOLS_DIR / ".rvc" / "venv" / "Scripts" / "python.exe", TOOLS_DIR / "export_rvc_onnx.py",
                 self.weights, self.experiment, "--index", self._added_index(),
                 # One argument: as two, a name such as "-x" or "--cool" would be read as an option.
-                "--name=" + (self.args.name or self.experiment)], cwd=TOOLS_DIR.parent, env=env)
+                "--name=" + (self.args.name or self.experiment)], env)
             self._require_success(code)
             self._check_export(new)
             try:
