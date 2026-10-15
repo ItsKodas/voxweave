@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.1.4"
+version = "0.1.5"
 description = "Voxweave: train a voice, speak as it live, and turn text into speech"
 authors = ["you"]
 edition = "2024"
