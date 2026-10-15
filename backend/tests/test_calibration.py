@@ -363,7 +363,7 @@ def test_the_status_walks_through_quiet_mic_check_and_reading(tmp_path):
         cal.cancel()
     assert phases == ["quiet", "testing", "reading"]
     status = cal.status()
-    assert status["test_seconds"] == TEST_SECONDS and status["total_seconds"] == QUIET_SECONDS + TEST_SECONDS + 15.0
+    assert status["test_seconds"] == TEST_SECONDS and status["total_seconds"] == 75.0
 
 
 
@@ -382,3 +382,54 @@ def test_the_converted_voice_comes_out_as_loud_as_the_speaker_went_in():
     assert np.max(np.abs(out)) == pytest.approx(0.1, rel=0.01)  # the boost is for the model, not the listener
     louder = GatedEngine(Echo(), gate_db=None, gain=4.0).convert(speech, SR, 0.0, replace(params, match_input_level=False))
     assert np.max(np.abs(louder)) == pytest.approx(0.4, rel=0.01)
+
+
+def test_each_calibration_reads_one_of_several_paragraphs_never_the_same_twice_running(tmp_path):
+    from aivoice.calibration import READINGS
+
+    assert len(READINGS) >= 5 and all(len(r.split()) >= 35 for r in READINGS)
+    cal, _ = make(tmp_path)
+    seen = []
+    for _ in range(12):
+        cal.start(1)
+        seen.append(cal.status()["text"])
+        cal.cancel()
+    assert all(t in READINGS for t in seen)
+    assert all(a != b for a, b in zip(seen, seen[1:]))
+    assert len(set(seen)) >= 3
+
+
+def test_the_reading_runs_until_done_with_a_minimum_and_a_safety_limit(tmp_path):
+    from aivoice.calibration import MAX_SECONDS, MIN_READ_SECONDS
+
+    cal, _ = make(tmp_path)
+    cal.start(1)
+    status = cal.status()
+    assert status["min_read_seconds"] == MIN_READ_SECONDS
+    assert status["total_seconds"] == MAX_SECONDS >= QUIET_SECONDS + TEST_SECONDS + 45
+    cal.cancel()
+
+
+def test_the_mic_check_is_kept_as_the_microphone_heard_it(tmp_path):
+    cal, _ = make(tmp_path)
+    assert cal.test_audio() is None
+    cal.start(1)
+    cal.finish()
+    check = cal.test_audio()
+    recorded = take()
+    start, end = int(QUIET_SECONDS * SR), int((QUIET_SECONDS + TEST_SECONDS) * SR)
+    assert check is not None and len(check) == end - start
+    assert np.allclose(check, recorded[start:end], atol=1e-4)  # not boosted: what the microphone picked up
+    cal.forget()
+    assert cal.test_audio() is None
+
+
+def test_a_failed_calibration_keeps_its_recording_to_look_into(tmp_path):
+    from aivoice.audiofile import read_wav
+
+    bad, _ = make(tmp_path, FakeRecorder(np.zeros(SR * 10, dtype=np.float32)))
+    bad.start(1)
+    with pytest.raises(CalibrationError):
+        bad.finish()
+    audio, sr = read_wav(tmp_path / "calibration" / "failed-attempt.wav")
+    assert sr == SR and len(audio) == SR * 10

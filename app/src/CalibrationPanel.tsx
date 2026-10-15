@@ -3,6 +3,39 @@ import { calibrationApi, CalibrationStatus, VoiceProfile } from "./calibrationAp
 
 const POLL_MS = 250;
 
+/** How loud the microphone is right now, by the peak of the latest audio: red, green, yellow, red. */
+export function levelZone(level: number): { label: string; zone: "quiet" | "good" | "loud" | "clip" } {
+  if (level < 0.03) return { label: "Too quiet", zone: "quiet" };
+  if (level < 0.5) return { label: "Good", zone: "good" };
+  if (level < 0.9) return { label: "Loud", zone: "loud" };
+  return { label: "Too loud", zone: "clip" };
+}
+
+function LevelBar({ level }: { level: number }) {
+  const { label, zone } = levelZone(level);
+  return (
+    <div className="level-bar">
+      <div className="level-track" aria-hidden="true">
+        <div className={`level-fill ${zone}`} style={{ width: `${Math.min(100, Math.max(2, level * 100))}%` }} />
+      </div>
+      <span className={`level-label ${zone}`} aria-live="polite">{label}</span>
+    </div>
+  );
+}
+
+/** Plays a backend audio URL, revoking it when it ends. */
+function play(url: string, onEnd: () => void): HTMLAudioElement {
+  const audio = new Audio(url);
+  const done = () => {
+    URL.revokeObjectURL(url);
+    onEnd();
+  };
+  audio.onended = done;
+  audio.onerror = done;
+  void audio.play().catch(done);
+  return audio;
+}
+
 /**
  * "My voice": one short recording of the person speaking (a few seconds of quiet, then reading aloud), from which
  * live mode sets its pitch shift, a quiet gate and the input level. `input` is the microphone chosen on the Live tab.
@@ -17,6 +50,7 @@ export function CalibrationPanel({ input, disabled, onProfile }: {
   const [status, setStatus] = useState<CalibrationStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [playing, setPlaying] = useState(false);
   const finishing = useRef(false);
   const onProfileRef = useRef(onProfile);
   onProfileRef.current = onProfile;
@@ -90,6 +124,26 @@ export function CalibrationPanel({ input, disabled, onProfile }: {
     }
   };
 
+  const finishNow = () => {
+    if (finishing.current) return;
+    finishing.current = true;
+    run(calibrationApi.finish).finally(() => {
+      finishing.current = false;
+    });
+  };
+  const readFrom = (status?.quiet_seconds ?? 3) + (status?.test_seconds ?? 4);
+  const canFinish = !!status && status.seconds >= readFrom + (status.min_read_seconds ?? 8);
+  const playCheck = async () => {
+    setError(null);
+    try {
+      const url = await calibrationApi.testAudioUrl();
+      setPlaying(true);
+      play(url, () => setPlaying(false));
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
   const profile = status?.profile ?? null;
   const left = status ? Math.max(0, Math.ceil(status.total_seconds - status.seconds)) : 0;
 
@@ -108,15 +162,18 @@ export function CalibrationPanel({ input, disabled, onProfile }: {
             </>
           ) : (
             <>
-              <p className="hint" aria-live="polite">Now read this aloud in your normal voice. {left} seconds left.</p>
+              <p className="hint" aria-live="polite">Now read the whole paragraph at your normal pace, then press Done.</p>
               <p className="sentence">{status.text}</p>
             </>
           )}
-          <label className="meter">
-            Level
-            <progress max={1} value={Math.min(1, status.level)} />
-          </label>
-          <button className="secondary" disabled={busy} onClick={() => run(calibrationApi.cancel)}>Cancel</button>
+          <LevelBar level={status.level} />
+          <div className="actions">
+            {status.phase === "reading" && (
+              <button disabled={busy || !canFinish} onClick={finishNow}>Done</button>
+            )}
+            <button className="secondary" disabled={busy} onClick={() => run(calibrationApi.cancel)}>Cancel</button>
+          </div>
+          {status.phase === "reading" && <p className="hint">It stops by itself after {left} more seconds.</p>}
         </>
       ) : (
         <>
@@ -136,6 +193,11 @@ export function CalibrationPanel({ input, disabled, onProfile }: {
             onClick={() => input !== null && run(() => calibrationApi.start(input))}>
             {profile ? "Calibrate again" : "Calibrate my voice"}
           </button>
+          {profile && (
+            <button className="secondary" disabled={busy || playing} onClick={playCheck}>
+              {playing ? "Playing..." : "Play my mic check"}
+            </button>
+          )}
           {profile && (
             <button className="secondary" disabled={busy} onClick={() => run(calibrationApi.forget)}>Forget calibration</button>
           )}

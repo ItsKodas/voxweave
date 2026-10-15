@@ -46,7 +46,7 @@ def build_app():
     streams = SoundDeviceStreams()
     library = Library(data)
     # Its own recorder: a calibration take never shares state with a clip being recorded. 30 seconds at most.
-    calibration = Calibration(data, Recorder(streams, max_seconds=30.0), list_devices, library)
+    calibration = Calibration(data, Recorder(streams, max_seconds=80.0), list_devices, library)
     from aivoice.insight import Insight
     from aivoice.pretrained import base_voice_id
     from aivoice.speaker import voice_matcher

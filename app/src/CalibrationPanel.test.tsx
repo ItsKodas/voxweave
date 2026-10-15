@@ -1,10 +1,10 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CalibrationPanel } from "./CalibrationPanel";
+import { CalibrationPanel, levelZone } from "./CalibrationPanel";
 import { calibrationApi, CalibrationStatus, VoiceProfile } from "./calibrationApi";
 
 vi.mock("./calibrationApi", () => ({
-  calibrationApi: { status: vi.fn(), start: vi.fn(), finish: vi.fn(), cancel: vi.fn(), forget: vi.fn(), suggestion: vi.fn() },
+  calibrationApi: { status: vi.fn(), start: vi.fn(), finish: vi.fn(), cancel: vi.fn(), forget: vi.fn(), suggestion: vi.fn(), testAudioUrl: vi.fn() },
 }));
 
 const PROFILE: VoiceProfile = {
@@ -12,7 +12,7 @@ const PROFILE: VoiceProfile = {
   input_gain: 1.3, device: "Headset Mic", created: 1,
 };
 const idle = (over: Partial<CalibrationStatus> = {}): CalibrationStatus => ({
-  recording: false, seconds: 0, level: 0, phase: null, quiet_seconds: 3, test_seconds: 4, test_phrase: "Testing, one, two, three", total_seconds: 22,
+  recording: false, seconds: 0, level: 0, phase: null, quiet_seconds: 3, test_seconds: 4, test_phrase: "Testing, one, two, three", min_read_seconds: 8, total_seconds: 22,
   text: "The ferry leaves the harbour.", error: null, profile: null, ...over,
 });
 const taking = (seconds: number): CalibrationStatus =>
@@ -78,7 +78,9 @@ describe("CalibrationPanel", () => {
 
     vi.mocked(calibrationApi.status).mockResolvedValue(taking(12));
     await tick(250);
-    expect(screen.getByText(/Now read this aloud in your normal voice. 10 seconds left/)).toBeInTheDocument();
+    expect(screen.getByText(/read the whole paragraph at your normal pace, then press Done/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Done" })).toBeDisabled(); // under 8 s of reading yet
+    expect(screen.getByText(/stops by itself after 10 more seconds/)).toBeInTheDocument();
     expect(screen.getByText("The ferry leaves the harbour.")).toBeInTheDocument();
     expect(calibrationApi.finish).not.toHaveBeenCalled();
 
@@ -126,5 +128,59 @@ describe("CalibrationPanel", () => {
     await screen.findByRole("button", { name: "Cancel" });
     unmount();
     expect(calibrationApi.cancel).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe("finishing, the level bar and the mic check", () => {
+  it("Done finishes once enough has been read", async () => {
+    vi.useFakeTimers();
+    vi.mocked(calibrationApi.start).mockResolvedValue(taking(0));
+    vi.mocked(calibrationApi.finish).mockResolvedValue(idle({ profile: PROFILE }));
+    render(<CalibrationPanel input={4} disabled={false} onProfile={() => {}} />);
+    await tick(0);
+    fireEvent.click(screen.getByRole("button", { name: "Calibrate my voice" }));
+    await tick(0);
+    vi.mocked(calibrationApi.status).mockResolvedValue(taking(16));
+    await tick(250);
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    await tick(0);
+    expect(calibrationApi.finish).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/Calibrated on Headset Mic/)).toBeInTheDocument();
+  });
+
+  it("colours the level: too quiet and too loud red, good green, loud yellow", () => {
+    expect(levelZone(0.01)).toEqual({ label: "Too quiet", zone: "quiet" });
+    expect(levelZone(0.2)).toEqual({ label: "Good", zone: "good" });
+    expect(levelZone(0.7)).toEqual({ label: "Loud", zone: "loud" });
+    expect(levelZone(0.95)).toEqual({ label: "Too loud", zone: "clip" });
+  });
+
+  it("shows the level while recording", async () => {
+    vi.useFakeTimers();
+    vi.mocked(calibrationApi.start).mockResolvedValue({ ...taking(4), level: 0.01 });
+    render(<CalibrationPanel input={4} disabled={false} onProfile={() => {}} />);
+    await tick(0);
+    fireEvent.click(screen.getByRole("button", { name: "Calibrate my voice" }));
+    await tick(0);
+    expect(screen.getByText("Too quiet")).toBeInTheDocument();
+  });
+
+  it("plays back the mic check after calibrating", async () => {
+    const played: string[] = [];
+    class FakeAudio {
+      onended: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      constructor(public src: string) {}
+      play() { played.push(this.src); return Promise.resolve(); }
+    }
+    vi.stubGlobal("Audio", FakeAudio);
+    URL.revokeObjectURL = vi.fn();
+    vi.mocked(calibrationApi.status).mockResolvedValue(idle({ profile: PROFILE }));
+    vi.mocked(calibrationApi.testAudioUrl).mockResolvedValue("blob:check");
+    render(<CalibrationPanel input={4} disabled={false} onProfile={() => {}} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Play my mic check" }));
+    await waitFor(() => expect(played).toEqual(["blob:check"]));
+    vi.unstubAllGlobals();
   });
 });

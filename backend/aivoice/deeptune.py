@@ -172,6 +172,46 @@ class Tuner:
                 daemon=True)
             self._thread.start()
 
+    def preview(self, voice_id: str, quality: int, pitch_shift: int, likeness: float,
+                advanced: dict | None = None) -> tuple[np.ndarray, int]:
+        """The speaker's calibration reading turned out in a voice at these settings, as live mode would, brought to
+        a comfortable listening level: to hear a voice before going live."""
+        voice = next((v for v in self._list_voices(self._data) if v.id == voice_id), None)
+        if voice is None:
+            raise ValueError(f"Unknown voice: {voice_id}")
+        if not (isinstance(quality, int) and 0 <= quality < len(QUALITY_LEVELS)):
+            raise ValueError("Unknown quality level")
+        sample = self._calibration.sample()
+        if sample is None:
+            raise ValueError("Calibrate your voice first: the preview plays your calibration reading in the voice.")
+        unknown = set(advanced or {}) - set(ADVANCED_STEPS)
+        if unknown:
+            raise ValueError(f"Unknown settings: {sorted(unknown)}")
+        with self._lock:
+            if self._status["active"]:
+                raise ValueError("Wait for deep calibration to finish")
+        engine = self._preview_engine(voice)
+        out = self._convert(engine, sample, quality, int(pitch_shift), float(likeness),
+                            tuple(sorted((advanced or {}).items())))
+        rms = float(np.sqrt(np.mean(out.astype(np.float64) ** 2)))
+        if rms > 1e-6:
+            out = out * np.float32(min(0.1 / rms, 0.95 / max(float(np.max(np.abs(out))), 1e-9)))  # -20 dB, peak 0.95
+        return out.astype(np.float32), self._sr
+
+    def _preview_engine(self, voice):
+        """The voice's engine, kept for the next preview of the same voice."""
+        cached = getattr(self, "_preview", None)
+        if cached is not None and cached[0] == voice.id:
+            return cached[1]
+        engine = self._engine_factory(voice)
+        if hasattr(engine, "pitch_range"):
+            engine.pitch_range = self._calibration.voice_pitch_range(voice.id)
+        profile = self._calibration.profile()
+        if hasattr(engine, "speech_level_db") and profile is not None:
+            engine.speech_level_db = profile.level_db + 20.0 * float(np.log10(profile.input_gain))
+        self._preview = (voice.id, engine)
+        return engine
+
     def cancel(self) -> None:
         self._cancel.set()
 

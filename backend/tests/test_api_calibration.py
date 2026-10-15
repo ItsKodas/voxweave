@@ -36,7 +36,7 @@ def test_a_calibration_is_recorded_measured_and_reported(tmp_path):
     client, manager, _, _ = rig(tmp_path)
     assert client.get("/calibration/status").json()["profile"] is None
     started = client.post("/calibration/start", json={"input_device": 1}, headers=ORIGIN).json()
-    assert started["recording"] and started["text"] and started["total_seconds"] == 22.0
+    assert started["recording"] and started["text"] and started["total_seconds"] == 75.0
     done = client.post("/calibration/finish", headers=ORIGIN).json()
     assert not done["recording"] and 110 < done["profile"]["pitch_hz"] < 130
     assert client.get("/calibration/status").json()["profile"] == done["profile"]
@@ -280,3 +280,29 @@ def test_live_learning_needs_the_calibration_in_use(tmp_path):
     res = client.post("/live/learning", json={"enabled": True})
     assert res.status_code == 400 and "Calibrate" in res.json()["detail"]
     client.post("/live/stop")
+
+
+def test_a_preview_is_served_as_audio_and_waits_for_live_mode(tmp_path):
+    class Previewing(FakeTuner):
+        def preview(self, voice_id, quality, pitch_shift, likeness, advanced=None):
+            self.started.append(("preview", voice_id, pitch_shift))
+            return np.zeros(4800, np.float32), 48000
+
+    tuner = Previewing()
+    client, _ = tuner_rig(tmp_path, tuner, model=False)
+    res = client.post("/calibration/preview", json=TUNE, headers=ORIGIN)
+    assert res.status_code == 200 and res.headers["content-type"] == "audio/wav" and res.content[:4] == b"RIFF"
+    assert tuner.started == [("preview", "demo", 12)]
+    client.post("/live/start", json={"input_device": 1, "mic_device": 3, "voice": "demo"})
+    res = client.post("/calibration/preview", json=TUNE, headers=ORIGIN)
+    assert res.status_code == 400 and "Stop live mode" in res.json()["detail"]
+    client.post("/live/stop")
+
+
+def test_the_mic_check_can_be_played_back(tmp_path):
+    client, _, _, _ = rig(tmp_path)
+    assert client.get("/calibration/test-audio").status_code == 400
+    client.post("/calibration/start", json={"input_device": 1}, headers=ORIGIN)
+    client.post("/calibration/finish", headers=ORIGIN)
+    res = client.get("/calibration/test-audio")
+    assert res.status_code == 200 and res.headers["content-type"] == "audio/wav" and res.content[:4] == b"RIFF"

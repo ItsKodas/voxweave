@@ -228,3 +228,18 @@ def test_the_tuner_checks_the_advanced_settings_it_starts_from(tmp_path):
         tuner.start("woman", quality=1, pitch_shift=7, likeness=0.3, advanced={"nonsense": 1})
     with pytest.raises(ValueError, match="protect"):
         tuner.start("woman", quality=1, pitch_shift=7, likeness=0.3, advanced={"protect": 2.0})
+
+
+def test_a_preview_turns_the_calibration_reading_out_in_the_voice(tmp_path):
+    tuner, engine = make(tmp_path)
+    audio, sr = tuner.preview("woman", quality=2, pitch_shift=9, likeness=0.5, advanced={"creak_repair": False})
+    assert sr == SR and len(audio) == len(FakeCalibration().sample())
+    assert engine.last[:2] == (9, 0.5) and engine.params.creak_repair is False and engine.params.chunk_ms == 500
+    rms = float(np.sqrt(np.mean(audio ** 2)))
+    assert 20 * np.log10(rms) == pytest.approx(-20.0, abs=1.0) and np.max(np.abs(audio)) <= 0.95  # comfortable to hear
+
+
+def test_a_preview_needs_a_kept_reading(tmp_path):
+    tuner, _ = make(tmp_path, sample=False)
+    with pytest.raises(ValueError, match="Calibrate"):
+        tuner.preview("woman", quality=1, pitch_shift=0, likeness=0.3)

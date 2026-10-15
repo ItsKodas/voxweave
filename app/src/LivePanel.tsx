@@ -205,6 +205,9 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
   const [learning, setLearning] = useState<Learning | null>(null);
   const [learnNote, setLearnNote] = useState<string | null>(null);
   const [sidePanel, setSidePanel] = useState<"sound" | "voice">("sound");
+  // The calibration reading played back in the chosen voice: "loading" while it converts, then "playing".
+  const [preview, setPreview] = useState<"loading" | "playing" | null>(null);
+  const previewAudio = useRef<HTMLAudioElement | null>(null);
 
   // The quality level sets the chunk timing; the Advanced fields can still override each value by hand.
   useEffect(() => {
@@ -555,6 +558,34 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
   const canStart = !busy && !speechActive && input !== null && hasDestination && voice !== "";
   const shownError = error ?? actionError ?? stats.error;
 
+  const playPreview = async () => {
+    if (preview === "playing") {
+      previewAudio.current?.pause();
+      previewAudio.current = null;
+      setPreview(null);
+      return;
+    }
+    setError(null);
+    setPreview("loading");
+    try {
+      const url = await calibrationApi.preview({ voice_id: voice, quality, pitch_shift: pitch, likeness, advanced });
+      const audio = new Audio(url);
+      const done = () => {
+        URL.revokeObjectURL(url);
+        if (previewAudio.current === audio) previewAudio.current = null;
+        setPreview(null);
+      };
+      audio.onended = done;
+      audio.onerror = done;
+      previewAudio.current = audio;
+      setPreview("playing");
+      await audio.play();
+    } catch (e) {
+      setPreview(null);
+      setError((e as Error).message);
+    }
+  };
+
   const changePitch = (semitones: number) => {
     const clamped = Math.max(-24, Math.min(24, semitones));
     setPitch(clamped);
@@ -678,12 +709,27 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
 
           <div className="card grow">
             <h3 className="card-title">Voice</h3>
-            <label>
-              Voice
-              <select value={voice} onChange={(e) => setVoice(e.target.value)} disabled={stats.running}>
-                {voices.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
-              </select>
-            </label>
+            <div className="voice-pick">
+              <label>
+                Voice
+                <select value={voice} onChange={(e) => setVoice(e.target.value)} disabled={stats.running}>
+                  {voices.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+                </select>
+              </label>
+              {profile !== null && voice !== "" && voice !== PREVIEW_VOICE_ID && (
+                <button className="secondary" disabled={stats.running || preview === "loading" || tuning !== null}
+                  aria-label={preview === "playing" ? "Stop the preview" : `Play my calibration as ${voiceName}`}
+                  title={stats.running ? "Stop live mode to hear a preview" : `Hear your calibration reading as ${voiceName}`}
+                  onClick={playPreview}>
+                  {preview === "playing" ? (
+                    <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="2" y="2" width="8" height="8" rx="1.5" fill="currentColor" /></svg>
+                  ) : preview === "loading" ? "…" : (
+                    <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.5l7 4.5-7 4.5z" fill="currentColor" /></svg>
+                  )}
+                </button>
+              )}
+            </div>
+            <div style={{ height: 8 }} aria-hidden="true" />
             <label>
               Quality: {quality + 1} of {QUALITY_LEVELS.length}, about {delaySeconds(quality).toFixed(1)} s behind your voice
               <input type="range" min={0} max={QUALITY_LEVELS.length - 1} step={1} value={quality} disabled={stats.running}

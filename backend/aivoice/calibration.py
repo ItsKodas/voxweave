@@ -14,6 +14,7 @@ are untouched, and anything that goes wrong inside still ends in silence there.
 """
 import json
 import math
+import random
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -29,7 +30,10 @@ from aivoice.engines.f0 import extract_f0
 
 QUIET_SECONDS = 3.0  # the start of the recording, during which the speaker says nothing
 TEST_SECONDS = 4.0  # then "testing, one, two, three": the microphone level the input boost is set from
-READ_SECONDS = 15.0  # then this much reading aloud: the pitch, and the reading deep calibration converts
+# Then reading a paragraph aloud (the pitch, and the reading deep calibration converts), for as long as it takes:
+# the speaker presses Done once at least MIN_READ_SECONDS have been read, and the take ends by itself at MAX_SECONDS.
+MIN_READ_SECONDS = 8.0
+MAX_SECONDS = 75.0
 TEST_PHRASE = "Testing, one, two, three"
 MIN_VOICED_SECONDS = 3.0
 TARGET_LEVEL_DB = -20.0  # the level of ordinary close speech (RMS of voiced sound)
@@ -49,10 +53,30 @@ HANGOVER_SECONDS = 0.3  # speech that ended this recently still opens the gate
 FRAME_SECONDS = 0.02
 MAX_SHIFT = 24
 ABANDONED_AFTER = 90.0  # a recording nobody finished is given up after this long
-READING = ("The ferry leaves the harbour at seven each morning. If the wind is calm, you can see the far shore "
-           "long before the engines slow, and the gulls follow the boat the whole way across. My grandfather kept "
-           "a small workshop behind the house. He fixed clocks, radios and bicycles there, and he never once "
-           "threw away a screw that might be useful again.")
+# One of these is read at each calibration, never the same one twice in a row: everyday sentences with questions,
+# numbers and a range of sounds, each about 20 seconds aloud.
+READINGS = (
+    "The ferry leaves the harbour at seven each morning. If the wind is calm, you can see the far shore long before "
+    "the engines slow, and the gulls follow the boat the whole way across. My grandfather kept a small workshop behind "
+    "the house. He fixed clocks, radios and bicycles there, and he never once threw away a screw that might be useful "
+    "again.",
+    "Have you ever tried to bake bread on a cold day? The dough sulks in the corner and refuses to rise, no matter how "
+    "long you wait. My neighbour swears by a warm oven with the light switched on, and honestly, she might be right. "
+    "Last week her loaf came out golden, crisp and nearly twice the size of mine.",
+    "We missed the last bus by about thirty seconds, so we walked home through the park instead. It was quieter than "
+    "I expected: just the hum of the streetlights, a dog barking somewhere far away, and our shoes crunching on the "
+    "gravel. By the time we reached the gate, it had started to rain, gently at first, then all at once.",
+    "Before you start, check that the batteries are charged and the lens is clean. Hold the camera with both hands, "
+    "keep your elbows tucked in, and breathe out slowly as you press the button. Most blurry photos come from rushing "
+    "that last moment. Take three or four shots of the same scene, then choose the sharpest one later.",
+    "Honestly, I thought the quiz would be easy. The first question was about the capital of Australia, and half the "
+    "room shouted Sydney. It's Canberra, by the way. Then came a round on famous inventions, and nobody knew who "
+    "built the first working television. We finished fourth out of nine teams, which still felt like a win.",
+    "The old lighthouse stands at the end of a narrow path, surrounded by wild grass and yellow flowers. Every summer, "
+    "visitors climb the hundred and twelve steps to the top, where the view stretches for miles across the bay. On a "
+    "clear evening you can watch the fishing boats drift home as the sky turns orange, then pink, then deep blue.",
+)
+READING = READINGS[0]
 
 
 class CalibrationError(ValueError):
@@ -227,6 +251,7 @@ class Calibration:
         self._clock = clock
         self._lock = threading.Lock()
         self._started: float | None = None
+        self._reading = 0
         self._device = ""
         self._error: str | None = None
 
@@ -246,7 +271,7 @@ class Calibration:
             return None
 
     def forget(self) -> None:
-        for name in ("profile.json", "sample.wav"):
+        for name in ("profile.json", "sample.wav", "test.wav"):
             try:
                 (self._folder / name).unlink()
             except FileNotFoundError:
@@ -270,6 +295,17 @@ class Calibration:
                 write_wav(self._folder / "sample.wav.part", np.asarray(sample, dtype=np.float32), SAMPLE_RATE)
                 (self._folder / "sample.wav.part").replace(self._folder / "sample.wav")
             return updated
+
+    def test_audio(self) -> np.ndarray | None:
+        """The calibration's "testing, one, two, three", as the microphone picked it up (not boosted)."""
+        path = self._folder / "test.wav"
+        if self.profile() is None or not path.is_file():
+            return None
+        try:
+            audio, sr = read_wav(path)
+        except (ValueError, OSError):
+            return None
+        return audio if sr == SAMPLE_RATE else soxr.resample(audio, sr, SAMPLE_RATE).astype(np.float32)
 
     def sample(self) -> np.ndarray | None:
         """The speaker's calibration reading (the part after the quiet), at SAMPLE_RATE. None when there is none:
@@ -317,6 +353,8 @@ class Calibration:
             if source.max_input < 1:
                 raise CalibrationError(f"{source.name} is not an input device")
             self._recorder.start(device)
+            others = [i for i in range(len(READINGS)) if i != self._reading] or [0]
+            self._reading = random.choice(others)  # a different paragraph from last time
             self._started, self._device, self._error = self._clock(), source.name, None
 
     def cancel(self) -> None:
@@ -342,8 +380,19 @@ class Calibration:
                     int((QUIET_SECONDS + TEST_SECONDS) * SAMPLE_RATE):]
                 write_wav(self._folder / "sample.wav.part", sample, SAMPLE_RATE)
                 (self._folder / "sample.wav.part").replace(self._folder / "sample.wav")
+                # And the mic check as the microphone picked it up, to play back.
+                check = np.nan_to_num(np.asarray(audio, dtype=np.float32).reshape(-1))[
+                    int(QUIET_SECONDS * SAMPLE_RATE): int((QUIET_SECONDS + TEST_SECONDS) * SAMPLE_RATE)]
+                write_wav(self._folder / "test.wav.part", check, SAMPLE_RATE)
+                (self._folder / "test.wav.part").replace(self._folder / "test.wav")
             except CalibrationError as exc:
                 self._error = str(exc)
+                try:  # kept, so why it failed can be looked into; the next failure replaces it
+                    self._folder.mkdir(parents=True, exist_ok=True)
+                    write_wav(self._folder / "failed-attempt.wav",
+                              np.nan_to_num(np.asarray(audio, dtype=np.float32).reshape(-1)), SAMPLE_RATE)
+                except OSError:
+                    pass
                 raise
             except OSError as exc:
                 self._error = f"The calibration could not be saved: {exc}"
@@ -361,8 +410,8 @@ class Calibration:
                                                       "testing" if seconds < QUIET_SECONDS + TEST_SECONDS else
                                                       "reading"),
                     "quiet_seconds": QUIET_SECONDS, "test_seconds": TEST_SECONDS, "test_phrase": TEST_PHRASE,
-                    "total_seconds": QUIET_SECONDS + TEST_SECONDS + READ_SECONDS,
-                    "text": READING, "error": self._error,
+                    "min_read_seconds": MIN_READ_SECONDS, "total_seconds": MAX_SECONDS,
+                    "text": READINGS[self._reading], "error": self._error,
                     "has_sample": profile is not None and (self._folder / "sample.wav").is_file(),
                     "profile": None if profile is None else asdict(profile)}
 

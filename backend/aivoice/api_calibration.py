@@ -3,11 +3,30 @@ from contextlib import AbstractContextManager
 from dataclasses import asdict
 from typing import Callable
 
+import numpy as np
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from aivoice.api_library import same_app_only_for
 from aivoice.calibration import Calibration
+from aivoice.config import SAMPLE_RATE
+
+
+def _wav(audio, sample_rate: int):
+    """16-bit mono WAV bytes as a response the page can play."""
+    import io
+    import wave
+
+    from fastapi import Response
+
+    pcm = (np.clip(np.asarray(audio, dtype=np.float32), -1.0, 1.0) * 32767).astype("<i2").tobytes()
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(sample_rate)
+        out.writeframes(pcm)
+    return Response(content=buffer.getvalue(), media_type="audio/wav")
 
 
 class CalibrateBody(BaseModel):
@@ -107,6 +126,29 @@ def calibration_router(calibration: Calibration, studio, live_running: Callable[
                 raise ValueError("Wait for the import to finish before deep calibration")
             tuner.start(body.voice_id, body.quality, body.pitch_shift, body.likeness, body.advanced)
         return tuner.status()
+
+    @router.get("/test-audio")
+    def test_audio():
+        """The mic check of the last calibration, as the microphone picked it up, as a WAV."""
+        audio = calibration.test_audio()
+        if audio is None:
+            raise ValueError("Calibrate first: the mic check is kept from the next calibration on")
+        return _wav(audio, SAMPLE_RATE)
+
+    @router.post("/preview")
+    def preview(body: TuneBody):
+        """The calibration reading in a voice, as a WAV to play: hearing a voice before going live."""
+        if tuner is None:
+            raise ValueError("Previews are not available")
+        with exclusive:  # the graphics card: live mode and training must not be using it
+            if live_running():
+                raise ValueError("Stop live mode to play a preview")
+            if training is not None and training.is_active():
+                raise ValueError("Training is running. Pause it to play a preview")
+            if tts is not None and tts.is_active():
+                raise ValueError("Stop the speech to play a preview")
+        audio, sr = tuner.preview(body.voice_id, body.quality, body.pitch_shift, body.likeness, body.advanced)
+        return _wav(audio, sr)
 
     @router.get("/tune/status")
     def tune_status() -> dict:

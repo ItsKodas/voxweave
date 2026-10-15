@@ -101,7 +101,7 @@ function Main() {
   };
 
   const status = stats.running ? (
-    <span className="pill live">Live · {(stats.latency_ms / 1000).toFixed(1)} s behind</span>
+    <span className="pill pill-live">Live · {(stats.latency_ms / 1000).toFixed(1)} s behind</span>
   ) : training !== null && isActive(training) ? (
     <span className="pill busy">Training · {Math.round(training.percent ?? 0)}%</span>
   ) : null;

@@ -8,6 +8,7 @@ vi.mock("./calibrationApi", () => ({
   calibrationApi: {
     status: vi.fn(), start: vi.fn(), finish: vi.fn(), cancel: vi.fn(), forget: vi.fn(), suggestion: vi.fn(),
     speakerModel: vi.fn(), downloadSpeakerModel: vi.fn(), tune: vi.fn(), tuneStatus: vi.fn(), tuneCancel: vi.fn(),
+    preview: vi.fn(),
   },
 }));
 const NO_PROFILE = { recording: false, seconds: 0, level: 0, phase: null, quiet_seconds: 3, total_seconds: 18, text: "Read me.", error: null, profile: null };
@@ -832,5 +833,42 @@ describe("live learning", () => {
     render(<LivePanel stats={RUNNING} />);
     await screen.findByRole("button", { name: "Stop" });
     expect(screen.queryByLabelText("Keep learning while I talk")).not.toBeInTheDocument();
+  });
+});
+
+
+describe("previewing a voice", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.mocked(calibrationApi.status).mockResolvedValue({ ...NO_PROFILE, profile: MY_VOICE } as never);
+    vi.mocked(calibrationApi.suggestion).mockResolvedValue({ pitch_shift: 7, reason: null, speaker_hz: 118, target_hz: 177 });
+  });
+
+  it("plays the calibration reading in the voice with the current settings", async () => {
+    const played: string[] = [];
+    class FakeAudio {
+      onended: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      constructor(public src: string) {}
+      play() { played.push(this.src); return Promise.resolve(); }
+      pause() {}
+    }
+    vi.stubGlobal("Audio", FakeAudio);
+    vi.mocked(calibrationApi.preview).mockResolvedValue("blob:preview");
+    render(<LivePanel stats={IDLE} />);
+    await ready();
+    await screen.findByText(/Set from your calibration/);
+    await userEvent.click(screen.getByRole("button", { name: "Play my calibration as Demo" }));
+    expect(calibrationApi.preview).toHaveBeenCalledWith(expect.objectContaining({ voice_id: "demo", pitch_shift: 7, quality: 1, likeness: 0.3 }));
+    await waitFor(() => expect(played).toEqual(["blob:preview"]));
+    expect(screen.getByRole("button", { name: "Stop the preview" })).toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
+
+  it("is not offered without a calibration", async () => {
+    vi.mocked(calibrationApi.status).mockResolvedValue(NO_PROFILE as never);
+    render(<LivePanel stats={IDLE} />);
+    await ready();
+    expect(screen.queryByRole("button", { name: /Play my calibration/ })).not.toBeInTheDocument();
   });
 });

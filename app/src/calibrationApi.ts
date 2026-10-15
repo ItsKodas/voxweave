@@ -1,4 +1,13 @@
-import { call } from "./api";
+import { call, failure, origin } from "./api";
+
+/** Audio from the backend as a URL the page can play (revoke it when done). */
+async function audioUrl(path: string, body?: unknown): Promise<string> {
+  const res = await fetch(`http://${await origin()}${path}`, body === undefined ? undefined : {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await failure(res);
+  return URL.createObjectURL(await res.blob());
+}
 
 /** What a calibration recording measured about the person speaking. */
 export type VoiceProfile = {
@@ -23,6 +32,8 @@ export type CalibrationStatus = {
   phase: "quiet" | "testing" | "reading" | null;
   test_seconds?: number;
   test_phrase?: string;
+  /** Done can be pressed once this much has been read; the take ends by itself at total_seconds. */
+  min_read_seconds?: number;
   quiet_seconds: number;
   total_seconds: number;
   text: string;
@@ -69,4 +80,9 @@ export const calibrationApi = {
     call<TuneStatus>("POST", "/calibration/tune", body),
   tuneStatus: () => call<TuneStatus>("GET", "/calibration/tune/status"),
   tuneCancel: () => call<TuneStatus>("POST", "/calibration/tune/cancel"),
+  /** The calibration reading turned out in a voice at these settings, to play. */
+  preview: (body: { voice_id: string; quality: number; pitch_shift: number; likeness: number; advanced?: Record<string, unknown> }) =>
+    audioUrl("/calibration/preview", body),
+  /** The last mic check, as the microphone picked it up, to play. */
+  testAudioUrl: () => audioUrl("/calibration/test-audio"),
 };
