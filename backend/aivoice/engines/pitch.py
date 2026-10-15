@@ -80,24 +80,22 @@ def fill_gaps(f0: np.ndarray, max_gap: int = MAX_GAP_FRAMES) -> np.ndarray:
     return f0
 
 
-def fit_to_range(f0: np.ndarray, low: float, high: float) -> np.ndarray:
-    """Pitches the voice model never heard are moved to the nearest pitch it knows.
+KEEP_BEYOND_RANGE = 0.5  # of the distance (in octaves) past an edge of the voice's range
 
-    A pitch more than half an octave outside the range is first moved by whole octaves (a tracker's octave error,
-    or a voice far from the model's); what is still above `high` or below `low` is then pulled to that edge, softly,
-    so the rise and fall of the speech keeps its shape instead of flattening into one note."""
+
+def fit_to_range(f0: np.ndarray, low: float, high: float) -> np.ndarray:
+    """Pitches beyond the range the voice model heard are pulled toward its edge, keeping half of the distance
+    past it, so a voice reaching high (a man speaking as a woman's voice) still rises and falls there instead of
+    going flat on one note. Nothing is moved by whole octaves: the tracker's octave errors are put right before
+    this (fix_octave_errors), and folding real speech down an octave mid-sentence is a jump that sounds robotic."""
     f0 = np.asarray(f0, dtype=np.float32).copy()
     if not (0 < low < high):
         return f0
     voiced = f0 > 0
     v = f0[voiced].astype(np.float64)
-    for _ in range(4):
-        v = np.where(v > high * 1.5, v / 2.0, v)
-        v = np.where(v < low / 1.5, v * 2.0, v)
-    # Beyond an edge, a tenth of the distance (in octaves) is kept: the contour survives, the range is respected.
     above, below = v > high, v < low
-    v[above] = high * (v[above] / high) ** 0.1
-    v[below] = low * (v[below] / low) ** 0.1
+    v[above] = high * (v[above] / high) ** KEEP_BEYOND_RANGE
+    v[below] = low * (v[below] / low) ** KEEP_BEYOND_RANGE
     f0[voiced] = v.astype(np.float32)
     return f0
 

@@ -64,17 +64,25 @@ def test_short_dropouts_inside_speech_are_bridged_and_real_pauses_are_not():
     assert not fill_gaps(np.zeros(5, np.float32)).any()
 
 
-def test_pitches_outside_the_voices_range_are_moved_to_the_nearest_it_knows():
+def test_pitches_outside_the_voices_range_are_moved_toward_the_nearest_it_knows():
     low, high = 180.0, 320.0
     f0 = np.array([0, 250, 330, 400, 640, 90, 150, 170], dtype=np.float32)
     out = fit_to_range(f0, low, high)
     assert out[0] == 0 and out[1] == 250  # silence and in-range pitches are untouched
-    assert high < out[2] < 330 and high < out[3] < 400  # just above: pulled to the edge, the rise kept
-    assert out[3] > out[2]  # the contour keeps its order
-    assert low <= out[4] <= high * 1.1  # an octave too high: folded down, not squashed
-    assert low * 0.9 <= out[5] <= high  # an octave too low: folded up
-    assert low * 0.95 < out[6] < low and out[7] > out[6]  # just below: pulled up, order kept
+    assert high < out[2] < 330 and high < out[3] < 400  # above: pulled toward the edge
+    assert out[2] < out[3] < out[4]  # the contour keeps its order: nothing is folded down an octave
+    assert out[4] == pytest.approx(high * 2 ** 0.5, rel=0.01)  # an octave above keeps half of it
+    assert out[5] < out[6] < out[7] < low and out[5] == pytest.approx(low / 2 ** 0.5, rel=0.01)
     assert fit_to_range(f0, 0, 0).tolist() == f0.tolist()  # no range known: nothing changes
+
+
+def test_a_rise_past_the_top_of_the_range_keeps_rising_instead_of_going_flat():
+    high = 340.0
+    rise = np.geomspace(250, 520, 40).astype(np.float32)  # a male voice shifted up, reaching high
+    out = fit_to_range(rise, 120.0, high)
+    assert np.all(np.diff(out) > 0)
+    over = 12 * np.log2(out[-1] / high)
+    assert over == pytest.approx(0.5 * 12 * np.log2(520 / high), rel=0.02)  # half the height above the edge kept
 
 
 def test_consonants_keep_their_features_where_there_is_no_pitch():

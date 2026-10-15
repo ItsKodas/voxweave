@@ -270,3 +270,18 @@ def test_a_voices_pitch_range_is_measured_from_its_clips_and_remembered(tmp_path
     assert low == pytest.approx(200, rel=0.05) and high == pytest.approx(300, rel=0.05)
     assert low <= cal.voice_pitch(voice.id) <= high
     assert cal.voice_pitch_range("nope") is None
+
+
+def test_a_voices_range_measured_by_an_older_version_is_measured_again(tmp_path):
+    library = Library(tmp_path)
+    voice = library.create("Wide")
+    for hz in (200.0, 250.0, 300.0):
+        library.add_clip(voice.id, voice_like(2.0, hz), "words", "recorded")
+    cache = tmp_path / "calibration" / "voices" / f"{voice.id}.json"
+    cache.parent.mkdir(parents=True)
+    # the key an older version wrote for these clips, with its narrower range
+    last = max(c.index for c in library.get(voice.id).clips)
+    cache.write_text(json.dumps({"key": f"3:{last}", "pitch_hz": 250.0, "low_hz": 240.0, "high_hz": 260.0}), encoding="utf-8")
+    cal, _ = make(tmp_path, library=library)
+    low, high = cal.voice_pitch_range(voice.id)
+    assert low == pytest.approx(200, rel=0.05) and high == pytest.approx(300, rel=0.05)

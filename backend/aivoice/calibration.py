@@ -34,6 +34,10 @@ TARGET_LEVEL_DB = -20.0  # the level of ordinary close speech (RMS of voiced sou
 MIN_GAIN, MAX_GAIN = 0.5, 4.0
 GATE_MARGIN_DB = 6.0
 GATE_FLOOR_DB = -70.0
+RANGE_SECONDS = 120.0  # of a voice's clips measured for its pitch range
+# The range was the 5th to 95th percentile before; the edges of a voice's recordings (up to the 99th) are pitches
+# its model still knows. A range remembered by an older version is measured again.
+RANGE_VERSION = 2
 HANGOVER_SECONDS = 0.3  # speech that ended this recently still opens the gate
 FRAME_SECONDS = 0.02
 MAX_SHIFT = 24
@@ -268,12 +272,12 @@ class Calibration:
     # ---- the target voices
 
     def voice_pitch(self, voice_id: str) -> float | None:
-        """The usual pitch of a voice, measured from its clips (up to a minute of them). None when it has none."""
+        """The usual pitch of a voice, measured from its clips (up to two minutes of them). None when it has none."""
         stats = self._voice_stats(voice_id)
         return None if stats is None else stats[0]
 
     def voice_pitch_range(self, voice_id: str) -> tuple[float, float] | None:
-        """The pitch range the voice's recordings cover (5th to 95th percentile, Hz), which is what a model
+        """The pitch range the voice's recordings cover (1st to 99th percentile, Hz), which is what a model
         trained on them knows. None when the voice has no recordings to measure."""
         stats = self._voice_stats(voice_id)
         return None if stats is None else (stats[1], stats[2])
@@ -289,7 +293,7 @@ class Calibration:
         clips = sorted(voice.clips, key=lambda c: c.index)
         if not clips:
             return None
-        key = f"{len(clips)}:{clips[-1].index}"
+        key = f"{RANGE_VERSION}:{len(clips)}:{clips[-1].index}"
         cache = self._folder / "voices" / f"{voice.id}.json"
         try:
             saved = json.loads(cache.read_text(encoding="utf-8"))
@@ -300,7 +304,7 @@ class Calibration:
             pass
         pitches, seconds = [], 0.0
         for clip in clips:
-            if seconds >= 60.0:
+            if seconds >= RANGE_SECONDS:
                 break
             try:
                 audio, sr = read_wav(self._library.clip_audio_path(voice.id, clip.index))
@@ -312,7 +316,7 @@ class Calibration:
         voiced = np.concatenate(pitches) if pitches else np.zeros(0)
         if len(voiced) < int(MIN_VOICED_SECONDS * 100):
             return None
-        low, pitch, high = (round(float(v), 1) for v in np.percentile(voiced, [5, 50, 95]))
+        low, pitch, high = (round(float(v), 1) for v in np.percentile(voiced, [1, 50, 99]))
         try:
             cache.parent.mkdir(parents=True, exist_ok=True)
             cache.write_text(json.dumps({"key": key, "pitch_hz": pitch, "low_hz": low, "high_hz": high}),
