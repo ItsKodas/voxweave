@@ -3,7 +3,7 @@ import json
 import numpy as np
 import pytest
 
-from aivoice.calibration import (ABANDONED_AFTER, QUIET_SECONDS, TEST_SECONDS, Calibration, CalibrationError, GatedEngine,
+from aivoice.calibration import (ABANDONED_AFTER, QUIET_SECONDS, TEST_SECONDS, review_check, Calibration, CalibrationError, GatedEngine,
                                  analyse, suggest_shift)
 from aivoice.devices import Device
 from aivoice.library import Library
@@ -129,7 +129,7 @@ def test_the_gain_lifts_the_input_and_never_clips_it():
     assert inner.seen[0].max() == pytest.approx(1.0) and np.abs(inner.seen[0]).max() <= 1.0
     inner = CountingEngine()
     GatedEngine(inner, gate_db=None, gain=2.0).convert(window(params, voice_like(1.0, 120.0, amp=0.1)), SR, 0.0, params)
-    assert inner.seen[0].max() == pytest.approx(0.2, rel=0.02)
+    assert inner.seen[0].max() == pytest.approx(0.2, rel=0.05)  # within the rumble filter's small change to the waveform
 
 
 class FakeRecorder:
@@ -379,9 +379,9 @@ def test_the_converted_voice_comes_out_as_loud_as_the_speaker_went_in():
     params = PRESETS["balanced"]
     speech = window(params, voice_like(1.0, 120.0, amp=0.1))
     out = GatedEngine(Echo(), gate_db=None, gain=4.0).convert(speech, SR, 0.0, params)
-    assert np.max(np.abs(out)) == pytest.approx(0.1, rel=0.01)  # the boost is for the model, not the listener
+    assert np.max(np.abs(out)) == pytest.approx(0.1, rel=0.05)  # the boost is for the model, not the listener
     louder = GatedEngine(Echo(), gate_db=None, gain=4.0).convert(speech, SR, 0.0, replace(params, match_input_level=False))
-    assert np.max(np.abs(louder)) == pytest.approx(0.4, rel=0.01)
+    assert np.max(np.abs(louder)) == pytest.approx(0.4, rel=0.05)
 
 
 def test_each_calibration_reads_one_of_several_paragraphs_never_the_same_twice_running(tmp_path):
@@ -482,3 +482,28 @@ def test_reading_needs_a_reviewed_mic_check_and_a_sensible_boost(tmp_path):
         cal.read(40.0)
     cal.cancel()
     assert cal.status()["review"] is None
+
+
+# ---- inaudible drift from the microphone (measured on a real headset: 99% of the "quiet" below 100 Hz, mostly
+# around 5 Hz, as loud as the speech) must not count as room noise, nor hold the quiet gate open
+
+def drift(seconds: float, amp: float, hz: float = 5.0) -> np.ndarray:
+    t = np.arange(int(seconds * SR)) / SR
+    return (amp * np.sin(2 * np.pi * hz * t)).astype(np.float32)
+
+
+def test_inaudible_drift_from_the_microphone_is_not_taken_for_a_loud_room():
+    audio = take(amp=0.03, room=0.0002)
+    audio = audio + drift(len(audio) / SR, 0.02)  # about as loud as the speech, all at 5 Hz
+    profile = analyse(audio, SR, "m", 0.0)
+    assert profile.noise_db < -55  # the room is quiet: the drift is not counted
+    review = review_check(audio[: int((QUIET_SECONDS + TEST_SECONDS) * SR)], SR)
+    assert review["noise_db"] < -55
+
+
+def test_the_quiet_gate_ignores_inaudible_drift():
+    params = PRESETS["balanced"]
+    inner = CountingEngine()
+    gated = GatedEngine(inner, gate_db=-50.0)
+    out = gated.convert(window(params, noise(2.0, 0.0005) + drift(2.0, 0.05)), SR, 0.0, params)
+    assert inner.seen == [] and not out.any()  # drift alone: still silence, the model not run

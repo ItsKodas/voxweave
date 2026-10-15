@@ -4,6 +4,7 @@ from typing import Callable
 import numpy as np
 import soxr
 
+from aivoice.dsp import remove_rumble
 from aivoice.engines.f0 import extract_f0, shift_f0, to_coarse
 from aivoice.engines.pitch import blend_join, fix_octave_errors, natural_variation, smooth_pitch, fill_gaps, fit_to_range, repair_creak, voice_like_frames
 from aivoice.presets import LiveParams
@@ -78,6 +79,8 @@ def follow_envelope(out: np.ndarray, audio: np.ndarray, sample_rate: int, follow
     return (out * gain).astype(np.float32)
 
 
+VOICED_BELOW_SPEECH_DB = 30.0  # a pitch this far below the speaker's level is not the speaker (trackers find
+                               # pitch in faint noise now and then)
 BACKGROUND_BELOW_SPEECH_DB = 10.0  # unvoiced input more than this far below the speaker's level is background
 SPEECH_LEAD_FRAMES = 10  # kept before speech (100 ms): the breath and consonant a word starts with
 SPEECH_TAIL_FRAMES = 15  # and after it (150 ms): the end of a word
@@ -96,7 +99,9 @@ def background_gain(audio: np.ndarray, voiced: np.ndarray, speech_db: float, cut
     """Per input sample: 1 where the speaker is speaking (a pitch, or not far below their level, with a little
     before and after each stretch of speech), and cut_db lower elsewhere, with smooth changes between the two."""
     frames = len(voiced)
-    active = np.asarray(voiced, dtype=bool) | (_frame_levels(audio, frames) >= speech_db - BACKGROUND_BELOW_SPEECH_DB)
+    levels = _frame_levels(audio, frames)
+    active = ((np.asarray(voiced, dtype=bool) & (levels >= speech_db - VOICED_BELOW_SPEECH_DB))
+              | (levels >= speech_db - BACKGROUND_BELOW_SPEECH_DB))
     kept = active.copy()
     for shift in range(1, SPEECH_TAIL_FRAMES + 1):
         kept[shift:] |= active[:-shift]
@@ -177,6 +182,8 @@ class RvcEngine:
         return pitchf
 
     def convert(self, audio: np.ndarray, sample_rate: int, pitch_shift: float, params: LiveParams) -> np.ndarray:
+        # Without the microphone's inaudible drift and hum, which would count in every level measured below.
+        audio = remove_rumble(np.asarray(audio, dtype=np.float32), sample_rate)
         n = len(audio)
         wav16 = soxr.resample(audio.astype(np.float32), sample_rate, 16000).astype(np.float32)
         feats = self._vec.run(None, {self._vec_input: wav16[None, None, :]})[0][0].astype(np.float32)

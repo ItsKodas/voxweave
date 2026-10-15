@@ -272,3 +272,17 @@ def test_join_smoothing_can_be_switched_off():
     second = net.feeds[1]["pitchf"][0]
     head = len(second) - PARAMS.chunk_ms // 10 - round((PARAMS.crossfade_ms + 12) / 10)
     assert second[head] == pytest.approx(240.0, rel=0.03)  # its own pitch, not the last window's
+
+
+def test_inaudible_drift_is_not_counted_as_speech_by_the_background_cut():
+    from dataclasses import replace
+
+    engine, _ = make()
+    engine.speech_level_db = -9.0
+    rng = np.random.default_rng(2)
+    t = np.arange(SR) / SR
+    pause = (0.002 * rng.standard_normal(SR) + 0.3 * np.sin(2 * np.pi * 5 * t)).astype(np.float32)  # quiet, plus drift
+    audio = np.concatenate([sine(220, SR // 2), pause])
+    out = engine.convert(audio, SR, 0.0, replace(PARAMS, volume_follow=0.0))
+    speech, later = out[SR // 8: 3 * SR // 8], out[SR + SR // 4:]
+    assert 20 * np.log10(_rms(later) / _rms(speech)) < -25  # the drift did not keep the pause "speaking"

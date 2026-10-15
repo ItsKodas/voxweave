@@ -26,6 +26,7 @@ import soxr
 
 from aivoice.audiofile import read_wav, write_wav
 from aivoice.config import SAMPLE_RATE
+from aivoice.dsp import remove_rumble
 from aivoice.engines.f0 import extract_f0
 
 QUIET_SECONDS = 3.0  # the start of the recording, during which the speaker says nothing
@@ -123,7 +124,7 @@ def _usual_pitch(f0: np.ndarray) -> tuple[float, float, float] | None:
 def measure_speech(audio: np.ndarray, sr: int) -> dict | None:
     """The speaker's usual pitch, pitch range, speaking level and the input boost for it, from speech alone (live
     learning's pool of speech, which has no quiet part). None when too little of it has a pitch."""
-    audio = np.nan_to_num(np.asarray(audio, dtype=np.float32).reshape(-1))
+    audio = remove_rumble(np.nan_to_num(np.asarray(audio, dtype=np.float32).reshape(-1)), sr)
     if len(audio) < int(MIN_VOICED_SECONDS * sr):
         return None
     f0, wav16 = pitch_of(audio, sr)
@@ -163,7 +164,7 @@ def review_check(audio: np.ndarray, sr: int) -> dict:
     """The mic check alone (QUIET_SECONDS of quiet, then the test phrase): the room's level, the phrase's level and
     peak as the microphone picked it up, and the boost suggested for it. Raises CalibrationError when the phrase
     was not heard or is barely louder than the room."""
-    audio = np.nan_to_num(np.asarray(audio, dtype=np.float32).reshape(-1))
+    audio = remove_rumble(np.nan_to_num(np.asarray(audio, dtype=np.float32).reshape(-1)), sr)
     split, end = int(QUIET_SECONDS * sr), int((QUIET_SECONDS + TEST_SECONDS) * sr)
     quiet = _frame_db(audio[int(0.3 * sr): split - int(0.2 * sr)], sr)
     noise = float(np.percentile(quiet, 95)) if len(quiet) else GATE_FLOOR_DB
@@ -186,7 +187,7 @@ def review_check(audio: np.ndarray, sr: int) -> dict:
 def analyse(audio: np.ndarray, sr: int, device: str, now: float, gain: float | None = None) -> Profile:
     """Measures a calibration recording: QUIET_SECONDS of silence (the room), TEST_SECONDS of "testing, one, two,
     three" (the microphone level, which sets the input boost), then reading aloud (the pitch)."""
-    audio = np.nan_to_num(np.asarray(audio, dtype=np.float32).reshape(-1))
+    audio = remove_rumble(np.nan_to_num(np.asarray(audio, dtype=np.float32).reshape(-1)), sr)
     split, read_from = int(QUIET_SECONDS * sr), int((QUIET_SECONDS + TEST_SECONDS) * sr)
     if len(audio) < read_from + int(MIN_VOICED_SECONDS * sr):
         raise CalibrationError("The recording is too short. Stay quiet, say the test phrase, then read the text aloud.")
@@ -249,7 +250,7 @@ class GatedEngine:
             setattr(self._inner, name, value)
 
     def convert(self, audio, sample_rate, pitch_shift, params):
-        audio = np.asarray(audio, dtype=np.float32)
+        audio = remove_rumble(np.asarray(audio, dtype=np.float32), sample_rate)
         if self._gate_db is not None:
             recent = int(sample_rate * ((params.chunk_ms + params.crossfade_ms) / 1000.0 + HANGOVER_SECONDS))
             levels = _frame_db(np.nan_to_num(audio[-recent:]), sample_rate)
