@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { LiveInsight } from "./LiveInsight";
 import { api, Device, DeviceList, Params, Stats, Voice } from "./api";
 import { CalibrationPanel } from "./CalibrationPanel";
 import { calibrationApi, VoiceProfile } from "./calibrationApi";
@@ -705,6 +706,7 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
           {stats.suggest_faster && <p className="hint">The GPU is not keeping up. Move Quality further left.</p>}
         </div>
       )}
+      <LiveInsight running={stats.running} voiceName={voiceName} />
     </section>
   );
 }

@@ -221,3 +221,20 @@ def test_background_cut_can_be_switched_off():
     engine.speech_level_db = -9.0
     out = engine.convert(_quiet_after_speech(), SR, 0.0, replace(PARAMS, volume_follow=0.0, background_cut_db=0.0))
     assert np.allclose(out[SR // 10: -SR // 10], 0.25, atol=1e-3)
+
+
+def test_each_conversion_leaves_what_it_did_for_the_newest_chunk():
+    engine, _ = make()
+    engine.speech_level_db = -9.0
+    engine.convert(sine(220, SR // 2), SR, 12.0, PARAMS)
+    insight = engine.insight
+    frames = PARAMS.chunk_ms // 10
+    assert insight["frames_per_s"] == pytest.approx(100, rel=0.05)
+    assert len(insight["heard"]) == len(insight["sent"]) == len(insight["corrected"]) == len(insight["gated"]) == frames
+    assert insight["number"] == 1
+    voiced = [(h, s) for h, s in zip(insight["heard"], insight["sent"]) if h > 0 and s > 0]
+    assert voiced and all(s / h == pytest.approx(2.0, rel=0.05) for h, s in voiced)  # an octave up, as asked
+    assert not any(insight["gated"])
+    pause = np.concatenate([sine(220, SR // 4), np.zeros(SR // 2, np.float32)])  # speech, then a long pause
+    engine.convert(pause, SR, 12.0, PARAMS)
+    assert engine.insight["number"] == 2 and all(engine.insight["gated"])  # background: turned down

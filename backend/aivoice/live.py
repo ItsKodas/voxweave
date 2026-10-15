@@ -24,8 +24,10 @@ class LiveSession:
     """
 
     def __init__(self, processor: StreamProcessor, router: Router, sample_rate: int, stream_factory,
-                 input_device: int, output_devices: dict[str, int]):
+                 input_device: int, output_devices: dict[str, int], insight=None):
         self.processor = processor
+        # Collects what each chunk did for the Live tab's graphs (aivoice.insight); optional.
+        self.insight = insight
         self.router = router
         self.sample_rate = sample_rate
         self.running = False
@@ -76,6 +78,12 @@ class LiveSession:
             self._out_level = float(np.max(np.abs(out)))
             self.router.push(out)
             self._flowing = True
+            if self.insight is not None:
+                try:
+                    self.insight.add(block, out, getattr(self.processor.engine, "insight", None),
+                                     self.processor.infer_ms, self.processor.params.chunk_ms)
+                except Exception:  # noqa: BLE001 - the graphs must never stop the voice
+                    pass
             return True
         except Exception as exc:  # noqa: BLE001 - any fault must fail closed, never reach the worker
             self._fail(str(exc) or type(exc).__name__)
@@ -132,6 +140,8 @@ class LiveSession:
             self.running = True
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
+            if self.insight is not None:
+                self.insight.start()
 
     def _run(self) -> None:
         last_check = time.monotonic()
@@ -162,6 +172,8 @@ class LiveSession:
                 pass
 
     def stop(self) -> None:
+        if self.insight is not None:
+            self.insight.stop()
         with self._lifecycle:
             self.running = False
             thread = self._thread

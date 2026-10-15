@@ -189,6 +189,12 @@ def create_app(manager: LiveManager, data: Path, list_devices: Callable[[], list
             manager.start(StartConfig(**body.model_dump()))
         return manager.stats()
 
+    @app.get("/live/insight")
+    def insight() -> dict:
+        """The last seconds of what live mode did, for the Live tab's graphs."""
+        snapshot = manager.insight()
+        return {"running": False} if snapshot is None else {"running": True, **snapshot}
+
     @app.post("/live/stop")
     def stop() -> dict:
         # Live mode reads "not running" from the moment the stop begins, up to two seconds before its devices

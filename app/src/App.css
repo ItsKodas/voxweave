@@ -105,3 +105,13 @@ main > h1 { display: inline-block; margin-right: 24px; vertical-align: middle; }
 .page-reader > .error, .page-reader > .hint, .page-reader > .ok { max-width: 52rem; margin: 10px auto; }
 .page-text { max-width: 52rem; margin: 0 auto; font-size: 1.4rem; line-height: 1.75; }
 .page-text p { margin: 1.1em 0; }
+
+/* The Live tab's graphs of what live mode is doing. */
+.insight { margin-top: 16px; padding: 12px; background: #1b1e24; border-radius: 8px; }
+.insight-row { display: grid; grid-template-columns: minmax(180px, 1fr) 2fr; gap: 12px; align-items: center; margin: 10px 0; }
+.insight-label { display: flex; flex-direction: column; gap: 2px; font-size: 0.8rem; color: #aab0bb; }
+.insight-label strong { color: #e8eaed; font-size: 0.9rem; }
+.insight-graph { width: 100%; height: 72px; background: #15171c; border-radius: 6px; display: block; }
+.insight progress { width: 100%; }
+.key { display: inline-block; width: 10px; height: 3px; vertical-align: middle; margin-right: 3px; }
+@media (max-width: 760px) { .insight-row { grid-template-columns: 1fr; } }

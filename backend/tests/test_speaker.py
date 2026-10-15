@@ -94,3 +94,18 @@ def test_a_download_larger_than_expected_is_stopped(tmp_path, monkeypatch):
     with pytest.raises(OSError, match="larger"):
         download_model(tmp_path, opener=lambda url, timeout: FakeResponse(b"x" * (2 << 20)))
     assert not model_path(tmp_path).exists()
+
+
+def test_voice_match_explains_a_missing_model_and_a_voice_with_no_recordings(tmp_path, monkeypatch):
+    from aivoice.speaker import voice_matcher
+
+    with pytest.raises(LookupError, match="speaker model"):
+        voice_matcher(tmp_path, None, "v", lambda p: FakeSession())
+    monkeypatch.setattr(speaker, "model_ready", lambda data: True)
+
+    class NoVoice:
+        def get(self, voice_id):
+            raise ValueError("Unknown voice")
+
+    with pytest.raises(LookupError, match="no recordings"):
+        voice_matcher(tmp_path, NoVoice(), "v", lambda p: FakeSession())

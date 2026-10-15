@@ -46,8 +46,16 @@ def build_app():
     library = Library(data)
     # Its own recorder: a calibration take never shares state with a clip being recorded. 30 seconds at most.
     calibration = Calibration(data, Recorder(streams, max_seconds=30.0), list_devices, library)
+    from aivoice.insight import Insight
+    from aivoice.pretrained import base_voice_id
+    from aivoice.speaker import voice_matcher
+
+    cpu_session = lambda path: ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])  # noqa: E731
+    # The Live tab's graphs; the voice match runs on the processor, beside the voice on the graphics card.
+    insight_factory = lambda voice: Insight(config.SAMPLE_RATE, matcher_factory=lambda: voice_matcher(  # noqa: E731
+        data, library, base_voice_id(voice.id), cpu_session))
     manager = LiveManager(data, list_devices, default_engine_factory(data), streams,
-                          refresh_devices=refresh_devices, calibration=calibration)
+                          refresh_devices=refresh_devices, calibration=calibration, insight_factory=insight_factory)
     # The model name is read when an import first needs it, so a bad setting cannot stop startup.
     transcriber = WhisperTranscriber(lambda: config.whisper_model(data), data / "pretrained" / "whisper")
     importer = Importer(library, transcriber)

@@ -88,7 +88,7 @@ def default_engine_factory(data: Path) -> Callable[[PretrainedVoice], object]:
 class LiveManager:
     def __init__(self, data: Path, list_devices: Callable[[], list[Device]], engine_factory, stream_factory,
                  sample_rate: int = SAMPLE_RATE, refresh_devices: Callable[[], None] | None = None,
-                 calibration=None):
+                 calibration=None, insight_factory=None):
         self._data = data
         self._list_devices = list_devices
         self._engine_factory = engine_factory
@@ -96,6 +96,8 @@ class LiveManager:
         self._sr = sample_rate
         self._refresh_devices = refresh_devices
         self._calibration = calibration
+        # Makes the collector behind the Live tab's graphs for a voice (aivoice.insight); None for no graphs.
+        self._insight_factory = insight_factory
         self._lock = threading.Lock()
         self._session: LiveSession | None = None
         self._last_error: str | None = None
@@ -167,7 +169,14 @@ class LiveManager:
                 router.add_output("mic")
             if "monitor" in outputs:
                 router.add_output("monitor", cfg.monitor_gain)
-            session = LiveSession(processor, router, self._sr, self._stream_factory, cfg.input_device, outputs)
+            insight = None
+            if voice is not None and self._insight_factory is not None:
+                try:
+                    insight = self._insight_factory(voice)
+                except Exception:  # noqa: BLE001 - live mode runs without its graphs rather than not at all
+                    insight = None
+            session = LiveSession(processor, router, self._sr, self._stream_factory, cfg.input_device, outputs,
+                                  insight=insight)
             try:
                 session.start()
             except Exception as exc:  # noqa: BLE001
@@ -221,6 +230,13 @@ class LiveManager:
                 self.monitor_gain = float(monitor_gain)
             if monitor_enabled is not None:
                 session.router.set_enabled("monitor", monitor_enabled)
+
+    def insight(self) -> dict | None:
+        """The recent history behind the Live tab's graphs, while live mode runs with them."""
+        session = self._session
+        if session is None or not session.running or session.insight is None:
+            return None
+        return session.insight.snapshot()
 
     def stats(self) -> dict:
         session = self._session

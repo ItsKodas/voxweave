@@ -129,6 +129,9 @@ class RvcEngine:
         # one; otherwise learned from the voiced speech heard so far. Background sound is judged against it.
         self.speech_level_db: float | None = None
         self._learned_speech_db: float | None = None
+        # What the last conversion did for its newest chunk, for the Live tab's graphs (see _record_insight).
+        self.insight: dict | None = None
+        self._conversions = 0
         self._vec = factory(str(vec_path))
         self._net = factory(str(model_path))
         self._vec_input = self._vec.get_inputs()[0].name
@@ -182,12 +185,13 @@ class RvcEngine:
             feats = blend_index(feats, self._index, self._big_npy, params.index_rate)
         phone = np.repeat(feats, 2, axis=0)[None].astype(np.float32)
         frames = phone.shape[1]
-        pitchf = fill_gaps(extract_f0(wav16, params.f0_method, frames, rmvpe=self._rmvpe))
-        pitchf = repair_creak(pitchf, voice_like_frames(wav16, frames))
+        heard = extract_f0(wav16, params.f0_method, frames, rmvpe=self._rmvpe)
+        pitchf = repair_creak(fill_gaps(heard), voice_like_frames(wav16, frames))
         pitchf = smooth_pitch(fix_octave_errors(pitchf))
         rate = frames * sample_rate / n  # frames a second
         start = 0 if self.noise_position is None else round(self.noise_position * rate / sample_rate)
         pitchf = natural_variation(pitchf, start)
+        cleaned = pitchf
         voiced = pitchf > 0
         pitchf = shift_f0(pitchf, pitch_shift)
         if self.pitch_range is not None:
@@ -208,9 +212,37 @@ class RvcEngine:
             out = soxr.resample(out, self._model_sr, sample_rate).astype(np.float32)
         out = follow_envelope(_fit(out, n), audio, sample_rate, params.volume_follow)
         speech_db = self._speech_level(audio, voiced)
+        gain = None
         if params.background_cut_db > 0 and speech_db is not None:
-            out = (out * background_gain(audio, voiced, speech_db, params.background_cut_db)).astype(np.float32)
+            gain = background_gain(audio, voiced, speech_db, params.background_cut_db)
+            out = (out * gain).astype(np.float32)
+        self._record_insight(heard, cleaned, pitchf, gain, n, sample_rate, params)
         return out
+
+    def _record_insight(self, heard, cleaned, sent, gain, n: int, sample_rate: int, params: LiveParams) -> None:
+        """Per pitch frame of the newest chunk (the audio about to be played): the pitch heard in the speaker's
+        voice, the pitch the model was given (shifted, cleaned up), whether the clean-up changed it (an octave
+        error, a creak held, a gap filled, a wobble smoothed) and whether the background gate turned it down."""
+        frames = len(sent)
+        rate = frames * sample_rate / n
+        chunk = max(1, round(params.chunk_ms * rate / 1000))
+        tail = round(params.crossfade_ms * rate / 1000)
+        end = max(chunk, frames - tail)
+        part = slice(end - chunk, end)
+        h, c = np.asarray(heard[part], dtype=np.float64), np.asarray(cleaned[part], dtype=np.float64)
+        both = (h > 0) & (c > 0)
+        moved = np.zeros(len(h), dtype=bool)
+        moved[both] = np.abs(12.0 * np.log2(c[both] / h[both])) > 0.5
+        corrected = moved | ((h > 0) != (c > 0))
+        if gain is None:
+            gated = np.zeros(len(h), dtype=bool)
+        else:
+            centres = ((np.arange(frames)[part] + 0.5) * n / frames).astype(int).clip(0, n - 1)
+            gated = gain[centres] < 0.5
+        self._conversions += 1
+        self.insight = {"number": self._conversions, "frames_per_s": rate,
+                        "heard": [round(float(x), 1) for x in h], "sent": [round(float(x), 1) for x in sent[part]],
+                        "corrected": [bool(x) for x in corrected], "gated": [bool(x) for x in gated]}
 
     def _speech_level(self, audio: np.ndarray, voiced: np.ndarray) -> float | None:
         """The level background sound is judged against: the calibration's, or the one learned from voiced speech."""

@@ -12,6 +12,7 @@ vi.mock("./calibrationApi", () => ({
 }));
 const NO_PROFILE = { recording: false, seconds: 0, level: 0, phase: null, quiet_seconds: 3, total_seconds: 18, text: "Read me.", error: null, profile: null };
 const MY_VOICE = { pitch_hz: 118, pitch_low_hz: 95, pitch_high_hz: 160, level_db: -22, noise_db: -62, gate_db: -56, input_gain: 1.3, device: "Headset Mic", created: 5 };
+vi.mock("./LiveInsight", () => ({ LiveInsight: () => null }));
 vi.mock("./api", () => ({
   api: {
     devices: vi.fn(), refreshDevices: vi.fn(), voices: vi.fn(), presets: vi.fn(),

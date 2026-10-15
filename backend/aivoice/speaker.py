@@ -124,3 +124,42 @@ def similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / ((np.linalg.norm(a) * np.linalg.norm(b)) + 1e-12))
 
 
+
+
+def voice_fingerprint(model: SpeakerModel, clip_paths: list) -> np.ndarray | None:
+    """The average fingerprint of a voice's recordings (unit length), or None when none was long enough."""
+    from aivoice.audiofile import read_wav
+
+    prints = []
+    for path in clip_paths:
+        try:
+            audio, sr = read_wav(path)
+            prints.append(model.embedding(audio, sr))
+        except (ValueError, OSError):
+            continue  # too short, or unreadable
+    if not prints:
+        return None
+    mean = np.mean(prints, axis=0)
+    return mean / (np.linalg.norm(mean) + 1e-12)
+
+
+def speech_clip_paths(library, voice_id: str, limit: int = 30) -> list:
+    """Up to `limit` of a voice's speech clips (not laughs or other sounds)."""
+    try:
+        voice = library.get(voice_id)
+    except ValueError:
+        return []
+    speech = [c for c in voice.clips if getattr(c, "kind", "speech") == "speech"]
+    return [library.clip_audio_path(voice_id, c.index) for c in speech[:limit]]
+
+
+def voice_matcher(data: Path, library, voice_id: str, session_factory):
+    """A function scoring how much audio sounds like the voice (0 to 1), for live mode's voice match graph.
+    Raises LookupError with the reason when it cannot be made."""
+    if not model_ready(data):
+        raise LookupError("Voice match needs the speaker model: press Find best settings once to download it.")
+    model = SpeakerModel(session_factory(model_path(data)))
+    target = voice_fingerprint(model, speech_clip_paths(library, voice_id))
+    if target is None:
+        raise LookupError("This voice has no recordings in the library to compare with, so there is no voice match.")
+    return lambda audio, sample_rate: max(0.0, similarity(model.embedding(audio, sample_rate), target))

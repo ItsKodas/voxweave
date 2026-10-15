@@ -26,12 +26,11 @@ from typing import Callable
 import numpy as np
 import soxr
 
-from aivoice.audiofile import read_wav
 from aivoice.config import SAMPLE_RATE
 from aivoice.presets import QUALITY_LEVELS, resolve
 from aivoice.pretrained import list_voices as _list_voices
 from aivoice.processor import StreamProcessor
-from aivoice.speaker import similarity
+from aivoice.speaker import similarity, speech_clip_paths, voice_fingerprint
 
 PITCH_STEPS = (-2, -1, 0, 1, 2)
 LIKENESS_STEPS = (0.1, 0.3, 0.5, 0.75, 1.0)
@@ -146,12 +145,7 @@ class Tuner:
             thread.join(timeout)
 
     def _voice_clips(self, voice_id: str) -> list[Path]:
-        try:
-            voice = self._library.get(voice_id)
-        except ValueError:
-            return []
-        speech = [c for c in voice.clips if getattr(c, "kind", "speech") == "speech"]
-        return [self._library.clip_audio_path(voice_id, c.index) for c in speech[:VOICE_CLIPS]]
+        return speech_clip_paths(self._library, voice_id, VOICE_CLIPS)
 
     def _convert(self, engine, sample: np.ndarray, quality: int, pitch_shift: int, likeness: float) -> np.ndarray:
         """The reading as live mode would turn it out at these settings."""
@@ -168,17 +162,9 @@ class Tuner:
         try:
             self._set(message="Learning what the voice sounds like")
             speaker = self._speaker_factory()
-            prints = []
-            for path in clips:
-                audio, sr = read_wav(path)
-                try:
-                    prints.append(speaker.embedding(audio, sr))
-                except ValueError:
-                    continue  # too short to recognise a speaker from
-            if not prints:
+            target = voice_fingerprint(speaker, clips)
+            if target is None:
                 raise ValueError("The voice's recordings are too short to compare with.")
-            target = np.mean(prints, axis=0)
-            target = target / (np.linalg.norm(target) + 1e-12)
 
             engine = self._engine_factory(voice)
             if hasattr(engine, "pitch_range"):
