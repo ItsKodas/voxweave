@@ -91,3 +91,11 @@ def test_every_voice_quality_extra_is_on_by_default_and_can_be_switched():
 def test_extras_are_checked(overrides, field):
     with pytest.raises(ValueError, match=field):
         resolve("balanced", overrides)
+
+
+
+def test_matching_the_speakers_volume_is_on_by_default_and_checked():
+    assert resolve("balanced").match_input_level is True
+    assert resolve("balanced", {"match_input_level": False}).match_input_level is False
+    with pytest.raises(ValueError, match="match_input_level"):
+        resolve("balanced", {"match_input_level": "no"})

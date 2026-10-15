@@ -28,10 +28,17 @@ from aivoice.config import SAMPLE_RATE
 from aivoice.engines.f0 import extract_f0
 
 QUIET_SECONDS = 3.0  # the start of the recording, during which the speaker says nothing
-READ_SECONDS = 15.0  # then this much reading aloud
+TEST_SECONDS = 4.0  # then "testing, one, two, three": the microphone level the input boost is set from
+READ_SECONDS = 15.0  # then this much reading aloud: the pitch, and the reading deep calibration converts
+TEST_PHRASE = "Testing, one, two, three"
 MIN_VOICED_SECONDS = 3.0
 TARGET_LEVEL_DB = -20.0  # the level of ordinary close speech (RMS of voiced sound)
-MIN_GAIN, MAX_GAIN = 0.5, 4.0
+# Up to 24 dB of boost: a quiet microphone is brought up to an ordinary level (never so far that its loudest
+# moment clips). It was 12 dB, which left quiet microphones too quiet for the model.
+MIN_GAIN, MAX_GAIN = 0.5, 16.0
+# Speech must stand this far above the room (its usual level against the room's), or the gate cannot tell them
+# apart. It compared the quietest speech before, which refused quiet microphones whose hiss is relatively loud.
+MIN_SPEECH_ABOVE_ROOM_DB = 10.0
 GATE_MARGIN_DB = 6.0
 GATE_FLOOR_DB = -70.0
 RANGE_SECONDS = 120.0  # of a voice's clips measured for its pitch range
@@ -63,6 +70,7 @@ class Profile:
     input_gain: float
     device: str
     created: float
+    test_level_db: float | None = None  # the level of "testing, one, two, three", which set the input boost
 
 
 def _frame_db(audio: np.ndarray, sr: int, seconds: float = FRAME_SECONDS) -> np.ndarray:
@@ -112,36 +120,54 @@ def measure_speech(audio: np.ndarray, sr: int) -> dict | None:
             "level_db": round(level, 1), "input_gain": round(float(min(MAX_GAIN, max(MIN_GAIN, gain))), 3)}
 
 
-def analyse(audio: np.ndarray, sr: int, device: str, now: float) -> Profile:
-    """Measures a calibration recording: QUIET_SECONDS of silence, then reading aloud."""
-    audio = np.nan_to_num(np.asarray(audio, dtype=np.float32).reshape(-1))
-    split = int(QUIET_SECONDS * sr)
-    if len(audio) < split + int(MIN_VOICED_SECONDS * sr):
-        raise CalibrationError("The recording is too short. Stay quiet for the first seconds, then read the text aloud.")
-    quiet = _frame_db(audio[int(0.3 * sr): split - int(0.2 * sr)], sr)  # edges trimmed: a click, an early start
-    speech = audio[split:]
-    f0, wav16 = pitch_of(speech, sr)
-    usual = _usual_pitch(f0)
-    if usual is None:
-        raise CalibrationError("Not enough speech was heard. Read the text aloud for the whole time, close to the microphone.")
-    pitch, low, high = usual
-    # The level of the voiced parts only, so pauses do not count as quiet speech.
+def _voiced_level(audio: np.ndarray, sr: int) -> tuple[float, np.ndarray, np.ndarray] | None:
+    """(level of the voiced sound in dB, the voiced frames' levels, the pitch track), or None with no voice.
+    The pitch is tracked on a copy brought to an ordinary level, so a quiet microphone is heard as well as a loud one."""
+    peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
+    if peak <= 1e-6:
+        return None
+    f0, _ = pitch_of(audio * np.float32(0.5 / peak), sr)
+    wav16 = soxr.resample(audio, sr, 16000).astype(np.float32)
     frames = _frame_db(wav16, 16000, 0.01)
     voiced = frames[: len(f0)][f0[: len(frames)] > 0]
-    level = float(10.0 * np.log10(np.mean(10.0 ** (voiced / 10.0))))
+    if len(voiced) == 0:
+        return None
+    return float(10.0 * np.log10(np.mean(10.0 ** (voiced / 10.0)))), voiced, f0
+
+
+def analyse(audio: np.ndarray, sr: int, device: str, now: float) -> Profile:
+    """Measures a calibration recording: QUIET_SECONDS of silence (the room), TEST_SECONDS of "testing, one, two,
+    three" (the microphone level, which sets the input boost), then reading aloud (the pitch)."""
+    audio = np.nan_to_num(np.asarray(audio, dtype=np.float32).reshape(-1))
+    split, read_from = int(QUIET_SECONDS * sr), int((QUIET_SECONDS + TEST_SECONDS) * sr)
+    if len(audio) < read_from + int(MIN_VOICED_SECONDS * sr):
+        raise CalibrationError("The recording is too short. Stay quiet, say the test phrase, then read the text aloud.")
+    quiet = _frame_db(audio[int(0.3 * sr): split - int(0.2 * sr)], sr)  # edges trimmed: a click, an early start
     noise = float(np.percentile(quiet, 95)) if len(quiet) else GATE_FLOOR_DB
+    test = _voiced_level(audio[split:read_from], sr)
+    if test is None or len(test[1]) < 30:  # under 0.3 s of voice
+        raise CalibrationError(f'The test phrase was not heard. When asked, say "{TEST_PHRASE.lower()}" in your '
+                               "normal voice, at your usual distance from the microphone.")
+    test_level = test[0]
+    speech = audio[read_from:]
+    reading = _voiced_level(speech, sr)
+    usual = None if reading is None else _usual_pitch(reading[2])
+    if usual is None:
+        raise CalibrationError("Not enough speech was heard. Read the text aloud for the whole time.")
+    pitch, low, high = usual
+    level, voiced = reading[0], reading[1]
+    if float(np.median(voiced)) - noise < MIN_SPEECH_ABOVE_ROOM_DB:
+        raise CalibrationError("The room is too loud for your microphone, or you spoke during the quiet part: your "
+                               "speech is barely louder than the quiet. Try again somewhere quieter, or move closer.")
     quiet_speech = float(np.percentile(voiced, 10))
-    if quiet_speech - noise < 2 * GATE_MARGIN_DB:
-        raise CalibrationError("The microphone is too noisy, or you spoke during the quiet part: the quiet and your "
-                               "speech are too close in level to tell apart. Try again in a quieter moment.")
     gate = max(GATE_FLOOR_DB, min(noise + GATE_MARGIN_DB, quiet_speech - GATE_MARGIN_DB))
-    peak = float(np.percentile(np.abs(speech), 99.9))
-    gain = 10.0 ** ((TARGET_LEVEL_DB - level) / 20.0)
+    peak = float(np.percentile(np.abs(audio[split:]), 99.9))
+    gain = 10.0 ** ((TARGET_LEVEL_DB - test_level) / 20.0)
     if peak > 0:
         gain = min(gain, 0.98 / peak)  # never into clipping
     gain = float(min(MAX_GAIN, max(MIN_GAIN, gain)))
     return Profile(round(pitch, 1), round(low, 1), round(high, 1), round(level, 1), round(noise, 1),
-                   round(float(gate), 1), round(gain, 3), device[:120], now)
+                   round(float(gate), 1), round(gain, 3), device[:120], now, round(test_level, 1))
 
 
 def suggest_shift(speaker_hz: float, target_hz: float) -> int:
@@ -180,9 +206,13 @@ class GatedEngine:
             levels = _frame_db(np.nan_to_num(audio[-recent:]), sample_rate)
             if len(levels) and float(levels.max()) < self._gate_db:
                 return np.zeros_like(audio)
-        if self._gain != 1.0:
-            audio = np.clip(audio * np.float32(self._gain), -1.0, 1.0)
-        return self._inner.convert(audio, sample_rate, pitch_shift, params)
+        if self._gain == 1.0:
+            return self._inner.convert(audio, sample_rate, pitch_shift, params)
+        out = self._inner.convert(np.clip(audio * np.float32(self._gain), -1.0, 1.0), sample_rate, pitch_shift, params)
+        if getattr(params, "match_input_level", True):
+            # The boost lifted the speaker for the model; the voice comes out at the speaker's own level.
+            out = (np.asarray(out, dtype=np.float32) / np.float32(self._gain)).astype(np.float32)
+        return out
 
 
 class Calibration:
@@ -308,7 +338,8 @@ class Calibration:
                 part.write_text(json.dumps(asdict(profile)), encoding="utf-8")
                 part.replace(self._folder / "profile.json")
                 # The reading itself is kept too: deep calibration converts it with each voice to compare settings.
-                sample = np.nan_to_num(np.asarray(audio, dtype=np.float32).reshape(-1))[int(QUIET_SECONDS * SAMPLE_RATE):]
+                sample = np.nan_to_num(np.asarray(audio, dtype=np.float32).reshape(-1))[
+                    int((QUIET_SECONDS + TEST_SECONDS) * SAMPLE_RATE):]
                 write_wav(self._folder / "sample.wav.part", sample, SAMPLE_RATE)
                 (self._folder / "sample.wav.part").replace(self._folder / "sample.wav")
             except CalibrationError as exc:
@@ -326,8 +357,11 @@ class Calibration:
             seconds = float(recorded["seconds"])
             profile = self.profile()
             return {"recording": active, "seconds": seconds, "level": float(recorded["level"]),
-                    "phase": None if not active else ("quiet" if seconds < QUIET_SECONDS else "reading"),
-                    "quiet_seconds": QUIET_SECONDS, "total_seconds": QUIET_SECONDS + READ_SECONDS,
+                    "phase": None if not active else ("quiet" if seconds < QUIET_SECONDS else
+                                                      "testing" if seconds < QUIET_SECONDS + TEST_SECONDS else
+                                                      "reading"),
+                    "quiet_seconds": QUIET_SECONDS, "test_seconds": TEST_SECONDS, "test_phrase": TEST_PHRASE,
+                    "total_seconds": QUIET_SECONDS + TEST_SECONDS + READ_SECONDS,
                     "text": READING, "error": self._error,
                     "has_sample": profile is not None and (self._folder / "sample.wav").is_file(),
                     "profile": None if profile is None else asdict(profile)}

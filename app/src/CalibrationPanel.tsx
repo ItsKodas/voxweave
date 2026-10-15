@@ -101,6 +101,11 @@ export function CalibrationPanel({ input, disabled, onProfile }: {
         <>
           {status.phase === "quiet" ? (
             <p className="sentence" aria-live="polite">Stay quiet for a moment. The microphone is measuring the room.</p>
+          ) : status.phase === "testing" ? (
+            <>
+              <p className="hint" aria-live="polite">Now say this in your normal voice. It sets your microphone level.</p>
+              <p className="sentence">&ldquo;{status.test_phrase ?? "Testing, one, two, three"}&rdquo;</p>
+            </>
           ) : (
             <>
               <p className="hint" aria-live="polite">Now read this aloud in your normal voice. {left} seconds left.</p>
@@ -118,8 +123,8 @@ export function CalibrationPanel({ input, disabled, onProfile }: {
           {profile ? (
             <p className="hint">
               Calibrated on {profile.device}: your usual pitch is {Math.round(profile.pitch_hz)} Hz, the room is at{" "}
-              {Math.round(profile.noise_db)} dB, and your speech at {Math.round(profile.level_db)} dB. Calibrate again if
-              you change microphone or room.
+              {Math.round(profile.noise_db)} dB, and your speech at {Math.round(profile.level_db)} dB, boosted{" "}
+              {profile.input_gain.toFixed(1)}x for the model. Calibrate again if you change microphone or room.
             </p>
           ) : (
             <p className="hint">

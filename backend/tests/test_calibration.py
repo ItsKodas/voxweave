@@ -3,7 +3,7 @@ import json
 import numpy as np
 import pytest
 
-from aivoice.calibration import (ABANDONED_AFTER, QUIET_SECONDS, Calibration, CalibrationError, GatedEngine,
+from aivoice.calibration import (ABANDONED_AFTER, QUIET_SECONDS, TEST_SECONDS, Calibration, CalibrationError, GatedEngine,
                                  analyse, suggest_shift)
 from aivoice.devices import Device
 from aivoice.library import Library
@@ -24,9 +24,12 @@ def noise(seconds: float, amp: float, seed: int = 0, sr: int = SR) -> np.ndarray
     return (amp * np.random.default_rng(seed).standard_normal(int(seconds * sr))).astype(np.float32)
 
 
-def take(hz: float = 120.0, amp: float = 0.2, room: float = 0.001, speech_seconds: float = 8.0) -> np.ndarray:
+def take(hz: float = 120.0, amp: float = 0.2, room: float = 0.001, speech_seconds: float = 8.0,
+         test_amp: float | None = None) -> np.ndarray:
+    """A calibration recording: quiet, then "testing, one, two, three" (at test_amp, else amp), then the reading."""
+    test = voice_like(TEST_SECONDS, hz, amp if test_amp is None else test_amp) + noise(TEST_SECONDS, room, 3)
     speech = voice_like(speech_seconds, hz, amp) + noise(speech_seconds, room, 1)
-    return np.concatenate([noise(QUIET_SECONDS, room), speech])
+    return np.concatenate([noise(QUIET_SECONDS, room), test, speech])
 
 
 def test_a_recording_gives_the_speakers_pitch_level_noise_gate_and_gain():
@@ -42,18 +45,27 @@ def test_a_recording_gives_the_speakers_pitch_level_noise_gate_and_gain():
 def test_a_quiet_speaker_is_lifted_and_a_loud_one_is_never_pushed_into_clipping():
     quiet = analyse(take(amp=0.02, room=0.0002), SR, "m", 0.0)
     loud = analyse(take(amp=0.9, room=0.001), SR, "m", 0.0)
-    assert 1.5 < quiet.input_gain <= 4.0
+    assert 4.0 < quiet.input_gain <= 16.0  # a quiet microphone is brought up past the old 4x limit
     assert 0.5 <= loud.input_gain <= 0.98 / 0.9 + 1e-3
 
 
 def test_too_short_too_little_speech_and_a_noisy_microphone_are_refused_with_reasons():
     with pytest.raises(CalibrationError, match="too short"):
         analyse(take(speech_seconds=1.0), SR, "m", 0.0)
-    silent = np.concatenate([noise(QUIET_SECONDS, 0.001), noise(8.0, 0.001, 2)])
-    with pytest.raises(CalibrationError, match="Not enough speech"):
+    silent = np.concatenate([noise(QUIET_SECONDS + TEST_SECONDS, 0.001), noise(8.0, 0.001, 2)])
+    with pytest.raises(CalibrationError, match="test phrase was not heard"):
         analyse(silent, SR, "m", 0.0)
-    with pytest.raises(CalibrationError, match="too noisy"):
+    check_only = take()
+    check_only[int((QUIET_SECONDS + TEST_SECONDS) * SR):] = noise(8.0, 0.001, 2)
+    with pytest.raises(CalibrationError, match="Not enough speech"):
+        analyse(check_only, SR, "m", 0.0)
+    with pytest.raises(CalibrationError, match="too loud"):
         analyse(take(amp=0.05, room=0.03), SR, "m", 0.0)
+
+
+def test_a_very_quiet_microphone_calibrates():
+    profile = analyse(take(amp=0.004, room=0.00005), SR, "m", 0.0)  # speech near -55 dB
+    assert profile.input_gain == 16.0 and profile.pitch_hz == pytest.approx(120.0, rel=0.03)
 
 
 def test_nan_in_the_recording_does_not_break_the_measurement():
@@ -151,7 +163,7 @@ def test_a_finished_recording_is_saved_and_read_back(tmp_path):
     assert cal.profile() is None and cal.status()["profile"] is None
     cal.start(1)
     status = cal.status()
-    assert status["recording"] and status["phase"] == "reading" and status["seconds"] == 4.0
+    assert status["recording"] and status["phase"] == "testing" and status["seconds"] == 4.0
     profile = cal.finish()
     assert not cal.active
     assert cal.profile() == profile and profile.device == "Headset Mic"
@@ -183,9 +195,9 @@ def test_a_failed_measurement_keeps_the_earlier_profile_and_says_why(tmp_path):
     good = cal.finish()
     bad, _ = make(tmp_path, FakeRecorder(np.zeros(SR * 10, dtype=np.float32)))
     bad.start(1)
-    with pytest.raises(CalibrationError, match="Not enough speech"):
+    with pytest.raises(CalibrationError, match="test phrase was not heard"):
         bad.finish()
-    assert bad.profile() == good and "Not enough speech" in bad.status()["error"] and not bad.active
+    assert bad.profile() == good and "test phrase was not heard" in bad.status()["error"] and not bad.active
 
 
 def test_a_recording_nobody_finished_is_dropped_so_it_cannot_block_live_mode_for_ever(tmp_path):
@@ -296,8 +308,9 @@ def test_the_reading_is_kept_for_deep_calibration_and_forgotten_with_the_profile
     cal.finish()
     sample = cal.sample()
     recorded = take()
-    assert sample is not None and len(sample) == len(recorded) - int(QUIET_SECONDS * 48000)  # the reading only
-    assert np.allclose(sample, recorded[int(QUIET_SECONDS * 48000):], atol=1e-4)
+    start = int((QUIET_SECONDS + TEST_SECONDS) * 48000)
+    assert sample is not None and len(sample) == len(recorded) - start  # the reading only
+    assert np.allclose(sample, recorded[start:], atol=1e-4)
     assert cal.status()["has_sample"] is True
     cal.forget()
     assert cal.sample() is None
@@ -309,3 +322,63 @@ def test_a_failed_calibration_keeps_no_reading(tmp_path):
     with pytest.raises(Exception):
         cal.finish()
     assert cal.sample() is None
+
+
+
+def test_the_mic_check_phrase_sets_the_input_boost():
+    quiet_check = analyse(take(amp=0.05, test_amp=0.02), SR, "m", 0.0)
+    louder_check = analyse(take(amp=0.05, test_amp=0.04), SR, "m", 0.0)
+    # the boost follows the level of "testing, one, two, three": a check twice as loud gets half the boost
+    assert quiet_check.input_gain / louder_check.input_gain == pytest.approx(2.0, rel=0.1)
+    assert quiet_check.test_level_db < louder_check.test_level_db
+
+
+def test_the_boost_never_makes_the_loudest_moment_clip():
+    profile = analyse(take(amp=0.6, test_amp=0.02), SR, "m", 0.0)  # a timid mic check, then loud reading
+    assert profile.input_gain * 0.6 <= 0.99
+
+
+def test_a_missing_mic_check_is_explained():
+    audio = take()
+    start, end = int(QUIET_SECONDS * SR), int((QUIET_SECONDS + TEST_SECONDS) * SR)
+    audio[start:end] = noise(TEST_SECONDS, 0.001, 9)
+    with pytest.raises(CalibrationError, match="testing, one, two, three"):
+        analyse(audio, SR, "m", 0.0)
+
+
+def test_the_status_walks_through_quiet_mic_check_and_reading(tmp_path):
+    class At(FakeRecorder):
+        def __init__(self, seconds):
+            super().__init__()
+            self.seconds = seconds
+
+        def status(self):
+            return {"recording": self.running, "level": 0.1, "seconds": self.seconds, "full": False}
+
+    phases = []
+    for seconds in (1.0, QUIET_SECONDS + 1.0, QUIET_SECONDS + TEST_SECONDS + 1.0):
+        cal, _ = make(tmp_path, recorder=At(seconds))
+        cal.start(1)
+        phases.append(cal.status()["phase"])
+        cal.cancel()
+    assert phases == ["quiet", "testing", "reading"]
+    status = cal.status()
+    assert status["test_seconds"] == TEST_SECONDS and status["total_seconds"] == QUIET_SECONDS + TEST_SECONDS + 15.0
+
+
+
+class Echo:
+    """A voice that comes out exactly as loud as what it is given."""
+    def convert(self, audio, sample_rate, pitch_shift, params):
+        return np.array(audio, dtype=np.float32)
+
+
+def test_the_converted_voice_comes_out_as_loud_as_the_speaker_went_in():
+    from dataclasses import replace
+
+    params = PRESETS["balanced"]
+    speech = window(params, voice_like(1.0, 120.0, amp=0.1))
+    out = GatedEngine(Echo(), gate_db=None, gain=4.0).convert(speech, SR, 0.0, params)
+    assert np.max(np.abs(out)) == pytest.approx(0.1, rel=0.01)  # the boost is for the model, not the listener
+    louder = GatedEngine(Echo(), gate_db=None, gain=4.0).convert(speech, SR, 0.0, replace(params, match_input_level=False))
+    assert np.max(np.abs(louder)) == pytest.approx(0.4, rel=0.01)

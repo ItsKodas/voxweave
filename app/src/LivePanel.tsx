@@ -102,7 +102,7 @@ function storeLikeness(voiceId: string, value: number | null) {
  */
 const ADVANCED_DEFAULTS = {
   f0_method: "rmvpe", protect: 0.33, volume_follow: 0.75, background_cut_db: 30, natural_variation_st: 0.25,
-  pitch_cleanup: true, creak_repair: true, join_smoothing: true,
+  pitch_cleanup: true, creak_repair: true, join_smoothing: true, match_input_level: true,
 } as const;
 type AdvancedKey = keyof typeof ADVANCED_DEFAULTS;
 const ADVANCED_KEYS = Object.keys(ADVANCED_DEFAULTS) as AdvancedKey[];
@@ -807,6 +807,11 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
           <input type="checkbox" checked={extra("join_smoothing")} disabled={stats.running}
             onChange={(e) => override("join_smoothing", e.target.checked)} />
           Join smoothing (each chunk starts from the pitch the last one used)
+        </label>
+        <label className="row">
+          <input type="checkbox" checked={extra("match_input_level")} disabled={stats.running}
+            onChange={(e) => override("match_input_level", e.target.checked)} />
+          Match my volume (the voice comes out as loud as you spoke, not as boosted for the model)
         </label>
         <label>
           Index blend

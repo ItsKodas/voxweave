@@ -25,6 +25,9 @@ class LiveParams:
     creak_repair: bool = True
     natural_variation_st: float = 0.25
     join_smoothing: bool = True
+    # The calibration's input boost is for the model; with this on, the converted voice comes out as loud as the
+    # speaker's own voice went in, instead of boosted.
+    match_input_level: bool = True
 
 
 # Every preset uses RMVPE, the neural pitch tracker the voices were trained with (it falls back to "dio" when its
@@ -64,7 +67,7 @@ def _validate(p: LiveParams) -> None:
         raise ValueError("index_rate must be between 0 and 1")
     if not 0.0 <= p.protect <= 0.5:
         raise ValueError("protect must be between 0 and 0.5")
-    for name in ("pitch_cleanup", "creak_repair", "join_smoothing"):
+    for name in ("pitch_cleanup", "creak_repair", "join_smoothing", "match_input_level"):
         if not isinstance(getattr(p, name), bool):
             raise ValueError(f"{name} must be true or false")
     if not 0.0 <= p.natural_variation_st <= 0.6:
@@ -79,7 +82,7 @@ def _validate(p: LiveParams) -> None:
 
 # What may change while live mode runs: everything but the timing, which sets the chunk size of the session.
 LIVE_CHANGEABLE = ("index_rate", "f0_method", "protect", "volume_follow", "background_cut_db", "natural_variation_st",
-                   "pitch_cleanup", "creak_repair", "join_smoothing")
+                   "pitch_cleanup", "creak_repair", "join_smoothing", "match_input_level")
 
 
 def changed_live(params: LiveParams, changes: dict) -> LiveParams:

@@ -12,11 +12,11 @@ const PROFILE: VoiceProfile = {
   input_gain: 1.3, device: "Headset Mic", created: 1,
 };
 const idle = (over: Partial<CalibrationStatus> = {}): CalibrationStatus => ({
-  recording: false, seconds: 0, level: 0, phase: null, quiet_seconds: 3, total_seconds: 18,
+  recording: false, seconds: 0, level: 0, phase: null, quiet_seconds: 3, test_seconds: 4, test_phrase: "Testing, one, two, three", total_seconds: 22,
   text: "The ferry leaves the harbour.", error: null, profile: null, ...over,
 });
 const taking = (seconds: number): CalibrationStatus =>
-  idle({ recording: true, seconds, level: 0.4, phase: seconds < 3 ? "quiet" : "reading" });
+  idle({ recording: true, seconds, level: 0.4, phase: seconds < 3 ? "quiet" : seconds < 7 ? "testing" : "reading" });
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -59,7 +59,7 @@ describe("CalibrationPanel", () => {
     expect(screen.getByRole("button", { name: "Calibrate my voice" })).toBeDisabled();
   });
 
-  it("leads through quiet, then reading, and finishes by itself when the time is up", async () => {
+  it("leads through quiet, the test phrase, then reading, and finishes by itself when the time is up", async () => {
     vi.useFakeTimers();
     vi.mocked(calibrationApi.start).mockResolvedValue(taking(0));
     vi.mocked(calibrationApi.finish).mockResolvedValue(idle({ profile: PROFILE }));
@@ -71,13 +71,18 @@ describe("CalibrationPanel", () => {
     expect(calibrationApi.start).toHaveBeenCalledWith(4);
     expect(screen.getByText(/Stay quiet for a moment/)).toBeInTheDocument();
 
-    vi.mocked(calibrationApi.status).mockResolvedValue(taking(8));
+    vi.mocked(calibrationApi.status).mockResolvedValue(taking(4));
+    await tick(250);
+    expect(screen.getByText(/It sets your microphone level/)).toBeInTheDocument();
+    expect(screen.getByText(/Testing, one, two, three/)).toBeInTheDocument();
+
+    vi.mocked(calibrationApi.status).mockResolvedValue(taking(12));
     await tick(250);
     expect(screen.getByText(/Now read this aloud in your normal voice. 10 seconds left/)).toBeInTheDocument();
     expect(screen.getByText("The ferry leaves the harbour.")).toBeInTheDocument();
     expect(calibrationApi.finish).not.toHaveBeenCalled();
 
-    vi.mocked(calibrationApi.status).mockResolvedValue(taking(18.1));
+    vi.mocked(calibrationApi.status).mockResolvedValue(taking(22.1));
     await tick(250);
     expect(calibrationApi.finish).toHaveBeenCalledTimes(1);
     expect(screen.getByText(/Calibrated on Headset Mic/)).toBeInTheDocument();
@@ -94,7 +99,7 @@ describe("CalibrationPanel", () => {
     await tick(0);
     fireEvent.click(screen.getByRole("button", { name: "Calibrate my voice" }));
     await tick(0);
-    vi.mocked(calibrationApi.status).mockResolvedValueOnce(taking(18.5)).mockResolvedValue(idle());
+    vi.mocked(calibrationApi.status).mockResolvedValueOnce(taking(22.5)).mockResolvedValue(idle());
     await tick(250);
     await tick(0);
     expect(screen.getByRole("alert")).toHaveTextContent("Not enough speech was heard.");

@@ -23,6 +23,7 @@ export type Params = {
   pitch_cleanup?: boolean;
   creak_repair?: boolean;
   join_smoothing?: boolean;
+  match_input_level?: boolean;
 };
 export type Check = { id: string; ok: boolean; message: string };
 export type Mode = "converted" | "muted";

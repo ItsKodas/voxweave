@@ -36,7 +36,7 @@ def test_a_calibration_is_recorded_measured_and_reported(tmp_path):
     client, manager, _, _ = rig(tmp_path)
     assert client.get("/calibration/status").json()["profile"] is None
     started = client.post("/calibration/start", json={"input_device": 1}, headers=ORIGIN).json()
-    assert started["recording"] and started["text"] and started["total_seconds"] == 18.0
+    assert started["recording"] and started["text"] and started["total_seconds"] == 22.0
     done = client.post("/calibration/finish", headers=ORIGIN).json()
     assert not done["recording"] and 110 < done["profile"]["pitch_hz"] < 130
     assert client.get("/calibration/status").json()["profile"] == done["profile"]

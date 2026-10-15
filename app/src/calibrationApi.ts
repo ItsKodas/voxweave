@@ -11,14 +11,18 @@ export type VoiceProfile = {
   input_gain: number;
   device: string;
   created: number;
+  /** The level of the test phrase, which set the input boost. */
+  test_level_db?: number | null;
 };
 
 export type CalibrationStatus = {
   recording: boolean;
   seconds: number;
   level: number;
-  /** While recording: first stay quiet, then read the text aloud. */
-  phase: "quiet" | "reading" | null;
+  /** While recording: stay quiet, then say the test phrase (it sets the input boost), then read the text aloud. */
+  phase: "quiet" | "testing" | "reading" | null;
+  test_seconds?: number;
+  test_phrase?: string;
   quiet_seconds: number;
   total_seconds: number;
   text: string;
