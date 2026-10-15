@@ -243,3 +243,15 @@ def test_a_preview_needs_a_kept_reading(tmp_path):
     tuner, _ = make(tmp_path, sample=False)
     with pytest.raises(ValueError, match="Calibrate"):
         tuner.preview("woman", quality=1, pitch_shift=0, likeness=0.3)
+
+
+def test_preview_and_tuning_accept_every_live_setting_including_ones_they_do_not_search(tmp_path):
+    tuner, engine = make(tmp_path)
+    tuner.preview("woman", quality=1, pitch_shift=7, likeness=0.3, advanced={"match_input_level": False})
+    assert engine.params.match_input_level is False
+    tuner.start("woman", quality=1, pitch_shift=7, likeness=0.3, advanced={"match_input_level": False, "creak_repair": True})
+    tuner.wait(60)
+    status = tuner.status()
+    assert status["error"] is None
+    assert engine.params.match_input_level is False  # kept as given through every try
+    assert status["result"]["advanced"]["match_input_level"] is False

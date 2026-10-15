@@ -146,10 +146,11 @@ class Tuner:
         if not (isinstance(pitch_shift, int) and -24 <= pitch_shift <= 24) or not 0.0 <= float(likeness) <= 1.0:
             raise ValueError("The current pitch shift or likeness is out of range")
         defaults = resolve("balanced")
-        unknown = set(advanced or {}) - set(ADVANCED_STEPS)
-        if unknown:
-            raise ValueError(f"Unknown settings: {sorted(unknown)}")
+        _check_advanced(advanced)
+        # The settings searched, from where the speaker has them; any other live setting given (Match my volume)
+        # is kept as it is through every try.
         current = {name: (advanced or {}).get(name, getattr(defaults, name)) for name in ADVANCED_STEPS}
+        current.update({k: v for k, v in (advanced or {}).items() if k not in ADVANCED_STEPS})
         resolve("balanced", current)  # the same checks live mode makes
         sample = self._calibration.sample()
         if sample is None:
@@ -184,9 +185,7 @@ class Tuner:
         sample = self._calibration.sample()
         if sample is None:
             raise ValueError("Calibrate your voice first: the preview plays your calibration reading in the voice.")
-        unknown = set(advanced or {}) - set(ADVANCED_STEPS)
-        if unknown:
-            raise ValueError(f"Unknown settings: {sorted(unknown)}")
+        _check_advanced(advanced)
         with self._lock:
             if self._status["active"]:
                 raise ValueError("Wait for deep calibration to finish")
@@ -281,6 +280,15 @@ class Tuner:
 
 class _Stopped(Exception):
     pass
+
+
+def _check_advanced(advanced: dict | None) -> None:
+    """Every setting live mode lets change while it runs is accepted, likeness excepted (it is its own argument)."""
+    from aivoice.presets import LIVE_CHANGEABLE
+
+    unknown = set(advanced or {}) - (set(LIVE_CHANGEABLE) - {"index_rate"})
+    if unknown:
+        raise ValueError(f"Unknown settings: {sorted(unknown)}")
 
 
 def convert_like_live(engine, wrapped, sample: np.ndarray, params, pitch_shift: float, sample_rate: int) -> np.ndarray:
