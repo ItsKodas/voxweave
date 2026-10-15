@@ -148,10 +148,10 @@ function withoutAdvanced(overrides: Partial<Params>): Partial<Params> {
   return rest;
 }
 
-function Meter({ label, level }: { label: string; level: number }) {
+function Meter({ label, level, out = false }: { label: string; level: number; out?: boolean }) {
   return (
-    <label className="meter">
-      {label}
+    <label className={out ? "meter out" : "meter"}>
+      <span>{label}</span>
       <progress max={1} value={Math.min(1, level)} />
     </label>
   );
@@ -204,6 +204,7 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
   // Live learning: re-measures the voice and re-tunes slowly while live mode runs (backend/aivoice/learner.py).
   const [learning, setLearning] = useState<Learning | null>(null);
   const [learnNote, setLearnNote] = useState<string | null>(null);
+  const [sidePanel, setSidePanel] = useState<"sound" | "voice">("sound");
 
   // The quality level sets the chunk timing; the Advanced fields can still override each value by hand.
   useEffect(() => {
@@ -554,327 +555,378 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
   const canStart = !busy && !speechActive && input !== null && hasDestination && voice !== "";
   const shownError = error ?? actionError ?? stats.error;
 
+  const changePitch = (semitones: number) => {
+    const clamped = Math.max(-24, Math.min(24, semitones));
+    setPitch(clamped);
+    setPitchNote(null);
+    if (stats.running) api.settings({ pitch_shift: clamped }).catch(reportFailure);
+  };
+  const likenessValue = Number(value("index_rate") || 0);
+
   return (
     <section className="live">
-      {shownError && <p role="alert" className="error">{shownError}</p>}
-      {loadFailed && <button onClick={load}>Retry</button>}
-      {speechActive && !stats.running && <p className="hint">Speech is playing. Stop it on the Speak tab to use live mode.</p>}
-      {loaded && voices.length === 0 && <p className="hint">{installedApp()
-        ? "No voice models installed. Bring in a trained voice as a voice pack: drop its .voxweave file on the Voices tab."
-        : "No voice models installed. See the README to add one."}</p>}
-
-      <label>
-        Microphone
-        <select value={input ?? ""} onChange={(e) => setInput(Number(e.target.value))} disabled={stats.running}>
-          {inputs.map((d) => <option key={d.index} value={d.index}>{d.name}</option>)}
-        </select>
-      </label>
-      <label>
-        Virtual microphone (what other apps hear)
-        <select
-          value={mic ?? ""}
-          onChange={(e) => setMic(e.target.value === "" ? null : Number(e.target.value))}
-          disabled={stats.running}
-        >
-          <option value="">None (listen only)</option>
-          {outputs.map((d) => <option key={d.index} value={d.index}>{micOptionLabel(d.name)}</option>)}
-        </select>
-      </label>
-      {loaded && virtualMic === null && (
-        <p className="hint">
-          No virtual mic was found, so other apps will not hear anything until VoiceMeeter is installed and
-          running. You can still listen to the converted voice yourself.
-        </p>
-      )}
-      {loaded && micHeard && (
-        <p className="hint">
-          In other apps (Discord, a game, a recorder), choose <strong>{micHeard.microphone}</strong> as the microphone.{" "}
-          {micHeard.note} Windows lists the end this app plays into under playback devices, which is why that end is
-          called "Input". You can rename the microphone (for example to "Voxweave Mic") in Windows Sound settings, under
-          Recording.
-        </p>
-      )}
-      {loaded && mic !== null && !micHeard && (
-        <p className="hint">This is an ordinary playback device, not a virtual microphone: other apps cannot choose it as a microphone.</p>
-      )}
-      {loaded && (hasCable ? null : (
-        <details className="setup-mic">
-          <summary>Set up a dedicated Voxweave microphone</summary>
-          <p>
-            Windows only lets a signed driver add a microphone, so this uses VB-CABLE, a free virtual cable from the
-            makers of VoiceMeeter. It adds one pair of devices that pass sound straight through.
-          </p>
-          <ol>
-            <li>
-              Open <code>{CABLE_PAGE}</code> in your browser and download the VB-CABLE driver pack.{" "}
-              <button className="secondary" onClick={copyCableLink}>{copied ? "Copied" : "Copy link"}</button>
-            </li>
-            <li>Unzip it, right-click <code>VBCABLE_Setup_x64.exe</code>, choose Run as administrator, and press Install Driver. Restart Windows if it asks.</li>
-            <li>
-              Come back here and press{" "}
-              <button className="secondary" onClick={findCable} disabled={busy || stats.running || speechActive}>
-                I have installed it
-              </button>
-              . "CABLE Input" is then chosen as the virtual mic above.
-            </li>
-            <li>In other apps, choose <strong>CABLE Output</strong> as the microphone. You can rename it to "Voxweave Mic" in Windows Sound settings.</li>
-          </ol>
-        </details>
-      ))}
-      {loaded && !hasDestination && !stats.running && (
-        <p className="hint">Choose a virtual mic or tick Listen to output to start.</p>
-      )}
-      <label className="row">
-        <input
-          type="checkbox"
-          checked={monitorOn}
-          disabled={stats.running && !monitorOn}
-          onChange={(e) => {
-            const enabled = e.target.checked;
-            if (!stats.running) setMonitorOn(enabled);
-            else
-              run(async () => {
-                await api.settings({ monitor_enabled: enabled });
-                setMonitorOn(enabled);
-              });
-          }}
-        />
-        Listen to output
-      </label>
-      {monitorOn && (
-        <>
-          <label>
-            Listen on
-            <select value={monitor ?? ""} onChange={(e) => setMonitor(Number(e.target.value))} disabled={stats.running}>
-              {outputs.map((d) => <option key={d.index} value={d.index}>{d.name}</option>)}
-            </select>
-          </label>
-          <label>
-            Listen volume
-            <input
-              type="range" min={0} max={2} step={0.05} value={monitorGain}
-              onChange={(e) => {
-                const gain = Number(e.target.value);
-                setMonitorGain(gain);
-                if (stats.running) api.settings({ monitor_gain: gain }).catch(reportFailure);
-              }}
-            />
-          </label>
-        </>
-      )}
-      <button className="secondary" onClick={refreshDevices} disabled={busy || stats.running || speechActive}>
-        Refresh devices
-      </button>
-      <label>
-        Voice
-        <select value={voice} onChange={(e) => setVoice(e.target.value)} disabled={stats.running}>
-          {voices.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
-        </select>
-      </label>
-      <label>
-        Quality: {quality + 1} of {QUALITY_LEVELS.length}, about {delaySeconds(quality).toFixed(1)} s behind your voice
-        <input type="range" min={0} max={QUALITY_LEVELS.length - 1} step={1} value={quality} disabled={stats.running}
-          onChange={(e) => setQuality(Number(e.target.value))} />
-      </label>
-      <p className="hint">Further right is smoother and steadier, and further behind. Set it before pressing Start.</p>
-      <label>
-        Pitch shift ({pitch > 0 ? "+" : ""}{pitch} semitones)
-        <input
-          type="range" min={-24} max={24} step={1} value={pitch}
-          onChange={(e) => {
-            const semitones = Number(e.target.value);
-            setPitch(semitones);
-            setPitchNote(null);
-            if (stats.running) api.settings({ pitch_shift: semitones }).catch(reportFailure);
-          }}
-        />
-      </label>
-      {pitchNote && <p className="hint">{pitchNote}</p>}
-      {voice !== PREVIEW_VOICE_ID && (
-        <>
-          <label>
-            Likeness: {Math.round(Number(value("index_rate") || 0) * 100)}%
-            <input type="range" min={0} max={1} step={0.05} value={Number(value("index_rate") || 0)} disabled={stats.running}
-              onChange={(e) => {
-                const rate = Number(e.target.value);
-                setOverrides((o) => ({ ...o, index_rate: rate }));
-                storeLikeness(voice, rate);
-              }} />
-          </label>
-          <p className="hint">
-            Higher sounds more like the voice but breaks up more when you speak differently from its recordings;
-            lower is steadier. Remembered for each voice. Set it before pressing Start.
-          </p>
-        </>
-      )}
-
-      {voice !== "" && voice !== PREVIEW_VOICE_ID && (
-        <>
-          <div className="row">
-            <button className="secondary" onClick={saveForVoice}>Save for this voice</button>
-            <button className="secondary" disabled={stats.running || tuning !== null} onClick={resetToRecommended}>Reset to recommended</button>
-            {profile !== null && (
-              <button className="secondary" disabled={stats.running || tuning !== null} onClick={findBestSettings}>Find best settings</button>
+      <div className="live-grid">
+        {/* ---- left: audio and voice ---- */}
+        <div className="live-col">
+          <div className="card">
+            <h3 className="card-title">Audio</h3>
+            <label>
+              Microphone
+              <select value={input ?? ""} onChange={(e) => setInput(Number(e.target.value))} disabled={stats.running}>
+                {inputs.map((d) => <option key={d.index} value={d.index}>{d.name}</option>)}
+              </select>
+            </label>
+            <label>
+              Virtual microphone (what other apps hear)
+              <select
+                value={mic ?? ""}
+                onChange={(e) => setMic(e.target.value === "" ? null : Number(e.target.value))}
+                disabled={stats.running}
+              >
+                <option value="">None (listen only)</option>
+                {outputs.map((d) => <option key={d.index} value={d.index}>{micOptionLabel(d.name)}</option>)}
+              </select>
+            </label>
+            {loaded && virtualMic === null && (
+              <p className="hint">
+                No virtual mic was found, so other apps will not hear anything until VoiceMeeter is installed and
+                running. You can still listen to the converted voice yourself.
+              </p>
+            )}
+            {loaded && micHeard && (
+              <details className="fold">
+                <summary>Other apps hear you on <strong>{micHeard.microphone}</strong></summary>
+                <p className="hint">
+                  In other apps (Discord, a game, a recorder), choose <strong>{micHeard.microphone}</strong> as the microphone.{" "}
+                  {micHeard.note} Windows lists the end this app plays into under playback devices, which is why that end is
+                  called "Input". You can rename the microphone (for example to "Voxweave Mic") in Windows Sound settings, under
+                  Recording.
+                </p>
+              </details>
+            )}
+            {loaded && mic !== null && !micHeard && (
+              <p className="hint">This is an ordinary playback device, not a virtual microphone: other apps cannot choose it as a microphone.</p>
+            )}
+            {loaded && (hasCable ? null : (
+              <details className="setup-mic">
+                <summary>Set up a dedicated Voxweave microphone</summary>
+                <p className="hint">
+                  Windows only lets a signed driver add a microphone, so this uses VB-CABLE, a free virtual cable from the
+                  makers of VoiceMeeter. It adds one pair of devices that pass sound straight through.
+                </p>
+                <ol>
+                  <li>
+                    Open <code>{CABLE_PAGE}</code> in your browser and download the VB-CABLE driver pack.{" "}
+                    <button className="secondary" onClick={copyCableLink}>{copied ? "Copied" : "Copy link"}</button>
+                  </li>
+                  <li>Unzip it, right-click <code>VBCABLE_Setup_x64.exe</code>, choose Run as administrator, and press Install Driver. Restart Windows if it asks.</li>
+                  <li>
+                    Come back here and press{" "}
+                    <button className="secondary" onClick={findCable} disabled={busy || stats.running || speechActive}>
+                      I have installed it
+                    </button>
+                    . "CABLE Input" is then chosen as the virtual mic above.
+                  </li>
+                  <li>In other apps, choose <strong>CABLE Output</strong> as the microphone. You can rename it to "Voxweave Mic" in Windows Sound settings.</li>
+                </ol>
+              </details>
+            ))}
+            <div className="listen-row">
+            <label className="row">
+              <input
+                type="checkbox"
+                checked={monitorOn}
+                disabled={stats.running && !monitorOn}
+                onChange={(e) => {
+                  const enabled = e.target.checked;
+                  if (!stats.running) setMonitorOn(enabled);
+                  else
+                    run(async () => {
+                      await api.settings({ monitor_enabled: enabled });
+                      setMonitorOn(enabled);
+                    });
+                }}
+              />
+              Listen to output
+            </label>
+            <button className="secondary" onClick={refreshDevices} disabled={busy || stats.running || speechActive}>
+              Refresh devices
+            </button>
+            </div>
+            {monitorOn && (
+              <>
+                <label>
+                  Listen on
+                  <select value={monitor ?? ""} onChange={(e) => setMonitor(Number(e.target.value))} disabled={stats.running}>
+                    {outputs.map((d) => <option key={d.index} value={d.index}>{d.name}</option>)}
+                  </select>
+                </label>
+                <label>
+                  Listen volume
+                  <input
+                    type="range" min={0} max={2} step={0.05} value={monitorGain}
+                    onChange={(e) => {
+                      const gain = Number(e.target.value);
+                      setMonitorGain(gain);
+                      if (stats.running) api.settings({ monitor_gain: gain }).catch(reportFailure);
+                    }}
+                  />
+                </label>
+              </>
             )}
           </div>
-          {tuning !== null && (
-            <p className="hint" aria-live="polite">
-              {tuning}{" "}
-              <button className="secondary" onClick={() => calibrationApi.tuneCancel().catch(reportFailure)}>Stop</button>
-            </p>
-          )}
-          {tuneNote && <p className="hint" aria-live="polite">{tuneNote}</p>}
-          <p className="hint">
-            {saved === null
-              ? "Save keeps this pitch, quality and likeness for this voice and puts them back whenever you choose it. Reset goes back to the pitch from your calibration, quality 2 and the usual likeness."
-              : savedChanged
-                ? `Changed since you saved. Press Save to keep these settings for ${voiceName}.`
-                : `Using your saved settings for ${voiceName}.`}
-          </p>
-        </>
-      )}
 
-      <CalibrationPanel input={input} disabled={stats.running || speechActive} onProfile={setProfile} />
-      {profile !== null && (
-        <label className="row">
-          <input type="checkbox" checked={useCalibration} disabled={stats.running}
-            onChange={(e) => setUseCalibration(e.target.checked)} />
-          Use my calibration (silence when I am quiet, even level)
-        </label>
-      )}
-
-      <details>
-        <summary>Advanced</summary>
-        <label>
-          Chunk (ms)
-          <input type="number" value={typed("chunk_ms")} placeholder={placeholder("chunk_ms")} disabled={stats.running}
-            onChange={numberChange("chunk_ms")} />
-        </label>
-        <label>
-          Crossfade (ms)
-          <input type="number" value={typed("crossfade_ms")} placeholder={placeholder("crossfade_ms")} disabled={stats.running}
-            onChange={numberChange("crossfade_ms")} />
-        </label>
-        <label>
-          Context (ms)
-          <input type="number" value={typed("context_ms")} placeholder={placeholder("context_ms")} disabled={stats.running}
-            onChange={numberChange("context_ms")} />
-        </label>
-        <label>
-          Pitch detector
-          <select value={extra("f0_method")} disabled={stats.running}
-            onChange={(e) => override("f0_method", e.target.value as Params["f0_method"])}>
-            <option value="rmvpe">Best (RMVPE)</option>
-            <option value="dio">Fast (dio)</option>
-            <option value="harvest">Accurate but slow (harvest)</option>
-          </select>
-        </label>
-        <label>
-          Consonant protection: {extra("protect").toFixed(2)}
-          <input type="range" min={0} max={0.5} step={0.01} value={extra("protect")} disabled={stats.running}
-            onChange={(e) => override("protect", Number(e.target.value))} />
-        </label>
-        <p className="hint">Keeps "s", "t" and breaths in your own sound; 0.5 switches it off.</p>
-        <label>
-          Loudness follow: {Math.round(extra("volume_follow") * 100)}%
-          <input type="range" min={0} max={1} step={0.05} value={extra("volume_follow")} disabled={stats.running}
-            onChange={(e) => override("volume_follow", Number(e.target.value))} />
-        </label>
-        <p className="hint">How closely the voice's loudness follows yours, so it does not dip where you do not.</p>
-        <label>
-          Background cut: {extra("background_cut_db")} dB
-          <input type="range" min={0} max={60} step={5} value={extra("background_cut_db")} disabled={stats.running}
-            onChange={(e) => override("background_cut_db", Number(e.target.value))} />
-        </label>
-        <p className="hint">How far room sound in your pauses is turned down, so it is not turned into mumbling. 0 is off.</p>
-        <label>
-          Natural waver: {extra("natural_variation_st").toFixed(2)} semitones
-          <input type="range" min={0} max={0.6} step={0.05} value={extra("natural_variation_st")} disabled={stats.running}
-            onChange={(e) => override("natural_variation_st", Number(e.target.value))} />
-        </label>
-        <p className="hint">A small waver added where the pitch goes dead flat, so the voice does not lock on one note. 0 is off.</p>
-        <label className="row">
-          <input type="checkbox" checked={extra("pitch_cleanup")} disabled={stats.running}
-            onChange={(e) => override("pitch_cleanup", e.target.checked)} />
-          Pitch clean-up (octave errors, spikes, wobble and blips)
-        </label>
-        <label className="row">
-          <input type="checkbox" checked={extra("creak_repair")} disabled={stats.running}
-            onChange={(e) => override("creak_repair", e.target.checked)} />
-          Creak repair (holds the pitch when your voice creaks at the end of a sentence)
-        </label>
-        <label className="row">
-          <input type="checkbox" checked={extra("join_smoothing")} disabled={stats.running}
-            onChange={(e) => override("join_smoothing", e.target.checked)} />
-          Join smoothing (each chunk starts from the pitch the last one used)
-        </label>
-        <label className="row">
-          <input type="checkbox" checked={extra("match_input_level")} disabled={stats.running}
-            onChange={(e) => override("match_input_level", e.target.checked)} />
-          Match my volume (the voice comes out as loud as you spoke, not as boosted for the model)
-        </label>
-        <label>
-          Index blend
-          <input type="number" min={0} max={1} step={0.05} value={typed("index_rate")} placeholder={placeholder("index_rate")} disabled={stats.running}
-            onChange={numberChange("index_rate")} />
-        </label>
-      </details>
-
-      <div className="actions">
-        {stats.running ? (
-          <>
-            <button onClick={() => run(() => api.stop())} disabled={busy}>Stop</button>
-            {stats.mode === "muted" ? (
-              <button onClick={() => run(() => api.mode("converted"))} disabled={busy}>Unmute</button>
-            ) : (
-              <button onClick={() => run(() => api.mode("muted"))} disabled={busy}>Mute</button>
+          <div className="card grow">
+            <h3 className="card-title">Voice</h3>
+            <label>
+              Voice
+              <select value={voice} onChange={(e) => setVoice(e.target.value)} disabled={stats.running}>
+                {voices.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+              </select>
+            </label>
+            <label>
+              Quality: {quality + 1} of {QUALITY_LEVELS.length}, about {delaySeconds(quality).toFixed(1)} s behind your voice
+              <input type="range" min={0} max={QUALITY_LEVELS.length - 1} step={1} value={quality} disabled={stats.running}
+                onChange={(e) => setQuality(Number(e.target.value))} />
+              <span className="ends"><span>Faster</span><span>Smoother</span></span>
+            </label>
+            <label htmlFor="pitch-shift">Pitch shift ({pitch > 0 ? "+" : ""}{pitch} semitones)</label>
+            <div className="pitch-row">
+              <button type="button" aria-label="Lower the pitch a semitone" onClick={() => changePitch(pitch - 1)}>−</button>
+              <input id="pitch-shift" type="range" min={-24} max={24} step={1} value={pitch}
+                onChange={(e) => changePitch(Number(e.target.value))} />
+              <button type="button" aria-label="Raise the pitch a semitone" onClick={() => changePitch(pitch + 1)}>+</button>
+            </div>
+            {pitchNote && <p className="hint">{pitchNote}</p>}
+            {voice !== PREVIEW_VOICE_ID && (
+              <label style={{ marginTop: 10 }}>
+                Likeness: {Math.round(likenessValue * 100)}%
+                <input type="range" min={0} max={1} step={0.05} value={likenessValue} disabled={stats.running}
+                  onChange={(e) => {
+                    const rate = Number(e.target.value);
+                    setOverrides((o) => ({ ...o, index_rate: rate }));
+                    storeLikeness(voice, rate);
+                  }} />
+                <span className="ends"><span>Steadier</span><span>More like {voiceName}</span></span>
+              </label>
             )}
-          </>
-        ) : (
-          <button onClick={start} disabled={!canStart}>Start</button>
-        )}
+            {voice !== "" && voice !== PREVIEW_VOICE_ID && (
+              <>
+                <div className="voice-actions">
+                  {profile !== null && (
+                    <button className="primary" disabled={stats.running || tuning !== null} onClick={findBestSettings}>Find best settings</button>
+                  )}
+                  <button className="secondary" aria-label="Save for this voice" onClick={saveForVoice}>Save</button>
+                  <button className="secondary" aria-label="Reset to recommended" disabled={stats.running || tuning !== null} onClick={resetToRecommended}>Reset</button>
+                </div>
+                {tuning !== null && (
+                  <p className="hint" aria-live="polite">
+                    {tuning}{" "}
+                    <button className="secondary" onClick={() => calibrationApi.tuneCancel().catch(reportFailure)}>Stop</button>
+                  </p>
+                )}
+                {tuneNote && <p className="hint" aria-live="polite">{tuneNote}</p>}
+                <p className="hint">
+                  {saved === null
+                    ? "Save keeps these settings for this voice; Reset goes back to the recommended ones."
+                    : savedChanged
+                      ? `Changed since you saved. Press Save to keep these settings for ${voiceName}.`
+                      : `Using your saved settings for ${voiceName}.`}
+                </p>
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* ---- centre: start, levels and what the model is doing ---- */}
+        <div className="live-col">
+          {shownError && <p role="alert" className="error">{shownError}</p>}
+          {loadFailed && <button onClick={load}>Retry</button>}
+          {speechActive && !stats.running && <p className="warn">Speech is playing. Stop it on the Speak tab to use live mode.</p>}
+          {loaded && voices.length === 0 && <p className="warn">{installedApp()
+            ? "No voice models installed. Bring in a trained voice as a voice pack: drop its .voxweave file on the Voices tab."
+            : "No voice models installed. See the README to add one."}</p>}
+          <div className="card">
+            <div className="stage-controls">
+              {stats.running ? (
+                <>
+                  <button className="stop" onClick={() => run(() => api.stop())} disabled={busy}>Stop</button>
+                  {stats.mode === "muted" ? (
+                    <button className="mute" onClick={() => run(() => api.mode("converted"))} disabled={busy}>Unmute</button>
+                  ) : (
+                    <button className="mute" onClick={() => run(() => api.mode("muted"))} disabled={busy}>Mute</button>
+                  )}
+                  <div className="stage-meters">
+                    <Meter label="Input" level={stats.in_level} />
+                    <Meter label="Output" level={stats.out_level} out />
+                  </div>
+                </>
+              ) : (
+                <>
+                  <button className="start" onClick={start} disabled={!canStart}>Start</button>
+                  <p className="stage-idle">
+                    {loaded && !hasDestination
+                      ? "Choose a virtual mic or tick Listen to output to start."
+                      : `Speak as ${voiceName} once you press Start.`}
+                  </p>
+                </>
+              )}
+            </div>
+            {stats.running && stats.suggest_faster && <p className="warn">The GPU is not keeping up. Move Quality further left.</p>}
+            {stats.running && stats.clipping && (
+              <p className="warn" role="status">
+                Your microphone is clipping: it is set too loud, and the distorted sound comes out harsh. Turn its level
+                down in the Windows sound settings, then calibrate again.
+              </p>
+            )}
+          </div>
+          {stats.running ? (
+            <div className="card grow">
+              <LiveInsight running={stats.running} voiceName={voiceName} />
+            </div>
+          ) : (
+            <div className="card grow">
+              <h3 className="card-title">What the model is doing</h3>
+              <p className="hint">
+                While live mode runs, this shows how much you sound like {voiceName}, your pitch and the pitch the model
+                is given, your level against the voice's, and how long each chunk takes to convert.
+              </p>
+            </div>
+          )}
+        </div>
+
+        {/* ---- right: sound settings, my voice, learning ---- */}
+        <div className="live-col">
+          <div className="card grow">
+            <div role="tablist" aria-label="Settings" className="panel-tabs">
+              <button role="tab" aria-selected={sidePanel === "sound"} onClick={() => setSidePanel("sound")}>Sound</button>
+              <button role="tab" aria-selected={sidePanel === "voice"} onClick={() => setSidePanel("voice")}>My voice</button>
+            </div>
+            <div className="sound" hidden={sidePanel !== "sound"}>
+              <label>
+                Pitch detector
+                <select value={extra("f0_method")} disabled={stats.running}
+                  onChange={(e) => override("f0_method", e.target.value as Params["f0_method"])}>
+                  <option value="rmvpe">Best (RMVPE)</option>
+                  <option value="dio">Fast (dio)</option>
+                  <option value="harvest">Accurate but slow (harvest)</option>
+                </select>
+              </label>
+              <label title={'Keeps "s", "t" and breaths in your own sound; 0.5 switches it off.'}>
+                <span className="label-row"><span>Consonant protection: {extra("protect").toFixed(2)}</span></span>
+                <input type="range" min={0} max={0.5} step={0.01} value={extra("protect")} disabled={stats.running}
+                  onChange={(e) => override("protect", Number(e.target.value))} />
+              </label>
+              <label title="How closely the voice's loudness follows yours, so it does not dip where you do not.">
+                Loudness follow: {Math.round(extra("volume_follow") * 100)}%
+                <input type="range" min={0} max={1} step={0.05} value={extra("volume_follow")} disabled={stats.running}
+                  onChange={(e) => override("volume_follow", Number(e.target.value))} />
+              </label>
+              <label title="How far room sound in your pauses is turned down, so it is not turned into mumbling. 0 is off.">
+                Background cut: {extra("background_cut_db")} dB
+                <input type="range" min={0} max={60} step={5} value={extra("background_cut_db")} disabled={stats.running}
+                  onChange={(e) => override("background_cut_db", Number(e.target.value))} />
+              </label>
+              <label title="A small waver added where the pitch goes dead flat, so the voice does not lock on one note. 0 is off.">
+                Natural waver: {extra("natural_variation_st").toFixed(2)} semitones
+                <input type="range" min={0} max={0.6} step={0.05} value={extra("natural_variation_st")} disabled={stats.running}
+                  onChange={(e) => override("natural_variation_st", Number(e.target.value))} />
+              </label>
+              <div className="toggles">
+                <label className="row" title="Octave errors, spikes, wobble and blips in the pitch">
+                  <input type="checkbox" checked={extra("pitch_cleanup")} disabled={stats.running}
+                    onChange={(e) => override("pitch_cleanup", e.target.checked)} />
+                  Pitch clean-up
+                </label>
+                <label className="row" title="Holds the pitch when your voice creaks at the end of a sentence">
+                  <input type="checkbox" checked={extra("creak_repair")} disabled={stats.running}
+                    onChange={(e) => override("creak_repair", e.target.checked)} />
+                  Creak repair
+                </label>
+                <label className="row" title="Each chunk starts from the pitch the last one used">
+                  <input type="checkbox" checked={extra("join_smoothing")} disabled={stats.running}
+                    onChange={(e) => override("join_smoothing", e.target.checked)} />
+                  Join smoothing
+                </label>
+                <label className="row" title="The voice comes out as loud as you spoke, not as boosted for the model">
+                  <input type="checkbox" checked={extra("match_input_level")} disabled={stats.running}
+                    onChange={(e) => override("match_input_level", e.target.checked)} />
+                  Match my volume
+                </label>
+              </div>
+              <details>
+                <summary>Advanced</summary>
+                <label>
+                  Chunk (ms)
+                  <input type="number" value={typed("chunk_ms")} placeholder={placeholder("chunk_ms")} disabled={stats.running}
+                    onChange={numberChange("chunk_ms")} />
+                </label>
+                <label>
+                  Crossfade (ms)
+                  <input type="number" value={typed("crossfade_ms")} placeholder={placeholder("crossfade_ms")} disabled={stats.running}
+                    onChange={numberChange("crossfade_ms")} />
+                </label>
+                <label>
+                  Context (ms)
+                  <input type="number" value={typed("context_ms")} placeholder={placeholder("context_ms")} disabled={stats.running}
+                    onChange={numberChange("context_ms")} />
+                </label>
+                <label>
+                  Index blend
+                  <input type="number" min={0} max={1} step={0.05} value={typed("index_rate")} placeholder={placeholder("index_rate")} disabled={stats.running}
+                    onChange={numberChange("index_rate")} />
+                </label>
+              </details>
+            </div>
+            <div hidden={sidePanel !== "voice"}>
+              <CalibrationPanel input={input} disabled={stats.running || speechActive} onProfile={setProfile} />
+              {profile !== null && (
+                <label className="row">
+                  <input type="checkbox" checked={useCalibration} disabled={stats.running}
+                    onChange={(e) => setUseCalibration(e.target.checked)} />
+                  Use my calibration (silence when I am quiet, even level)
+                </label>
+              )}
+            </div>
+          </div>
+          {stats.running && profile !== null && voice !== PREVIEW_VOICE_ID && (
+            <div className="learning">
+              <label className="row">
+                <input type="checkbox" checked={learningOn} onChange={(e) => toggleLearning(e.target.checked)} />
+                Keep learning while I talk
+              </label>
+              <p className="hint">
+                Listens to how you really talk, measures your voice again and slowly re-tunes the settings in the
+                background, changing them only in your pauses and only a little at a time. Nothing is kept unless you save.
+              </p>
+              {learningOn && learning && (
+                <>
+                  <p className="hint" aria-live="polite">
+                    Heard {Math.round(learning.speech_seconds ?? 0)} s of your speech. {learning.message}.
+                    {learning.last_change ? ` Last change: ${learning.last_change}.` : ""}
+                  </p>
+                  <button className="secondary" onClick={saveLearning}>Save learned calibration</button>
+                </>
+              )}
+              {learnNote && <p className="hint">{learnNote}</p>}
+            </div>
+          )}
+        </div>
       </div>
 
-      {stats.running && (
-        <div className="readout">
-          <p>
-            Latency {Math.round(stats.latency_ms)} ms · Inference {Math.round(stats.infer_ms)} ms · Dropouts{" "}
-            {stats.underruns}
-          </p>
-          <Meter label="Input" level={stats.in_level} />
-          <Meter label="Output" level={stats.out_level} />
-          {stats.suggest_faster && <p className="hint">The GPU is not keeping up. Move Quality further left.</p>}
-          {stats.clipping && (
-            <p className="hint" role="status">
-              Your microphone is clipping: it is set too loud, and the distorted sound comes out harsh. Turn its level
-              down in the Windows sound settings, then calibrate again.
-            </p>
-          )}
-        </div>
-      )}
-      {stats.running && profile !== null && voice !== PREVIEW_VOICE_ID && (
-        <div className="learning">
-          <label className="row">
-            <input type="checkbox" checked={learningOn} onChange={(e) => toggleLearning(e.target.checked)} />
-            Keep learning while I talk
-          </label>
-          <p className="hint">
-            Listens to how you really talk, measures your voice again and slowly re-tunes the settings in the
-            background, changing them only in your pauses and only a little at a time. Nothing is kept unless you save.
-          </p>
-          {learningOn && learning && (
-            <>
-              <p className="hint" aria-live="polite">
-                Heard {Math.round(learning.speech_seconds ?? 0)} s of your speech. {learning.message}.
-                {learning.last_change ? ` Last change: ${learning.last_change}.` : ""}
-              </p>
-              <button className="secondary" onClick={saveLearning}>Save learned calibration</button>
-            </>
-          )}
-          {learnNote && <p className="hint">{learnNote}</p>}
-        </div>
-      )}
-      <LiveInsight running={stats.running} voiceName={voiceName} />
+      <footer className="statusbar">
+        {stats.running ? (
+          <>
+            <span>Latency <b>{(stats.latency_ms / 1000).toFixed(2)} s</b></span>
+            <span>Converting <b>{Math.round(stats.infer_ms)} / {QUALITY_LEVELS[quality]?.chunk_ms ?? 0} ms</b></span>
+            <span>Dropouts <b>{stats.underruns}</b></span>
+          </>
+        ) : (
+          <span>Live mode is off</span>
+        )}
+        {profile !== null && <span>Calibrated · {Math.round(profile.pitch_hz)} Hz · boost {profile.input_gain.toFixed(1)}x</span>}
+        <span className="right">Ctrl+Alt+V mutes and unmutes while live.</span>
+      </footer>
     </section>
   );
 }

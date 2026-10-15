@@ -278,7 +278,7 @@ describe("LivePanel", () => {
     expect(api.stop).toHaveBeenCalled();
     await userEvent.click(screen.getByRole("button", { name: "Mute" }));
     expect(api.mode).toHaveBeenCalledWith("muted");
-    expect(screen.getByText(/312 ms/)).toBeInTheDocument();
+    expect(screen.getByText(/0.31 s/)).toBeInTheDocument();
   });
 
   it("recommends a lower quality level when the GPU cannot keep up", async () => {

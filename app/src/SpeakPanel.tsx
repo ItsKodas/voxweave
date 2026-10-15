@@ -273,6 +273,8 @@ export function SpeakPanel({ tts, active, liveRunning, devicesVersion = 0, prefe
 
       {voices !== null && voices.length > 0 && !envBroken && !unavailable && (
         <>
+          <div className="card speak-main">
+          <h3 className="card-title">Speak as a voice</h3>
           <label>
             Voice
             <select value={voiceId} onChange={(e) => setVoiceId(e.target.value)} disabled={busy}>
@@ -286,7 +288,7 @@ export function SpeakPanel({ tts, active, liveRunning, devicesVersion = 0, prefe
           <label>
             Text to speak
             <textarea
-              rows={6}
+              rows={12}
               value={text}
               aria-describedby="speak-count"
               onChange={(e) => setText(e.target.value)}
@@ -299,6 +301,19 @@ export function SpeakPanel({ tts, active, liveRunning, devicesVersion = 0, prefe
             />
           </label>
           <p id="speak-count" className={tooLong ? "count over" : "count"}>{chars} of {MAX_TEXT} characters</p>
+          {voice === null && <p className="hint">No voice can be spoken yet. Record or import clips with transcripts in the Voices tab.</p>}
+          {liveRunning && <p className="warn">Stop live mode on the Live tab to speak.</p>}
+          <div className="actions">
+            {busy ? (
+              <button onClick={() => void stop()} disabled={stopping || status?.state === "stopping"}>Stop</button>
+            ) : (
+              <button onClick={() => void speak()} disabled={!canSpeak}>Speak</button>
+            )}
+          </div>
+          <div role="status" className="progress-line">{progress}</div>
+          </div>
+          <div className="card speak-side">
+          <h3 className="card-title">Sound</h3>
           <label>
             Speed / quality
             <select value={shownPreset} onChange={(e) => setPreset(e.target.value as TtsPreset)} disabled={busy}>
@@ -345,19 +360,12 @@ export function SpeakPanel({ tts, active, liveRunning, devicesVersion = 0, prefe
             <input type="checkbox" checked={save} disabled={busy} onChange={(e) => setSave(e.target.checked)} />
             Keep as a WAV file
           </label>
-
-          {voice === null && <p className="hint">No voice can be spoken yet. Record or import clips with transcripts in the Voices tab.</p>}
-          {liveRunning && <p className="hint">Stop live mode on the Live tab to speak.</p>}
-          <div className="actions">
-            {busy ? (
-              <button onClick={() => void stop()} disabled={stopping || status?.state === "stopping"}>Stop</button>
-            ) : (
-              <button onClick={() => void speak()} disabled={!canSpeak}>Speak</button>
-            )}
           </div>
         </>
       )}
-      <div role="status" className="progress-line">{progress}</div>
+      {!(voices !== null && voices.length > 0 && !envBroken && !unavailable) && (
+        <div role="status" className="progress-line">{progress}</div>
+      )}
     </section>
   );
 }

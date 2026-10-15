@@ -54,6 +54,7 @@ describe("VoiceStudio", () => {
     expect(screen.getByRole("heading", { name: "Alpha" })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "record saved" }));
     expect(screen.getByRole("button", { name: "clips v1" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("tab", { name: "Import" }));
     await userEvent.click(screen.getByRole("button", { name: "import done" }));
     expect(screen.getByRole("button", { name: "clips v2" })).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "clips v2" }));
@@ -70,7 +71,8 @@ describe("VoiceStudio", () => {
   it("shows the training panel for this voice and passes on a finished model", async () => {
     const onModelReady = vi.fn();
     const { rerender } = render(<VoiceStudio voice={VOICE} active onChanged={() => {}} onModelReady={onModelReady} />);
-    expect(screen.getByRole("heading", { name: "Train" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("tab", { name: "Train" }));
+    expect(screen.getByRole("tab", { name: "Train" })).toHaveAttribute("aria-selected", "true");
     await userEvent.click(screen.getByRole("button", { name: "train Alpha active" }));
     expect(onModelReady).toHaveBeenCalledTimes(1);
     rerender(<VoiceStudio voice={VOICE} active={false} onChanged={() => {}} onModelReady={onModelReady} />);
@@ -81,8 +83,22 @@ describe("VoiceStudio", () => {
     const onTrainingStarted = vi.fn();
     const onChanged = vi.fn();
     render(<VoiceStudio voice={VOICE} active onChanged={onChanged} onTrainingStarted={onTrainingStarted} />);
+    await userEvent.click(screen.getByRole("tab", { name: "Train" }));
     await userEvent.click(screen.getByRole("button", { name: "started Alpha" }));
     expect(onTrainingStarted).toHaveBeenCalledTimes(1);
     expect(onChanged).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("the voice's sections", () => {
+  it("opens on Record, keeps every section mounted, and shows the clips beside them", async () => {
+    render(<VoiceStudio voice={VOICE} active onChanged={() => {}} />);
+    expect(screen.getByRole("tab", { name: "Record" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("button", { name: "record saved" })).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "Clips" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("tab", { name: "Share" }));
+    expect(screen.queryByRole("button", { name: "record saved" })).not.toBeInTheDocument(); // hidden, not unmounted
+    expect(screen.getByText("record devices 0", { selector: "p" })).toBeInTheDocument();
   });
 });

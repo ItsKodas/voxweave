@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
-import { isActive, trainingApi } from "./trainingApi";
+import { isActive, trainingApi, TrainingStatus } from "./trainingApi";
 
 const RETRY_MS = 3000;
 
@@ -8,11 +8,15 @@ const RETRY_MS = 3000;
  * the Live tab still appears there. Asks the backend once at start (a job may already be running) and then only
  * while a job is running or cancelling, once a second; when nothing is training it does not poll. The returned
  * function asks again now: a panel calls it when it has started or resumed a job. `onDone` is called once each
- * time the job being followed ends as done. One request at a time.
+ * time the job being followed ends as done; `onStatus`, when given, with every answer (the title bar shows it).
+ * One request at a time.
  */
-export function useTrainingWatch(onDone: () => void, intervalMs = 1000): () => void {
+export function useTrainingWatch(onDone: () => void, intervalMs = 1000,
+                                 onStatus?: (status: TrainingStatus) => void): () => void {
   const done = useRef(onDone);
   done.current = onDone;
+  const status = useRef(onStatus);
+  status.current = onStatus;
   const kick = useRef<() => void>(() => {});
 
   useEffect(() => {
@@ -35,6 +39,7 @@ export function useTrainingWatch(onDone: () => void, intervalMs = 1000): () => v
         const latest = await trainingApi.status();
         if (stopped) return;
         answered = true;
+        status.current?.(latest);
         const active = isActive(latest);
         // The followed job finished, or another one is already running in its place: either way its outcome was
         // not seen running here any more, and a reload of the voice list is cheap.

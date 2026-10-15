@@ -77,42 +77,56 @@ export function VoicesPanel({ active, devicesVersion = 0, speechActive = false, 
 
   return (
     <section className="voices">
-      {error && (
-        <p role="alert" className="error">
-          {error} {voices === null && <button onClick={() => load()}>Retry</button>}
-        </p>
+      <div className="voices-col">
+        <div className="card">
+          <h3 className="card-title">Voices</h3>
+          {error && (
+            <p role="alert" className="error">
+              {error} {voices === null && <button onClick={() => load()}>Retry</button>}
+            </p>
+          )}
+          {speechActive && <p className="warn">Speech is playing. Stop it on the Speak tab to record or delete a voice.</p>}
+          <VoicePackDrop active={active} onImported={(id) => { void load(id); onModelReady?.(); }} />
+          <form
+            className="new-voice"
+            onSubmit={(e) => {
+              e.preventDefault();
+              create();
+            }}
+          >
+            <label>
+              New voice name
+              <input value={name} maxLength={60} onChange={(e) => setName(e.target.value)} />
+            </label>
+            <button type="submit" disabled={busy || name.trim() === ""}>Create voice</button>
+          </form>
+        </div>
+        <div className="card grow">
+          {voices !== null && voices.length === 0 && <p className="hint">Create a voice to start recording.</p>}
+          {voices !== null && voices.length > 0 && (
+            <ul aria-label="Voices" className="voice-list">
+              {voices.map((v) => (
+                <li key={v.id} className={v.id === selected ? "selected" : ""}>
+                  <button className="link" aria-pressed={v.id === selected} onClick={() => setSelected(v.id)}>
+                    <span className="avatar" aria-hidden="true">{v.name.slice(0, 1).toUpperCase()}</span>
+                    <span className="who">
+                      <strong>{v.name}</strong>
+                      <span>{v.minutes.toFixed(1)} min, {v.clips} clips</span>
+                    </span>
+                  </button>
+                  <button className="danger" disabled={speechActive} aria-label={`Delete voice ${v.name}`} onClick={() => remove(v)}>Delete</button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="hint">Got a voice from another computer? Drop its <code>.voxweave</code> file anywhere on this window.</p>
+        </div>
+      </div>
+      {current ? (
+        <VoiceStudio key={current.id} voice={current} active={active} devicesVersion={devicesVersion} onChanged={() => load()} onModelReady={modelReady} onTrainingStarted={onTrainingStarted} />
+      ) : (
+        <div className="card studio-empty"><p className="hint">Create or choose a voice to record, import, train and share it.</p></div>
       )}
-      {speechActive && <p className="hint">Speech is playing. Stop it on the Speak tab to record or delete a voice.</p>}
-      <VoicePackDrop active={active} onImported={(id) => { void load(id); onModelReady?.(); }} />
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          create();
-        }}
-      >
-        <label>
-          New voice name
-          <input value={name} maxLength={60} onChange={(e) => setName(e.target.value)} />
-        </label>
-        <button type="submit" disabled={busy || name.trim() === ""}>Create voice</button>
-      </form>
-
-      {voices !== null && voices.length === 0 && <p className="hint">Create a voice to start recording.</p>}
-      <p className="hint">Got a voice from another computer? Drop its <code>.voxweave</code> file anywhere on this window.</p>
-      {voices !== null && voices.length > 0 && (
-        <ul aria-label="Voices" className="voice-list">
-          {voices.map((v) => (
-            <li key={v.id} className={v.id === selected ? "selected" : ""}>
-              <button className="link" aria-pressed={v.id === selected} onClick={() => setSelected(v.id)}>
-                <strong>{v.name}</strong> <span>{v.minutes.toFixed(1)} min, {v.clips} clips</span>
-              </button>
-              <button className="danger" disabled={speechActive} aria-label={`Delete voice ${v.name}`} onClick={() => remove(v)}>Delete</button>
-            </li>
-          ))}
-        </ul>
-      )}
-      {current && <VoiceStudio key={current.id} voice={current} active={active} devicesVersion={devicesVersion} onChanged={() => load()} onModelReady={modelReady} onTrainingStarted={onTrainingStarted} />}
     </section>
   );
 }

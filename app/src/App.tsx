@@ -6,6 +6,8 @@ import { LivePanel } from "./LivePanel";
 import { SetupCheck } from "./SetupCheck";
 import { SetupState } from "./setupApi";
 import { SpeakPanel } from "./SpeakPanel";
+import { TitleBar } from "./TitleBar";
+import { isActive, TrainingStatus } from "./trainingApi";
 import { isBusy } from "./ttsApi";
 import { useLiveShortcuts } from "./useLiveShortcuts";
 import { useStats } from "./useStats";
@@ -84,7 +86,8 @@ function Main() {
   const [tab, setTab] = useState<"live" | "voices" | "speak">("live");
   const reloadLiveVoices = useCallback(() => setVoicesVersion((v) => v + 1), []);
   // Followed here, not in a tab: a model that finishes while the Live tab is shown must still appear there.
-  const trainingStarted = useTrainingWatch(reloadLiveVoices);
+  const [training, setTraining] = useState<TrainingStatus | null>(null);
+  const trainingStarted = useTrainingWatch(reloadLiveVoices, 1000, setTraining);
 
   // Followed here, not in the Speak tab: Live and Voices must know while speech is playing and their routes would refuse.
   const tts = useTtsStatus(tab === "speak");
@@ -97,13 +100,22 @@ function Main() {
     setTab("live");
   };
 
+  const status = stats.running ? (
+    <span className="pill live">Live · {(stats.latency_ms / 1000).toFixed(1)} s behind</span>
+  ) : training !== null && isActive(training) ? (
+    <span className="pill busy">Training · {Math.round(training.percent ?? 0)}%</span>
+  ) : null;
+
   return (
     <>
-      <div role="tablist" className="tabs">
-        <button role="tab" aria-selected={tab === "live"} onClick={showLive}>Live</button>
-        <button role="tab" aria-selected={tab === "voices"} onClick={() => setTab("voices")}>Voices</button>
-        <button role="tab" aria-selected={tab === "speak"} onClick={() => setTab("speak")}>Speak</button>
-      </div>
+      <TitleBar status={status}>
+        <div role="tablist" className="tabs">
+          <button role="tab" aria-selected={tab === "live"} onClick={showLive}>Live</button>
+          <button role="tab" aria-selected={tab === "voices"} onClick={() => setTab("voices")}>Voices</button>
+          <button role="tab" aria-selected={tab === "speak"} onClick={() => setTab("speak")}>Speak</button>
+        </div>
+      </TitleBar>
+      <div className="content">
       {/* All three stay mounted so switching tabs never resets a form or interrupts a session. */}
       <div role="tabpanel" hidden={tab !== "live"}>
         <SetupCheck refreshKey={devicesVersion} />
@@ -115,6 +127,17 @@ function Main() {
       <div role="tabpanel" hidden={tab !== "speak"}>
         <SpeakPanel tts={tts} active={tab === "speak"} liveRunning={stats.running} devicesVersion={devicesVersion} preferredMonitor={liveMonitor} preferredMic={liveMic} />
       </div>
+      </div>
+    </>
+  );
+}
+
+/** The window before the voice engine answers: the title bar, and the message below it. */
+function Shell({ children }: { children: React.ReactNode }) {
+  return (
+    <>
+      <TitleBar />
+      <div className="content">{children}</div>
     </>
   );
 }
@@ -122,8 +145,12 @@ function Main() {
 function Engine({ setup, onRepair }: { setup: SetupState | null; onRepair: () => void }) {
   const { ready, failed } = useBackendReady();
   if (ready) return <Main />;
-  if (!failed) return <p>Starting the voice engine…</p>;
-  return setup?.mode === "installed" ? <InstalledStartFailure setup={setup} onRepair={onRepair} /> : <StartFailure />;
+  if (!failed) return <Shell><p className="starting">Starting the voice engine…</p></Shell>;
+  return (
+    <Shell>
+      {setup?.mode === "installed" ? <InstalledStartFailure setup={setup} onRepair={onRepair} /> : <StartFailure />}
+    </Shell>
+  );
 }
 
 export default function App() {
@@ -132,10 +159,8 @@ export default function App() {
   // starts as it always did.
   const settingUp = setup !== null && setup.mode === "installed" && setup.status !== "ready";
   return (
-    <main>
-      <h1>Voxweave</h1>
-      {settingUp ? <FirstRun setup={setup} onRetry={retry} /> : <Engine setup={setup} onRepair={retry} />}
-      <footer>Ctrl+Alt+V mutes and unmutes while live.</footer>
-    </main>
+    <div className="app">
+      {settingUp ? <Shell><FirstRun setup={setup} onRetry={retry} /></Shell> : <Engine setup={setup} onRepair={retry} />}
+    </div>
   );
 }
