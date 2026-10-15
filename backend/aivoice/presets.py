@@ -28,6 +28,14 @@ class LiveParams:
     # The calibration's input boost is for the model; with this on, the converted voice comes out as loud as the
     # speaker's own voice went in, instead of boosted.
     match_input_level: bool = True
+    # Sound effects on the converted voice (aivoice.effects), all off at 0: lo-fi (0 to 1), static (0 to 1),
+    # reverb (0 to 1) in a room from small to large (0 to 1), echo (0 to 1) after a delay in milliseconds.
+    fx_lofi: float = 0.0
+    fx_static: float = 0.0
+    fx_reverb: float = 0.0
+    fx_room: float = 0.5
+    fx_echo: float = 0.0
+    fx_echo_ms: float = 250.0
 
 
 # Every preset uses RMVPE, the neural pitch tracker the voices were trained with (it falls back to "dio" when its
@@ -70,6 +78,11 @@ def _validate(p: LiveParams) -> None:
     for name in ("pitch_cleanup", "creak_repair", "join_smoothing", "match_input_level"):
         if not isinstance(getattr(p, name), bool):
             raise ValueError(f"{name} must be true or false")
+    for name in ("fx_lofi", "fx_static", "fx_reverb", "fx_room", "fx_echo"):
+        if not 0.0 <= getattr(p, name) <= 1.0:
+            raise ValueError(f"{name} must be between 0 and 1")
+    if not 60.0 <= p.fx_echo_ms <= 1000.0:
+        raise ValueError("fx_echo_ms must be between 60 and 1000")
     if not 0.0 <= p.natural_variation_st <= 0.6:
         raise ValueError("natural_variation_st must be between 0 and 0.6")
     if not 0.0 <= p.background_cut_db <= 60.0:
@@ -82,7 +95,8 @@ def _validate(p: LiveParams) -> None:
 
 # What may change while live mode runs: everything but the timing, which sets the chunk size of the session.
 LIVE_CHANGEABLE = ("index_rate", "f0_method", "protect", "volume_follow", "background_cut_db", "natural_variation_st",
-                   "pitch_cleanup", "creak_repair", "join_smoothing", "match_input_level")
+                   "pitch_cleanup", "creak_repair", "join_smoothing", "match_input_level",
+                   "fx_lofi", "fx_static", "fx_reverb", "fx_room", "fx_echo", "fx_echo_ms")
 
 
 def changed_live(params: LiveParams, changes: dict) -> LiveParams:

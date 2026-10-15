@@ -24,6 +24,13 @@ export type Params = {
   creak_repair?: boolean;
   join_smoothing?: boolean;
   match_input_level?: boolean;
+  // Sound effects on the converted voice (backend/aivoice/effects.py), all off at 0.
+  fx_lofi?: number;
+  fx_static?: number;
+  fx_reverb?: number;
+  fx_room?: number;
+  fx_echo?: number;
+  fx_echo_ms?: number;
 };
 export type Check = { id: string; ok: boolean; message: string };
 export type Mode = "converted" | "muted";

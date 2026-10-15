@@ -872,3 +872,34 @@ describe("previewing a voice", () => {
     expect(screen.queryByRole("button", { name: /Play my calibration/ })).not.toBeInTheDocument();
   });
 });
+
+describe("effects", () => {
+  beforeEach(() => localStorage.clear());
+
+  it("has a tab of effects that are sent at start and remembered", async () => {
+    const { unmount } = render(<LivePanel stats={IDLE} />);
+    const start = await ready();
+    await userEvent.click(screen.getByRole("tab", { name: "Effects" }));
+    fireEvent.change(screen.getByLabelText(/^Echo:/), { target: { value: "0.4" } });
+    fireEvent.change(screen.getByLabelText(/^Reverb:/), { target: { value: "0.3" } });
+    await userEvent.click(start);
+    expect(vi.mocked(api.start).mock.calls[0][0].overrides).toMatchObject({ fx_echo: 0.4, fx_reverb: 0.3 });
+    unmount();
+    render(<LivePanel stats={IDLE} />);
+    await ready();
+    expect(screen.getByLabelText(/^Echo:/)).toHaveValue("0.4");
+  });
+
+  it("change while live and have presets and a way to turn them all off", async () => {
+    render(<LivePanel stats={{ ...IDLE, running: true, mode: "converted" }} />);
+    await screen.findByRole("button", { name: "Stop" });
+    await userEvent.click(screen.getByRole("tab", { name: "Effects" }));
+    fireEvent.change(screen.getByLabelText(/^Static:/), { target: { value: "0.5" } });
+    expect(api.settings).toHaveBeenLastCalledWith({ overrides: { fx_static: 0.5 } });
+    await userEvent.click(screen.getByRole("button", { name: "Radio" }));
+    expect(vi.mocked(api.settings).mock.calls[vi.mocked(api.settings).mock.calls.length - 1][0].overrides).toMatchObject({ fx_lofi: expect.any(Number), fx_static: expect.any(Number) });
+    expect(Number((screen.getByLabelText(/^Lo-fi:/) as HTMLInputElement).value)).toBeGreaterThan(0);
+    await userEvent.click(screen.getByRole("button", { name: "Turn all off" }));
+    expect(vi.mocked(api.settings).mock.calls[vi.mocked(api.settings).mock.calls.length - 1][0].overrides).toMatchObject({ fx_lofi: 0, fx_static: 0, fx_reverb: 0, fx_echo: 0 });
+  });
+});

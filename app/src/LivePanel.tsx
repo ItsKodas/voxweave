@@ -117,6 +117,29 @@ function validAdvanced(raw: unknown): Advanced | undefined {
   return out as Advanced;
 }
 
+/** The sound effects, off by default, remembered on this computer for every voice (a style, not a voice's tuning). */
+const EFFECT_DEFAULTS = { fx_lofi: 0, fx_static: 0, fx_reverb: 0, fx_room: 0.5, fx_echo: 0, fx_echo_ms: 250 };
+type Effects = typeof EFFECT_DEFAULTS;
+const EFFECT_PRESETS: { name: string; values: Partial<Effects> }[] = [
+  { name: "Radio", values: { fx_lofi: 0.65, fx_static: 0.35, fx_reverb: 0, fx_echo: 0 } },
+  { name: "Phone", values: { fx_lofi: 0.85, fx_static: 0.1, fx_reverb: 0, fx_echo: 0 } },
+  { name: "Hall", values: { fx_lofi: 0, fx_static: 0, fx_reverb: 0.45, fx_room: 0.8, fx_echo: 0 } },
+  { name: "Cave", values: { fx_lofi: 0, fx_static: 0, fx_reverb: 0.6, fx_room: 1, fx_echo: 0.35, fx_echo_ms: 420 } },
+];
+const EFFECTS_KEY = "effects";
+function storedEffects(): Effects {
+  try {
+    const raw = JSON.parse(localStorage.getItem(EFFECTS_KEY) ?? "{}");
+    const out = { ...EFFECT_DEFAULTS };
+    for (const key of Object.keys(EFFECT_DEFAULTS) as (keyof Effects)[]) {
+      if (typeof raw[key] === "number") out[key] = raw[key];
+    }
+    return out;
+  } catch {
+    return { ...EFFECT_DEFAULTS };
+  }
+}
+
 /** Settings saved for a voice with "Save for this voice": put back whenever that voice is chosen. */
 type VoiceSettings = { pitch: number; quality: number; likeness: number; advanced?: Advanced };
 const SETTINGS_KEY = (voiceId: string) => `voice-settings:${voiceId}`;
@@ -187,7 +210,7 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
   voiceRef.current = voice;
   const [preset] = useState("balanced");
   const [quality, setQuality] = useState(storedQuality);
-  const [overrides, setOverrides] = useState<Partial<Params>>({});
+  const [overrides, setOverrides] = useState<Partial<Params>>(() => storedEffects());
   const [pitch, setPitch] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -204,7 +227,7 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
   // Live learning: re-measures the voice and re-tunes slowly while live mode runs (backend/aivoice/learner.py).
   const [learning, setLearning] = useState<Learning | null>(null);
   const [learnNote, setLearnNote] = useState<string | null>(null);
-  const [sidePanel, setSidePanel] = useState<"sound" | "voice">("sound");
+  const [sidePanel, setSidePanel] = useState<"sound" | "voice" | "effects">("sound");
   // The calibration reading played back in the chosen voice: "loading" while it converts, then "playing".
   const [preview, setPreview] = useState<"loading" | "playing" | null>(null);
   const previewAudio = useRef<HTMLAudioElement | null>(null);
@@ -543,7 +566,11 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
   /** Only values that differ from the chosen preset are sent as overrides. */
   const changedOverrides = (): Partial<Params> | null => {
     const diff = Object.fromEntries(
-      Object.entries(overrides).filter(([k, v]) => !base || base[k as keyof Params] !== v),
+      Object.entries(overrides).filter(([k, v]) => {
+        // Effects the preset does not mention are unchanged at their defaults.
+        const preset = base?.[k as keyof Params] ?? (EFFECT_DEFAULTS as Record<string, unknown>)[k];
+        return preset === undefined || preset !== v;
+      }),
     ) as Partial<Params>;
     return Object.keys(diff).length ? diff : null;
   };
@@ -568,7 +595,7 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
     setError(null);
     setPreview("loading");
     try {
-      const url = await calibrationApi.preview({ voice_id: voice, quality, pitch_shift: pitch, likeness, advanced });
+      const url = await calibrationApi.preview({ voice_id: voice, quality, pitch_shift: pitch, likeness, advanced: { ...advanced, ...effects } });
       const audio = new Audio(url);
       const done = () => {
         URL.revokeObjectURL(url);
@@ -584,6 +611,19 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
       setPreview(null);
       setError((e as Error).message);
     }
+  };
+
+  const effects = Object.fromEntries((Object.keys(EFFECT_DEFAULTS) as (keyof Effects)[]).map(
+    (k) => [k, Number(overrides[k] ?? EFFECT_DEFAULTS[k])])) as Effects;
+  /** Effects change at once, also while live (the backend applies them to the next chunk). */
+  const changeEffects = (patch: Partial<Effects>) => {
+    setOverrides((o) => ({ ...o, ...patch }));
+    try {
+      localStorage.setItem(EFFECTS_KEY, JSON.stringify({ ...effects, ...patch }));
+    } catch {
+      // remembered for this session only
+    }
+    if (stats.running) api.settings({ overrides: patch }).catch(reportFailure);
   };
 
   const changePitch = (semitones: number) => {
@@ -846,7 +886,48 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
           <div className="card grow">
             <div role="tablist" aria-label="Settings" className="panel-tabs">
               <button role="tab" aria-selected={sidePanel === "sound"} onClick={() => setSidePanel("sound")}>Sound</button>
+              <button role="tab" aria-selected={sidePanel === "effects"} onClick={() => setSidePanel("effects")}>Effects</button>
               <button role="tab" aria-selected={sidePanel === "voice"} onClick={() => setSidePanel("voice")}>My voice</button>
+            </div>
+            <div className="effects" hidden={sidePanel !== "effects"}>
+              <div className="preset-row">
+                {EFFECT_PRESETS.map((p) => (
+                  <button key={p.name} className="secondary" onClick={() => changeEffects(p.values)}>{p.name}</button>
+                ))}
+              </div>
+              <label title="Narrower sound, fewer bits and a lower sample rate: a radio, a phone, an old recording.">
+                Lo-fi: {Math.round(effects.fx_lofi * 100)}%
+                <input type="range" min={0} max={1} step={0.05} value={effects.fx_lofi}
+                  onChange={(e) => changeEffects({ fx_lofi: Number(e.target.value) })} />
+              </label>
+              <label title="Hiss and crackle under the voice.">
+                Static: {Math.round(effects.fx_static * 100)}%
+                <input type="range" min={0} max={1} step={0.05} value={effects.fx_static}
+                  onChange={(e) => changeEffects({ fx_static: Number(e.target.value) })} />
+              </label>
+              <label>
+                Reverb: {Math.round(effects.fx_reverb * 100)}%
+                <input type="range" min={0} max={1} step={0.05} value={effects.fx_reverb}
+                  onChange={(e) => changeEffects({ fx_reverb: Number(e.target.value) })} />
+              </label>
+              <label>
+                Room size: {Math.round(effects.fx_room * 100)}%
+                <input type="range" min={0} max={1} step={0.05} value={effects.fx_room} disabled={effects.fx_reverb === 0}
+                  onChange={(e) => changeEffects({ fx_room: Number(e.target.value) })} />
+              </label>
+              <label>
+                Echo: {Math.round(effects.fx_echo * 100)}%
+                <input type="range" min={0} max={1} step={0.05} value={effects.fx_echo}
+                  onChange={(e) => changeEffects({ fx_echo: Number(e.target.value) })} />
+              </label>
+              <label>
+                Echo delay: {Math.round(effects.fx_echo_ms)} ms
+                <input type="range" min={60} max={1000} step={10} value={effects.fx_echo_ms} disabled={effects.fx_echo === 0}
+                  onChange={(e) => changeEffects({ fx_echo_ms: Number(e.target.value) })} />
+              </label>
+              <button className="secondary"
+                onClick={() => changeEffects({ fx_lofi: 0, fx_static: 0, fx_reverb: 0, fx_echo: 0 })}>Turn all off</button>
+              <p className="hint">Effects go on the converted voice, after everything else. The preview plays with them.</p>
             </div>
             <div className="sound" hidden={sidePanel !== "sound"}>
               <label>

@@ -55,6 +55,9 @@ class StreamProcessor:
         t = np.linspace(0.0, 1.0, self.crossfade, endpoint=False, dtype=np.float32)
         self._fade_in = np.sin(0.5 * np.pi * t) ** 2
         self._fade_out = 1.0 - self._fade_in
+        from aivoice.effects import Effects
+
+        self.effects = Effects(sample_rate)  # lo-fi, static, reverb and echo on what is played
 
     def _silence(self) -> np.ndarray:
         self._tail[:] = 0.0
@@ -100,4 +103,4 @@ class StreamProcessor:
         head = segment[: self.crossfade] * self._fade_in + self._tail * self._fade_out
         emitted = np.concatenate([head, segment[self.crossfade : self.chunk]])
         self._tail = segment[self.chunk :].copy()
-        return np.clip(emitted, -1.0, 1.0)
+        return self.effects.process(np.clip(emitted, -1.0, 1.0), self.params)
