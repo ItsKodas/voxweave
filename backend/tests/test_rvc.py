@@ -238,3 +238,37 @@ def test_each_conversion_leaves_what_it_did_for_the_newest_chunk():
     pause = np.concatenate([sine(220, SR // 4), np.zeros(SR // 2, np.float32)])  # speech, then a long pause
     engine.convert(pause, SR, 12.0, PARAMS)
     assert engine.insight["number"] == 2 and all(engine.insight["gated"])  # background: turned down
+
+
+def test_each_extra_can_be_switched_off(monkeypatch):
+    from dataclasses import replace
+
+    import aivoice.engines.rvc as rvc
+
+    called = []
+    monkeypatch.setattr(rvc, "repair_creak", lambda f0, v: called.append("creak") or f0)
+    monkeypatch.setattr(rvc, "fix_octave_errors", lambda f0: called.append("octave") or f0)
+    monkeypatch.setattr(rvc, "smooth_pitch", lambda f0: called.append("smooth") or f0)
+    monkeypatch.setattr(rvc, "natural_variation", lambda f0, start, amount_st: called.append(("waver", amount_st)) or f0)
+    engine, _ = make()
+    engine.convert(sine(220), SR, 0.0, PARAMS)
+    assert called == ["creak", "octave", "smooth", ("waver", 0.25)]
+    called.clear()
+    off = replace(PARAMS, creak_repair=False, pitch_cleanup=False, natural_variation_st=0.0)
+    engine.convert(sine(220), SR, 0.0, off)
+    assert called == [("waver", 0.0)]
+
+
+def test_join_smoothing_can_be_switched_off():
+    from dataclasses import replace
+
+    engine, net = make()
+    params = replace(PARAMS, join_smoothing=False)
+    n = SR * (PARAMS.chunk_ms + PARAMS.crossfade_ms + PARAMS.context_ms) // 1000
+    engine.noise_position = 0
+    engine.convert(sine(200, n), SR, 0.0, params)
+    engine.noise_position = SR * PARAMS.chunk_ms // 1000
+    engine.convert(sine(240, n), SR, 0.0, params)
+    second = net.feeds[1]["pitchf"][0]
+    head = len(second) - PARAMS.chunk_ms // 10 - round((PARAMS.crossfade_ms + 12) / 10)
+    assert second[head] == pytest.approx(240.0, rel=0.03)  # its own pitch, not the last window's

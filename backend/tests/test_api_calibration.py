@@ -174,7 +174,7 @@ class FakeTuner:
         self.active = active
         self.started = []
 
-    def start(self, voice_id, quality, pitch_shift, likeness):
+    def start(self, voice_id, quality, pitch_shift, likeness, advanced=None):
         self.started.append((voice_id, quality, pitch_shift, likeness))
         self.active = True
 

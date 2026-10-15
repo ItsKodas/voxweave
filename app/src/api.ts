@@ -13,8 +13,16 @@ export type Params = {
   chunk_ms: number;
   crossfade_ms: number;
   context_ms: number;
-  f0_method: "dio" | "harvest";
+  f0_method: "dio" | "harvest" | "rmvpe";
   index_rate: number;
+  // The voice-quality extras (backend/aivoice/presets.py), all optional so older backends still fit.
+  protect?: number;
+  volume_follow?: number;
+  background_cut_db?: number;
+  natural_variation_st?: number;
+  pitch_cleanup?: boolean;
+  creak_repair?: boolean;
+  join_smoothing?: boolean;
 };
 export type Check = { id: string; ok: boolean; message: string };
 export type Mode = "converted" | "muted";

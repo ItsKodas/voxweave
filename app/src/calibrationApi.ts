@@ -32,7 +32,10 @@ export type CalibrationStatus = {
 export type SpeakerModelInfo = { ready: boolean; size_mb: number; source: string; licence: string };
 
 /** One setting deep calibration tried: how much it sounded like the voice, and how many words stayed clear. */
-export type TunedSetting = { pitch_shift: number; likeness: number; similarity: number; clarity: number };
+export type TunedSetting = {
+  pitch_shift: number; likeness: number; similarity: number; clarity: number; quality: number;
+  advanced?: Record<string, number | string | boolean>;
+};
 export type TuneResult = TunedSetting & {
   voice_id: string; quality: number; baseline: TunedSetting; tried: TunedSetting[]; created: number;
 };
@@ -58,7 +61,7 @@ export const calibrationApi = {
   suggestion: (voice: string) => call<PitchSuggestion>("GET", `/calibration/suggestion?voice=${encodeURIComponent(voice)}`),
   speakerModel: () => call<SpeakerModelInfo>("GET", "/calibration/speaker-model"),
   downloadSpeakerModel: () => call<SpeakerModelInfo>("POST", "/calibration/speaker-model/download"),
-  tune: (body: { voice_id: string; quality: number; pitch_shift: number; likeness: number }) =>
+  tune: (body: { voice_id: string; quality: number; pitch_shift: number; likeness: number; advanced?: Record<string, unknown> }) =>
     call<TuneStatus>("POST", "/calibration/tune", body),
   tuneStatus: () => call<TuneStatus>("GET", "/calibration/tune/status"),
   tuneCancel: () => call<TuneStatus>("POST", "/calibration/tune/cancel"),

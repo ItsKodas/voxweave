@@ -54,21 +54,25 @@ class FakeEngine:
         self.last = None
 
     def convert(self, audio, sample_rate, pitch_shift, params):
-        self.last = (pitch_shift, params.index_rate)
+        from aivoice.presets import QUALITY_LEVELS
+
+        quality = next(i for i, q in enumerate(QUALITY_LEVELS) if q["chunk_ms"] == params.chunk_ms)
+        self.last = (pitch_shift, params.index_rate, quality)
+        self.params = params
         self.calls.append(self.last)
         return np.asarray(audio, dtype=np.float32) * 0.5
 
 
 class FakeSpeaker:
-    """Sounds most like the voice one semitone above the suggestion with likeness 0.75."""
-    def __init__(self, engine, best=(8, 0.75)):
+    """Sounds most like the voice one semitone above the suggestion, with likeness 0.75, at quality level 4."""
+    def __init__(self, engine, best=(8, 0.75, 3)):
         self.engine, self.best = engine, best
 
     def embedding(self, audio, sample_rate):
         if self.engine.last is None:  # the voice's own clips
             return np.array([1.0, 0.0])
-        shift, rate = self.engine.last
-        miss = abs(shift - self.best[0]) * 0.1 + abs(rate - self.best[1]) * 0.5
+        shift, rate, quality = self.engine.last
+        miss = abs(shift - self.best[0]) * 0.1 + abs(rate - self.best[1]) * 0.5 + abs(quality - self.best[2]) * 0.15
         return np.array([1.0, miss])
 
 
@@ -136,12 +140,20 @@ def test_the_tuner_finds_the_pitch_and_likeness_that_sound_most_like_the_voice(t
     status = tuner.status()
     assert status["active"] is False and status["error"] is None
     result = status["result"]
-    assert (result["pitch_shift"], result["likeness"]) == (8, 0.75)
+    assert (result["pitch_shift"], result["likeness"], result["quality"]) == (8, 0.75, 3)
     assert result["similarity"] > result["baseline"]["similarity"]
     assert result["clarity"] == pytest.approx(1.0)
     assert {(t["pitch_shift"], t["likeness"]) for t in result["tried"]} >= {(5, 0.3), (9, 0.3), (8, 1.0)}
+    assert {t["quality"] for t in result["tried"]} == set(range(7))  # every quality level was tried
+    # every advanced setting was tried on and off, and kept as it was since none made a difference
+    assert result["advanced"] == {"f0_method": "rmvpe", "protect": 0.33, "volume_follow": 0.75, "natural_variation_st": 0.25,
+                                  "pitch_cleanup": True, "creak_repair": True, "join_smoothing": True,
+                                  "background_cut_db": 30.0}
+    tried_adv = [t["advanced"] for t in result["tried"]]
+    assert any(a["f0_method"] == "dio" for a in tried_adv) and any(a["creak_repair"] is False for a in tried_adv)
+    assert any(a["background_cut_db"] == 0.0 for a in tried_adv) and any(a["protect"] == 0.5 for a in tried_adv)
     saved = json.loads((tmp_path / "calibration" / "tuned" / "woman.json").read_text(encoding="utf-8"))
-    assert (saved["pitch_shift"], saved["likeness"]) == (8, 0.75)
+    assert (saved["pitch_shift"], saved["likeness"], saved["quality"]) == (8, 0.75, 3)
     assert status["step"] == status["steps"]
 
 
@@ -178,3 +190,41 @@ def test_the_tuner_refuses_an_unknown_voice_and_a_second_run(tmp_path):
     tuner.wait(30)
     status = tuner.status()
     assert status["active"] is False and status["result"] is None and "stopped" in status["message"].lower()
+
+
+def test_among_quality_levels_that_sound_as_alike_the_faster_one_wins():
+    baseline = Candidate(13, 0.5, 0.80, 0.95, quality=1)
+    tried = [baseline, Candidate(13, 0.5, 0.85, 0.95, quality=3), Candidate(13, 0.5, 0.855, 0.95, quality=6)]
+    assert choose(tried, baseline, prefer_faster=True) == tried[1]  # level 7 is no better than level 4 and slower
+    assert choose(tried, baseline) == tried[2]
+
+
+def test_a_slower_quality_that_is_only_as_good_does_not_replace_the_current_one():
+    baseline = Candidate(13, 0.5, 0.85, 0.95, quality=3)
+    tried = [baseline, Candidate(13, 0.5, 0.852, 0.95, quality=6)]
+    assert choose(tried, baseline, prefer_faster=True) == baseline
+
+
+def test_an_advanced_setting_that_clearly_sounds_more_alike_is_chosen(tmp_path):
+    tuner, engine = make(tmp_path)
+
+    class LikesProtection(FakeSpeaker):
+        def embedding(self, audio, sample_rate):
+            emb = super().embedding(audio, sample_rate)
+            if self.engine.last is not None and self.engine.params.protect != 0.5:
+                emb = emb + np.array([0.0, 0.3])
+            return emb
+
+    tuner._speaker_factory = lambda: LikesProtection(engine)
+    tuner.start("woman", quality=1, pitch_shift=7, likeness=0.3, advanced={"protect": 0.33})
+    tuner.wait(60)
+    result = tuner.status()["result"]
+    assert result["advanced"]["protect"] == 0.5
+
+
+def test_the_tuner_checks_the_advanced_settings_it_starts_from(tmp_path):
+    tuner, _ = make(tmp_path)
+    with pytest.raises(ValueError, match="Unknown settings"):
+        tuner.start("woman", quality=1, pitch_shift=7, likeness=0.3, advanced={"nonsense": 1})
+    with pytest.raises(ValueError, match="protect"):
+        tuner.start("woman", quality=1, pitch_shift=7, likeness=0.3, advanced={"protect": 2.0})

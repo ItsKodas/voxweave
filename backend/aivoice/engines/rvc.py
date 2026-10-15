@@ -163,7 +163,7 @@ class RvcEngine:
     def _join_previous(self, pitchf: np.ndarray, n: int, sample_rate: int, params: LiveParams) -> np.ndarray:
         """In live mode, the pitch where this window's played audio begins starts from what the last window used
         there (see blend_join). Text to speech, with no position in time, is left as it is."""
-        if self.noise_position is None:
+        if self.noise_position is None or not params.join_smoothing:
             self._last_pitch = None
             return pitchf
         rate = len(pitchf) * sample_rate / n  # frames a second
@@ -186,11 +186,14 @@ class RvcEngine:
         phone = np.repeat(feats, 2, axis=0)[None].astype(np.float32)
         frames = phone.shape[1]
         heard = extract_f0(wav16, params.f0_method, frames, rmvpe=self._rmvpe)
-        pitchf = repair_creak(fill_gaps(heard), voice_like_frames(wav16, frames))
-        pitchf = smooth_pitch(fix_octave_errors(pitchf))
+        pitchf = fill_gaps(heard)
+        if params.creak_repair:
+            pitchf = repair_creak(pitchf, voice_like_frames(wav16, frames))
+        if params.pitch_cleanup:
+            pitchf = smooth_pitch(fix_octave_errors(pitchf))
         rate = frames * sample_rate / n  # frames a second
         start = 0 if self.noise_position is None else round(self.noise_position * rate / sample_rate)
-        pitchf = natural_variation(pitchf, start)
+        pitchf = natural_variation(pitchf, start, amount_st=params.natural_variation_st)
         cleaned = pitchf
         voiced = pitchf > 0
         pitchf = shift_f0(pitchf, pitch_shift)

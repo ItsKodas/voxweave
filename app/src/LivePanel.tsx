@@ -95,8 +95,29 @@ function storeLikeness(voiceId: string, value: number | null) {
   }
 }
 
+/**
+ * The advanced settings saved with a voice and tried by Find best settings, with the backend's defaults (used when
+ * the preset does not say).
+ */
+const ADVANCED_DEFAULTS = {
+  f0_method: "rmvpe", protect: 0.33, volume_follow: 0.75, background_cut_db: 30, natural_variation_st: 0.25,
+  pitch_cleanup: true, creak_repair: true, join_smoothing: true,
+} as const;
+type AdvancedKey = keyof typeof ADVANCED_DEFAULTS;
+const ADVANCED_KEYS = Object.keys(ADVANCED_DEFAULTS) as AdvancedKey[];
+type Advanced = Partial<Pick<Params, AdvancedKey>>;
+function validAdvanced(raw: unknown): Advanced | undefined {
+  if (raw === null || typeof raw !== "object") return undefined;
+  const out: Record<string, unknown> = {};
+  for (const key of ADVANCED_KEYS) {
+    const v = (raw as Record<string, unknown>)[key];
+    if (v !== undefined && typeof v === typeof ADVANCED_DEFAULTS[key]) out[key] = v;
+  }
+  return out as Advanced;
+}
+
 /** Settings saved for a voice with "Save for this voice": put back whenever that voice is chosen. */
-type VoiceSettings = { pitch: number; quality: number; likeness: number };
+type VoiceSettings = { pitch: number; quality: number; likeness: number; advanced?: Advanced };
 const SETTINGS_KEY = (voiceId: string) => `voice-settings:${voiceId}`;
 function savedSettings(voiceId: string): VoiceSettings | null {
   try {
@@ -105,7 +126,7 @@ function savedSettings(voiceId: string): VoiceSettings | null {
     if (s === null || typeof s !== "object") return null;
     const ok = Number.isInteger(s.pitch) && s.pitch >= -24 && s.pitch <= 24 && isQuality(s.quality)
       && typeof s.likeness === "number" && s.likeness >= 0 && s.likeness <= 1;
-    return ok ? { pitch: s.pitch, quality: s.quality, likeness: s.likeness } : null;
+    return ok ? { pitch: s.pitch, quality: s.quality, likeness: s.likeness, advanced: validAdvanced(s.advanced) } : null;
   } catch {
     return null;
   }
@@ -117,6 +138,13 @@ function storeSettings(voiceId: string, settings: VoiceSettings | null) {
   } catch {
     // remembered for this session only
   }
+}
+
+/** The overrides with no advanced settings: another voice's saved ones are not carried over. */
+function withoutAdvanced(overrides: Partial<Params>): Partial<Params> {
+  const rest = { ...overrides };
+  for (const key of ADVANCED_KEYS) delete rest[key];
+  return rest;
 }
 
 function Meter({ label, level }: { label: string; level: number }) {
@@ -193,12 +221,12 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
       setQuality(settings.quality);
       setPitch(settings.pitch);
       setPitchNote(null);
-      setOverrides((current) => ({ ...current, index_rate: settings.likeness }));
+      setOverrides((current) => ({ ...withoutAdvanced(current), index_rate: settings.likeness, ...(settings.advanced ?? {}) }));
       return;
     }
     const remembered = storedLikeness(voice);
     setOverrides((current) => {
-      const { index_rate: _dropped, ...rest } = current;
+      const { index_rate: _dropped, ...rest } = withoutAdvanced(current);
       return remembered === null ? rest : { ...rest, index_rate: remembered };
     });
   }, [voice, resets]);
@@ -350,11 +378,15 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
   const value = <K extends keyof Params>(key: K): Params[K] | "" =>
     (overrides[key] ?? base?.[key] ?? "") as Params[K] | "";
   const likeness = Number(value("index_rate") || 0);
+  const extra = <K extends AdvancedKey>(key: K) =>
+    (overrides[key] ?? base?.[key] ?? ADVANCED_DEFAULTS[key]) as NonNullable<Params[K]>;
+  const advanced = Object.fromEntries(ADVANCED_KEYS.map((k) => [k, extra(k)])) as Advanced;
   const voiceName = voices.find((v) => v.id === voice)?.name ?? "this voice";
   const savedChanged = saved !== null
-    && (saved.pitch !== pitch || saved.quality !== quality || Math.abs(saved.likeness - likeness) > 1e-6);
+    && (saved.pitch !== pitch || saved.quality !== quality || Math.abs(saved.likeness - likeness) > 1e-6
+      || ADVANCED_KEYS.some((k) => saved.advanced?.[k] !== undefined && saved.advanced[k] !== advanced[k]));
   const saveForVoice = () => {
-    const settings = { pitch, quality, likeness };
+    const settings = { pitch, quality, likeness, advanced };
     storeSettings(voice, settings);
     setSaved(settings);
   };
@@ -381,7 +413,7 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
         await calibrationApi.downloadSpeakerModel();
       }
       setTuning("Getting ready...");
-      let status = await calibrationApi.tune({ voice_id: tunedVoice, quality, pitch_shift: pitch, likeness });
+      let status = await calibrationApi.tune({ voice_id: tunedVoice, quality, pitch_shift: pitch, likeness, advanced });
       while (status.active) {
         if (status.steps > 0 && status.step > 0) setTuning(`${status.message} (${status.step} of ${status.steps})`);
         else if (status.message) setTuning(`${status.message}...`);
@@ -394,20 +426,25 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
         setTuneNote(status.message ?? "Stopped.");
         return;
       }
-      const settings = { pitch: result.pitch_shift, quality, likeness: result.likeness };
+      const pct = (x: number) => Math.round(x * 100);
+      const tunedAdvanced = validAdvanced(result.advanced) ?? advanced;
+      const settings = { pitch: result.pitch_shift, quality: result.quality, likeness: result.likeness, advanced: tunedAdvanced };
       storeSettings(tunedVoice, settings);
       if (tunedVoice === voiceRef.current) {
         setPitch(result.pitch_shift);
         setPitchNote(null);
-        setOverrides((o) => ({ ...o, index_rate: result.likeness }));
+        setOverrides((o) => ({ ...o, index_rate: result.likeness, ...tunedAdvanced }));
+        setQuality(result.quality);
         setSaved(settings);
       }
-      const pct = (x: number) => Math.round(x * 100);
-      const same = result.pitch_shift === result.baseline.pitch_shift && result.likeness === result.baseline.likeness;
+      const same = result.pitch_shift === result.baseline.pitch_shift && result.likeness === result.baseline.likeness
+        && result.quality === result.baseline.quality;
+      const chosen = `pitch ${result.pitch_shift > 0 ? "+" : ""}${result.pitch_shift}, likeness ${pct(result.likeness)}%, ` +
+        `quality ${result.quality + 1} (about ${delaySeconds(result.quality).toFixed(1)} s behind)`;
       setTuneNote(
         (same
-          ? `Your settings were already the best found for ${name}: pitch ${result.pitch_shift > 0 ? "+" : ""}${result.pitch_shift}, likeness ${pct(result.likeness)}%. `
-          : `Best for ${name}: pitch ${result.pitch_shift > 0 ? "+" : ""}${result.pitch_shift}, likeness ${pct(result.likeness)}%. `) +
+          ? `Your settings were already the best found for ${name}: ${chosen}. `
+          : `Best for ${name}: ${chosen}. `) +
           `It sounds ${pct(result.similarity)}% like ${name} (${pct(result.baseline.similarity)}% with your settings before), ` +
           `with ${pct(result.clarity)}% of the words clear. Saved for this voice; how robotic it sounds is still for your ears.`,
       );
@@ -423,12 +460,13 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
     storeSettings(voice, null);
     storeLikeness(voice, null);
     setSaved(null);
+    setOverrides((o) => withoutAdvanced(o));
     setQuality(DEFAULT_QUALITY);
     if (calibrated === null) setPitch(0);
     setResets((n) => n + 1); // the likeness and the calibration's pitch are worked out again
   };
   /** Number fields show the typed override, with the preset value as placeholder. */
-  const typed = (key: keyof Params) => overrides[key] ?? "";
+  const typed = (key: "chunk_ms" | "crossfade_ms" | "context_ms" | "index_rate") => overrides[key] ?? "";
   const placeholder = (key: keyof Params) => (base ? String(base[key]) : "");
   const override = <K extends keyof Params>(key: K, v: Params[K] | "") =>
     setOverrides((prev) => {
@@ -667,11 +705,51 @@ export function LivePanel({ stats, actionError = null, onDevicesRefreshed, onMon
         </label>
         <label>
           Pitch detector
-          <select value={value("f0_method")} disabled={stats.running}
+          <select value={extra("f0_method")} disabled={stats.running}
             onChange={(e) => override("f0_method", e.target.value as Params["f0_method"])}>
+            <option value="rmvpe">Best (RMVPE)</option>
             <option value="dio">Fast (dio)</option>
-            <option value="harvest">Accurate (harvest)</option>
+            <option value="harvest">Accurate but slow (harvest)</option>
           </select>
+        </label>
+        <label>
+          Consonant protection: {extra("protect").toFixed(2)}
+          <input type="range" min={0} max={0.5} step={0.01} value={extra("protect")} disabled={stats.running}
+            onChange={(e) => override("protect", Number(e.target.value))} />
+        </label>
+        <p className="hint">Keeps "s", "t" and breaths in your own sound; 0.5 switches it off.</p>
+        <label>
+          Loudness follow: {Math.round(extra("volume_follow") * 100)}%
+          <input type="range" min={0} max={1} step={0.05} value={extra("volume_follow")} disabled={stats.running}
+            onChange={(e) => override("volume_follow", Number(e.target.value))} />
+        </label>
+        <p className="hint">How closely the voice's loudness follows yours, so it does not dip where you do not.</p>
+        <label>
+          Background cut: {extra("background_cut_db")} dB
+          <input type="range" min={0} max={60} step={5} value={extra("background_cut_db")} disabled={stats.running}
+            onChange={(e) => override("background_cut_db", Number(e.target.value))} />
+        </label>
+        <p className="hint">How far room sound in your pauses is turned down, so it is not turned into mumbling. 0 is off.</p>
+        <label>
+          Natural waver: {extra("natural_variation_st").toFixed(2)} semitones
+          <input type="range" min={0} max={0.6} step={0.05} value={extra("natural_variation_st")} disabled={stats.running}
+            onChange={(e) => override("natural_variation_st", Number(e.target.value))} />
+        </label>
+        <p className="hint">A small waver added where the pitch goes dead flat, so the voice does not lock on one note. 0 is off.</p>
+        <label className="row">
+          <input type="checkbox" checked={extra("pitch_cleanup")} disabled={stats.running}
+            onChange={(e) => override("pitch_cleanup", e.target.checked)} />
+          Pitch clean-up (octave errors, spikes, wobble and blips)
+        </label>
+        <label className="row">
+          <input type="checkbox" checked={extra("creak_repair")} disabled={stats.running}
+            onChange={(e) => override("creak_repair", e.target.checked)} />
+          Creak repair (holds the pitch when your voice creaks at the end of a sentence)
+        </label>
+        <label className="row">
+          <input type="checkbox" checked={extra("join_smoothing")} disabled={stats.running}
+            onChange={(e) => override("join_smoothing", e.target.checked)} />
+          Join smoothing (each chunk starts from the pitch the last one used)
         </label>
         <label>
           Index blend

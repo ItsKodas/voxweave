@@ -18,6 +18,13 @@ class LiveParams:
     # How far the output is turned down where the input is background sound, not speech: no pitch, and well below
     # the speaker's level. A model turns quiet room sounds into breathy mumbling. 0 switches it off.
     background_cut_db: float = 30.0
+    # The pitch clean-up steps, each on unless switched off (aivoice.engines.pitch): octave errors, spikes, wobble
+    # and blips; holding the pitch through creak; a small waver where the pitch is dead flat (semitones, 0 is
+    # off); and starting each chunk's join from the pitch the previous chunk used.
+    pitch_cleanup: bool = True
+    creak_repair: bool = True
+    natural_variation_st: float = 0.25
+    join_smoothing: bool = True
 
 
 # Every preset uses RMVPE, the neural pitch tracker the voices were trained with (it falls back to "dio" when its
@@ -57,6 +64,11 @@ def _validate(p: LiveParams) -> None:
         raise ValueError("index_rate must be between 0 and 1")
     if not 0.0 <= p.protect <= 0.5:
         raise ValueError("protect must be between 0 and 0.5")
+    for name in ("pitch_cleanup", "creak_repair", "join_smoothing"):
+        if not isinstance(getattr(p, name), bool):
+            raise ValueError(f"{name} must be true or false")
+    if not 0.0 <= p.natural_variation_st <= 0.6:
+        raise ValueError("natural_variation_st must be between 0 and 0.6")
     if not 0.0 <= p.background_cut_db <= 60.0:
         raise ValueError("background_cut_db must be between 0 and 60")
     if not 0.0 <= p.volume_follow <= 1.0:

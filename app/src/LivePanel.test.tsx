@@ -668,8 +668,8 @@ describe("saved settings per voice", () => {
 
 describe("deep calibration", () => {
   const TUNED = {
-    voice_id: "demo", pitch_shift: 9, likeness: 0.5, similarity: 0.86, clarity: 0.95, quality: 1,
-    baseline: { pitch_shift: 7, likeness: 0.3, similarity: 0.84, clarity: 0.96 }, tried: [], created: 1,
+    voice_id: "demo", pitch_shift: 9, likeness: 0.5, similarity: 0.86, clarity: 0.95, quality: 3,
+    baseline: { pitch_shift: 7, likeness: 0.3, similarity: 0.84, clarity: 0.96, quality: 1 }, tried: [], created: 1,
   };
   const MODEL = { ready: true, size_mb: 26.5, source: "https://huggingface.co/Wespeaker/x", licence: "CC BY 4.0" };
   beforeEach(() => {
@@ -688,13 +688,15 @@ describe("deep calibration", () => {
     await ready();
     await screen.findByText(/Set from your calibration/);
     await userEvent.click(screen.getByRole("button", { name: "Find best settings" }));
-    expect(calibrationApi.tune).toHaveBeenCalledWith({ voice_id: "demo", quality: 1, pitch_shift: 7, likeness: 0.3 });
+    expect(calibrationApi.tune).toHaveBeenCalledWith(expect.objectContaining({ voice_id: "demo", quality: 1, pitch_shift: 7, likeness: 0.3 }));
+    expect(vi.mocked(calibrationApi.tune).mock.calls[0][0].advanced).toMatchObject({ creak_repair: true, f0_method: "dio" });
     expect(await screen.findByText(/Trying pitch \+8, likeness 30% \(3 of 10\)/)).toBeInTheDocument();
-    expect(await screen.findByText(/Best for Demo: pitch \+9, likeness 50%/, {}, { timeout: 4000 })).toBeInTheDocument();
+    expect(await screen.findByText(/Best for Demo: pitch \+9, likeness 50%, quality 4 \(about 1\.6 s behind\)/, {}, { timeout: 4000 })).toBeInTheDocument();
     expect(screen.getByText(/sounds 86% like Demo \(84% with your settings before\)/)).toBeInTheDocument();
     expect(screen.getByText("Pitch shift (+9 semitones)")).toBeInTheDocument();
     expect(screen.getByLabelText(/^Likeness:/).closest("label")).toHaveTextContent("Likeness: 50%");
-    expect(JSON.parse(localStorage.getItem("voice-settings:demo")!)).toEqual({ pitch: 9, quality: 1, likeness: 0.5 });
+    expect(screen.getByLabelText(/^Quality:/)).toHaveValue("3");
+    expect(JSON.parse(localStorage.getItem("voice-settings:demo")!)).toMatchObject({ pitch: 9, quality: 3, likeness: 0.5 });
   });
 
   it("asks before downloading the speaker model, and does nothing when declined", async () => {
@@ -743,5 +745,44 @@ describe("clipping", () => {
   it("says when the microphone clips", async () => {
     render(<LivePanel stats={{ ...IDLE, running: true, mode: "converted", clipping: true }} />);
     expect(await screen.findByText(/Your microphone is clipping/)).toBeInTheDocument();
+  });
+});
+
+describe("voice quality extras", () => {
+  beforeEach(() => localStorage.clear());
+
+  it("offers every extra under Advanced and sends the ones changed", async () => {
+    render(<LivePanel stats={IDLE} />);
+    const start = await ready();
+    await userEvent.click(screen.getByText("Advanced"));
+    expect(screen.getByRole("option", { name: /RMVPE/ })).toBeInTheDocument();
+    for (const name of [/Pitch clean-up/, /Creak repair/, /Join smoothing/]) {
+      expect(screen.getByLabelText(name)).toBeChecked();
+    }
+    await userEvent.click(screen.getByLabelText(/Creak repair/));
+    fireEvent.change(screen.getByLabelText(/^Natural waver/), { target: { value: "0" } });
+    fireEvent.change(screen.getByLabelText(/^Background cut/), { target: { value: "45" } });
+    fireEvent.change(screen.getByLabelText(/^Loudness follow/), { target: { value: "1" } });
+    fireEvent.change(screen.getByLabelText(/^Consonant protection/), { target: { value: "0.5" } });
+    await userEvent.click(start);
+    expect(vi.mocked(api.start).mock.calls[0][0].overrides).toMatchObject({
+      creak_repair: false, natural_variation_st: 0, background_cut_db: 45, volume_follow: 1, protect: 0.5,
+    });
+  });
+
+  it("are saved for the voice with the rest of its settings", async () => {
+    vi.mocked(api.voices).mockResolvedValue([{ id: "demo", name: "Demo", has_index: true }, { id: "other", name: "Other", has_index: true }]);
+    render(<LivePanel stats={IDLE} />);
+    await ready();
+    await userEvent.click(screen.getByText("Advanced"));
+    await userEvent.click(screen.getByLabelText(/Join smoothing/));
+    await userEvent.click(screen.getByRole("button", { name: "Save for this voice" }));
+    expect(JSON.parse(localStorage.getItem("voice-settings:demo")!).advanced).toMatchObject({ join_smoothing: false });
+    await userEvent.selectOptions(screen.getByLabelText("Voice"), "other");
+    await waitFor(() => expect(screen.getByLabelText(/Join smoothing/)).toBeChecked());
+    await userEvent.selectOptions(screen.getByLabelText("Voice"), "demo");
+    await waitFor(() => expect(screen.getByLabelText(/Join smoothing/)).not.toBeChecked());
+    await userEvent.click(screen.getByRole("button", { name: "Reset to recommended" }));
+    await waitFor(() => expect(screen.getByLabelText(/Join smoothing/)).toBeChecked());
   });
 });

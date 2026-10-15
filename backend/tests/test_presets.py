@@ -74,3 +74,20 @@ def test_volume_follow_must_be_between_0_and_1(value):
 def test_background_cut_must_be_between_0_and_60_db(value):
     with pytest.raises(ValueError, match="background_cut_db"):
         resolve("balanced", {"background_cut_db": value})
+
+
+def test_every_voice_quality_extra_is_on_by_default_and_can_be_switched():
+    p = resolve("balanced")
+    assert (p.pitch_cleanup, p.creak_repair, p.join_smoothing) == (True, True, True)
+    assert p.natural_variation_st == pytest.approx(0.25)
+    off = resolve("balanced", {"pitch_cleanup": False, "creak_repair": False, "join_smoothing": False,
+                               "natural_variation_st": 0.0})
+    assert (off.pitch_cleanup, off.creak_repair, off.join_smoothing, off.natural_variation_st) == (False, False, False, 0.0)
+
+
+@pytest.mark.parametrize("overrides, field", [({"pitch_cleanup": "yes"}, "pitch_cleanup"), ({"creak_repair": 1}, "creak_repair"),
+                                              ({"join_smoothing": None}, "join_smoothing"),
+                                              ({"natural_variation_st": 0.9}, "natural_variation_st")])
+def test_extras_are_checked(overrides, field):
+    with pytest.raises(ValueError, match=field):
+        resolve("balanced", overrides)

@@ -19,6 +19,7 @@ class TuneBody(BaseModel):
     quality: int
     pitch_shift: int
     likeness: float
+    advanced: dict | None = None
 
 
 def calibration_router(calibration: Calibration, studio, live_running: Callable[[], bool],
@@ -104,7 +105,7 @@ def calibration_router(calibration: Calibration, studio, live_running: Callable[
                 raise ValueError("Finish recording before deep calibration")
             if importer is not None and importer.status().get("active"):
                 raise ValueError("Wait for the import to finish before deep calibration")
-            tuner.start(body.voice_id, body.quality, body.pitch_shift, body.likeness)
+            tuner.start(body.voice_id, body.quality, body.pitch_shift, body.likeness, body.advanced)
         return tuner.status()
 
     @router.get("/tune/status")
