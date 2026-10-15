@@ -306,3 +306,16 @@ def test_the_mic_check_can_be_played_back(tmp_path):
     client.post("/calibration/finish", headers=ORIGIN)
     res = client.get("/calibration/test-audio")
     assert res.status_code == 200 and res.headers["content-type"] == "audio/wav" and res.content[:4] == b"RIFF"
+
+
+def test_the_two_part_calibration_through_the_api(tmp_path):
+    client, _, _, _ = rig(tmp_path)
+    client.post("/calibration/start", json={"input_device": 1}, headers=ORIGIN)
+    review = client.post("/calibration/check", headers=ORIGIN).json()
+    assert review["phase"] == "review" and review["review"]["suggested_gain"] > 0
+    played = client.get("/calibration/test-audio?gain=2.0")
+    assert played.status_code == 200 and played.content[:4] == b"RIFF"
+    reading = client.post("/calibration/read", json={"gain": 3.0}, headers=ORIGIN).json()
+    assert reading["phase"] == "reading"
+    done = client.post("/calibration/finish", headers=ORIGIN).json()
+    assert done["profile"]["input_gain"] == 3.0

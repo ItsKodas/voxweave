@@ -159,7 +159,31 @@ def _voiced_level(audio: np.ndarray, sr: int) -> tuple[float, np.ndarray, np.nda
     return float(10.0 * np.log10(np.mean(10.0 ** (voiced / 10.0)))), voiced, f0
 
 
-def analyse(audio: np.ndarray, sr: int, device: str, now: float) -> Profile:
+def review_check(audio: np.ndarray, sr: int) -> dict:
+    """The mic check alone (QUIET_SECONDS of quiet, then the test phrase): the room's level, the phrase's level and
+    peak as the microphone picked it up, and the boost suggested for it. Raises CalibrationError when the phrase
+    was not heard or is barely louder than the room."""
+    audio = np.nan_to_num(np.asarray(audio, dtype=np.float32).reshape(-1))
+    split, end = int(QUIET_SECONDS * sr), int((QUIET_SECONDS + TEST_SECONDS) * sr)
+    quiet = _frame_db(audio[int(0.3 * sr): split - int(0.2 * sr)], sr)
+    noise = float(np.percentile(quiet, 95)) if len(quiet) else GATE_FLOOR_DB
+    test = _voiced_level(audio[split:end], sr)
+    if test is None or len(test[1]) < 30:
+        raise CalibrationError(f'The test phrase was not heard. Say "{TEST_PHRASE.lower()}" in your normal voice, at '
+                               "your usual distance from the microphone.")
+    if float(np.median(test[1])) - noise < MIN_SPEECH_ABOVE_ROOM_DB:
+        raise CalibrationError("The room is too loud for your microphone, or you spoke during the quiet part: your "
+                               "speech is barely louder than the quiet. Try again somewhere quieter, or move closer.")
+    peak = float(np.max(np.abs(audio[split:end])))
+    gain = 10.0 ** ((TARGET_LEVEL_DB - test[0]) / 20.0)
+    if peak > 0:
+        gain = min(gain, 0.98 / peak)
+    return {"noise_db": round(noise, 1), "test_level_db": round(test[0], 1), "test_peak": round(peak, 4),
+            "suggested_gain": round(float(min(MAX_GAIN, max(MIN_GAIN, gain))), 2),
+            "min_gain": MIN_GAIN, "max_gain": MAX_GAIN, "target_db": TARGET_LEVEL_DB}
+
+
+def analyse(audio: np.ndarray, sr: int, device: str, now: float, gain: float | None = None) -> Profile:
     """Measures a calibration recording: QUIET_SECONDS of silence (the room), TEST_SECONDS of "testing, one, two,
     three" (the microphone level, which sets the input boost), then reading aloud (the pitch)."""
     audio = np.nan_to_num(np.asarray(audio, dtype=np.float32).reshape(-1))
@@ -185,10 +209,11 @@ def analyse(audio: np.ndarray, sr: int, device: str, now: float) -> Profile:
                                "speech is barely louder than the quiet. Try again somewhere quieter, or move closer.")
     quiet_speech = float(np.percentile(voiced, 10))
     gate = max(GATE_FLOOR_DB, min(noise + GATE_MARGIN_DB, quiet_speech - GATE_MARGIN_DB))
-    peak = float(np.percentile(np.abs(audio[split:]), 99.9))
-    gain = 10.0 ** ((TARGET_LEVEL_DB - test_level) / 20.0)
-    if peak > 0:
-        gain = min(gain, 0.98 / peak)  # never into clipping
+    if gain is None:
+        peak = float(np.percentile(np.abs(audio[split:]), 99.9))
+        gain = 10.0 ** ((TARGET_LEVEL_DB - test_level) / 20.0)
+        if peak > 0:
+            gain = min(gain, 0.98 / peak)  # never into clipping
     gain = float(min(MAX_GAIN, max(MIN_GAIN, gain)))
     return Profile(round(pitch, 1), round(low, 1), round(high, 1), round(level, 1), round(noise, 1),
                    round(float(gate), 1), round(gain, 3), device[:120], now, round(test_level, 1))
@@ -252,6 +277,13 @@ class Calibration:
         self._lock = threading.Lock()
         self._started: float | None = None
         self._reading = 0
+        # The calibration in two takes: the mic check, reviewed by the speaker (played back, boost set by ear),
+        # then the reading. Between them nothing records.
+        self._take: str | None = None  # "check" or "reading" while recording
+        self._check_audio: np.ndarray | None = None
+        self._review: dict | None = None
+        self._chosen_gain: float | None = None
+        self._device_index: int | None = None
         self._device = ""
         self._error: str | None = None
 
@@ -296,16 +328,24 @@ class Calibration:
                 (self._folder / "sample.wav.part").replace(self._folder / "sample.wav")
             return updated
 
-    def test_audio(self) -> np.ndarray | None:
-        """The calibration's "testing, one, two, three", as the microphone picked it up (not boosted)."""
-        path = self._folder / "test.wav"
-        if self.profile() is None or not path.is_file():
-            return None
-        try:
-            audio, sr = read_wav(path)
-        except (ValueError, OSError):
-            return None
-        return audio if sr == SAMPLE_RATE else soxr.resample(audio, sr, SAMPLE_RATE).astype(np.float32)
+    def test_audio(self, gain: float = 1.0) -> np.ndarray | None:
+        """The "testing, one, two, three" of the mic check being reviewed, else of the last calibration, as the
+        microphone picked it up times `gain` (clipped, as the boost would clip it)."""
+        with self._lock:
+            pending = self._check_audio
+        if pending is not None:
+            audio = pending[int(QUIET_SECONDS * SAMPLE_RATE): int((QUIET_SECONDS + TEST_SECONDS) * SAMPLE_RATE)]
+        else:
+            path = self._folder / "test.wav"
+            if self.profile() is None or not path.is_file():
+                return None
+            try:
+                audio, sr = read_wav(path)
+            except (ValueError, OSError):
+                return None
+            if sr != SAMPLE_RATE:
+                audio = soxr.resample(audio, sr, SAMPLE_RATE).astype(np.float32)
+        return np.clip(np.asarray(audio, dtype=np.float32) * np.float32(gain), -1.0, 1.0)
 
     def sample(self) -> np.ndarray | None:
         """The speaker's calibration reading (the part after the quiet), at SAMPLE_RATE. None when there is none:
@@ -353,6 +393,8 @@ class Calibration:
             if source.max_input < 1:
                 raise CalibrationError(f"{source.name} is not an input device")
             self._recorder.start(device)
+            self._take, self._device_index = "check", device
+            self._check_audio = self._review = self._chosen_gain = None
             others = [i for i in range(len(READINGS)) if i != self._reading] or [0]
             self._reading = random.choice(others)  # a different paragraph from last time
             self._started, self._device, self._error = self._clock(), source.name, None
@@ -362,6 +404,46 @@ class Calibration:
             if self._started is not None:
                 self._recorder.cancel()
                 self._started = None
+            self._take = None
+            self._check_audio = self._review = self._chosen_gain = None
+
+    def _keep_failed(self, audio) -> None:
+        try:  # kept, so why it failed can be looked into; the next failure replaces it
+            self._folder.mkdir(parents=True, exist_ok=True)
+            write_wav(self._folder / "failed-attempt.wav",
+                      np.nan_to_num(np.asarray(audio, dtype=np.float32).reshape(-1)), SAMPLE_RATE)
+        except OSError:
+            pass
+
+    def check(self) -> dict:
+        """Ends the mic check and measures it for the speaker to review: play it back, set the boost by ear."""
+        with self._lock:
+            if not self._active_locked() or self._take != "check":
+                raise CalibrationError("No mic check is being recorded")
+            audio = self._recorder.stop()
+            self._started, self._take = None, None
+            check = np.nan_to_num(np.asarray(audio, dtype=np.float32).reshape(-1))[
+                : int((QUIET_SECONDS + TEST_SECONDS) * SAMPLE_RATE)]
+            try:
+                review = review_check(check, SAMPLE_RATE)
+            except CalibrationError as exc:
+                self._error = str(exc)
+                self._keep_failed(check)
+                raise
+            self._check_audio, self._review, self._error = check, review, None
+            return review
+
+    def read(self, gain: float) -> None:
+        """Starts the reading, with the boost the speaker chose for the reviewed mic check."""
+        with self._lock:
+            if self._review is None or self._check_audio is None:
+                raise CalibrationError("Record the mic check first")
+            if not (isinstance(gain, (int, float)) and MIN_GAIN <= float(gain) <= MAX_GAIN):
+                raise CalibrationError(f"The boost must be between {MIN_GAIN:g}x and {MAX_GAIN:g}x")
+            if self._device_index is None:
+                raise CalibrationError("Record the mic check first")
+            self._recorder.start(self._device_index)
+            self._chosen_gain, self._take, self._started = float(gain), "reading", self._clock()
 
     def finish(self) -> Profile:
         with self._lock:
@@ -369,8 +451,16 @@ class Calibration:
                 raise CalibrationError("No calibration recording is running")
             audio = self._recorder.stop()
             self._started = None
+            chosen = None
+            if self._take == "reading" and self._check_audio is not None:
+                # The two takes put together: the reviewed mic check, then the reading, at the boost chosen by ear.
+                audio = np.concatenate([self._check_audio,
+                                        np.nan_to_num(np.asarray(audio, dtype=np.float32).reshape(-1))])
+                chosen = self._chosen_gain
+            self._take = None
+            self._check_audio = self._review = self._chosen_gain = None
             try:
-                profile = analyse(audio, SAMPLE_RATE, self._device, self._clock())
+                profile = analyse(audio, SAMPLE_RATE, self._device, self._clock(), gain=chosen)
                 self._folder.mkdir(parents=True, exist_ok=True)
                 part = self._folder / "profile.json.part"
                 part.write_text(json.dumps(asdict(profile)), encoding="utf-8")
@@ -387,12 +477,7 @@ class Calibration:
                 (self._folder / "test.wav.part").replace(self._folder / "test.wav")
             except CalibrationError as exc:
                 self._error = str(exc)
-                try:  # kept, so why it failed can be looked into; the next failure replaces it
-                    self._folder.mkdir(parents=True, exist_ok=True)
-                    write_wav(self._folder / "failed-attempt.wav",
-                              np.nan_to_num(np.asarray(audio, dtype=np.float32).reshape(-1)), SAMPLE_RATE)
-                except OSError:
-                    pass
+                self._keep_failed(audio)
                 raise
             except OSError as exc:
                 self._error = f"The calibration could not be saved: {exc}"
@@ -405,10 +490,16 @@ class Calibration:
             recorded = self._recorder.status() if active else {"seconds": 0.0, "level": 0.0}
             seconds = float(recorded["seconds"])
             profile = self.profile()
+            if active and self._take == "reading":
+                phase, read_from = "reading", 0.0
+            elif active:
+                phase = ("quiet" if seconds < QUIET_SECONDS else "testing" if seconds < QUIET_SECONDS + TEST_SECONDS
+                         else "reading")
+                read_from = QUIET_SECONDS + TEST_SECONDS
+            else:
+                phase, read_from = ("review" if self._review is not None else None), 0.0
             return {"recording": active, "seconds": seconds, "level": float(recorded["level"]),
-                    "phase": None if not active else ("quiet" if seconds < QUIET_SECONDS else
-                                                      "testing" if seconds < QUIET_SECONDS + TEST_SECONDS else
-                                                      "reading"),
+                    "phase": phase, "read_from": read_from, "review": self._review,
                     "quiet_seconds": QUIET_SECONDS, "test_seconds": TEST_SECONDS, "test_phrase": TEST_PHRASE,
                     "min_read_seconds": MIN_READ_SECONDS, "total_seconds": MAX_SECONDS,
                     "text": READINGS[self._reading], "error": self._error,

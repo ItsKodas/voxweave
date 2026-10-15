@@ -433,3 +433,52 @@ def test_a_failed_calibration_keeps_its_recording_to_look_into(tmp_path):
         bad.finish()
     audio, sr = read_wav(tmp_path / "calibration" / "failed-attempt.wav")
     assert sr == SR and len(audio) == SR * 10
+
+
+# ---- the mic check reviewed before the reading: play it back, set the boost by ear
+
+def test_the_mic_check_is_reviewed_before_reading_and_the_chosen_boost_is_kept(tmp_path):
+    cal, _ = make(tmp_path)
+    cal.start(1)
+    cal.check()
+    status = cal.status()
+    assert status["recording"] is False and status["phase"] == "review"
+    review = status["review"]
+    assert 0.5 <= review["suggested_gain"] <= 16 and review["test_level_db"] < -5 and 0 < review["test_peak"] <= 1
+    assert cal.active is False  # nothing is recording while the speaker listens
+    cal.read(2.5)
+    status = cal.status()
+    assert status["recording"] is True and status["phase"] == "reading" and status["read_from"] == 0
+    profile = cal.finish()
+    assert profile.input_gain == 2.5  # the boost the speaker chose by ear, not the suggested one
+    assert cal.status()["phase"] is None and cal.status()["review"] is None
+
+
+def test_the_mic_check_plays_back_at_the_boost_being_tried(tmp_path):
+    cal, _ = make(tmp_path)
+    cal.start(1)
+    cal.check()
+    raw = cal.test_audio()
+    boosted = cal.test_audio(gain=3.0)
+    assert len(raw) == int(TEST_SECONDS * SR)
+    assert np.allclose(boosted, np.clip(raw * 3.0, -1, 1), atol=1e-4)
+
+
+def test_a_mic_check_that_was_not_heard_is_refused_at_the_review(tmp_path):
+    bad, _ = make(tmp_path, FakeRecorder(np.zeros(SR * 10, dtype=np.float32)))
+    bad.start(1)
+    with pytest.raises(CalibrationError, match="test phrase was not heard"):
+        bad.check()
+    assert bad.status()["review"] is None and bad.status()["phase"] is None
+
+
+def test_reading_needs_a_reviewed_mic_check_and_a_sensible_boost(tmp_path):
+    cal, _ = make(tmp_path)
+    with pytest.raises(CalibrationError, match="mic check"):
+        cal.read(2.0)
+    cal.start(1)
+    cal.check()
+    with pytest.raises(CalibrationError, match="boost"):
+        cal.read(40.0)
+    cal.cancel()
+    assert cal.status()["review"] is None

@@ -11,6 +11,26 @@ export function levelZone(level: number): { label: string; zone: "quiet" | "good
   return { label: "Too loud", zone: "clip" };
 }
 
+/** Where a mic check lands at a boost: its level (dB) and peak after the boost, against the target. */
+export function boostZone(levelDb: number, peak: number, targetDb: number): { label: string; zone: "quiet" | "good" | "loud" | "clip" } {
+  if (peak >= 1.0) return { label: "Clipping", zone: "clip" };
+  if (levelDb < targetDb - 6) return { label: "Too quiet", zone: "quiet" };
+  if (levelDb > targetDb + 6 || peak > 0.9) return { label: "Loud", zone: "loud" };
+  return { label: "Good", zone: "good" };
+}
+
+function BoostBar({ levelDb, zone, label }: { levelDb: number; zone: string; label: string }) {
+  const width = Math.min(100, Math.max(2, ((levelDb + 50) / 50) * 100)); // -50 dB to 0 dB
+  return (
+    <div className="level-bar">
+      <div className="level-track" aria-hidden="true">
+        <div className={`level-fill ${zone}`} style={{ width: `${width}%` }} />
+      </div>
+      <span className={`level-label ${zone}`} aria-live="polite">{label}</span>
+    </div>
+  );
+}
+
 function LevelBar({ level }: { level: number }) {
   const { label, zone } = levelZone(level);
   return (
@@ -51,6 +71,7 @@ export function CalibrationPanel({ input, disabled, onProfile }: {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [playing, setPlaying] = useState(false);
+  const [boost, setBoost] = useState<number | null>(null); // the boost being tried at the review
   const finishing = useRef(false);
   const onProfileRef = useRef(onProfile);
   onProfileRef.current = onProfile;
@@ -79,6 +100,27 @@ export function CalibrationPanel({ input, disabled, onProfile }: {
       try {
         const now = await calibrationApi.status();
         if (gone) return;
+        const checkEnds = (now.quiet_seconds ?? 3) + (now.test_seconds ?? 4);
+        // The mic check is a take of its own (it reports where a reading would start); the reading take starts at 0.
+        if (now.recording && (now.read_from ?? 0) > 0 && now.seconds >= checkEnds) {
+          finishing.current = true;
+          try {
+            const reviewed = await calibrationApi.check();
+            if (!gone) {
+              setBoost(reviewed.review?.suggested_gain ?? null);
+              take(reviewed);
+              setError(null);
+            }
+          } catch (e) {
+            if (!gone) {
+              setError((e as Error).message);
+              calibrationApi.status().then((s) => !gone && take(s), () => undefined);
+            }
+          } finally {
+            finishing.current = false;
+          }
+          return;
+        }
         if (now.recording && now.seconds >= now.total_seconds) {
           finishing.current = true;
           try {
@@ -131,12 +173,12 @@ export function CalibrationPanel({ input, disabled, onProfile }: {
       finishing.current = false;
     });
   };
-  const readFrom = (status?.quiet_seconds ?? 3) + (status?.test_seconds ?? 4);
+  const readFrom = status?.read_from ?? (status?.quiet_seconds ?? 3) + (status?.test_seconds ?? 4);
   const canFinish = !!status && status.seconds >= readFrom + (status.min_read_seconds ?? 8);
-  const playCheck = async () => {
+  const playCheck = async (gain = 1) => {
     setError(null);
     try {
-      const url = await calibrationApi.testAudioUrl();
+      const url = await calibrationApi.testAudioUrl(gain);
       setPlaying(true);
       play(url, () => setPlaying(false));
     } catch (e) {
@@ -151,7 +193,38 @@ export function CalibrationPanel({ input, disabled, onProfile }: {
     <section className="calibration" aria-label="My voice">
       <h3>My voice</h3>
       {error && <p role="alert" className="error">{error}</p>}
-      {recording && status ? (
+      {!recording && status?.phase === "review" && status.review ? (() => {
+        const check = status.review;
+        const gain = boost ?? check.suggested_gain;
+        const levelDb = check.test_level_db + 20 * Math.log10(gain);
+        const { label, zone } = boostZone(levelDb, check.test_peak * gain, check.target_db);
+        return (
+          <>
+            <p className="hint">
+              Here is your mic check. Play it back and move the boost until the bar is green, then go on to the reading.
+            </p>
+            <label>
+              Boost: {gain.toFixed(1)}x
+              <input type="range" min={check.min_gain} max={check.max_gain} step={0.1} value={gain}
+                onChange={(e) => setBoost(Number(e.target.value))} />
+            </label>
+            <BoostBar levelDb={levelDb} zone={zone} label={label} />
+            <div className="actions">
+              <button className="secondary" disabled={busy || playing} onClick={() => playCheck(gain)}>
+                {playing ? "Playing..." : "Play"}
+              </button>
+              <button disabled={busy} onClick={() => run(() => calibrationApi.read(gain))}>Continue to reading</button>
+            </div>
+            <div className="actions">
+              <button className="secondary" disabled={busy || input === null}
+                onClick={() => input !== null && run(async () => { await calibrationApi.cancel(); return calibrationApi.start(input); })}>
+                Record the mic check again
+              </button>
+              <button className="secondary" disabled={busy} onClick={() => run(calibrationApi.cancel)}>Cancel</button>
+            </div>
+          </>
+        );
+      })() : recording && status ? (
         <>
           {status.phase === "quiet" ? (
             <p className="sentence" aria-live="polite">Stay quiet for a moment. The microphone is measuring the room.</p>
@@ -194,7 +267,7 @@ export function CalibrationPanel({ input, disabled, onProfile }: {
             {profile ? "Calibrate again" : "Calibrate my voice"}
           </button>
           {profile && (
-            <button className="secondary" disabled={busy || playing} onClick={playCheck}>
+            <button className="secondary" disabled={busy || playing} onClick={() => playCheck()}>
               {playing ? "Playing..." : "Play my mic check"}
             </button>
           )}

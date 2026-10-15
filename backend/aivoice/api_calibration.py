@@ -33,6 +33,10 @@ class CalibrateBody(BaseModel):
     input_device: int
 
 
+class ReadBody(BaseModel):
+    gain: float
+
+
 class TuneBody(BaseModel):
     voice_id: str
     quality: int
@@ -60,6 +64,23 @@ def calibration_router(calibration: Calibration, studio, live_running: Callable[
             if studio is not None and studio.recording:
                 raise ValueError("Stop recording before calibrating")
             calibration.start(body.input_device)
+        return calibration.status()
+
+    @router.post("/check")
+    def check() -> dict:
+        """Ends the mic check, for the speaker to play back and set the boost before reading."""
+        with exclusive:
+            calibration.check()
+        return calibration.status()
+
+    @router.post("/read")
+    def read(body: ReadBody) -> dict:
+        with exclusive:
+            if live_running():
+                raise ValueError("Stop live mode before calibrating")
+            if studio is not None and studio.recording:
+                raise ValueError("Stop recording before calibrating")
+            calibration.read(body.gain)
         return calibration.status()
 
     @router.post("/finish")
@@ -128,9 +149,11 @@ def calibration_router(calibration: Calibration, studio, live_running: Callable[
         return tuner.status()
 
     @router.get("/test-audio")
-    def test_audio():
-        """The mic check of the last calibration, as the microphone picked it up, as a WAV."""
-        audio = calibration.test_audio()
+    def test_audio(gain: float = 1.0):
+        """The mic check being reviewed (else the last calibration's), times `gain`, as a WAV."""
+        if not 0.0 < gain <= 64.0:
+            raise ValueError("The boost must be above 0")
+        audio = calibration.test_audio(gain)
         if audio is None:
             raise ValueError("Calibrate first: the mic check is kept from the next calibration on")
         return _wav(audio, SAMPLE_RATE)

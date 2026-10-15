@@ -28,8 +28,12 @@ export type CalibrationStatus = {
   recording: boolean;
   seconds: number;
   level: number;
-  /** While recording: stay quiet, then say the test phrase (it sets the input boost), then read the text aloud. */
-  phase: "quiet" | "testing" | "reading" | null;
+  /** Stay quiet, then say the test phrase; "review" (nothing recording): play it back and set the boost; then read. */
+  phase: "quiet" | "testing" | "review" | "reading" | null;
+  /** Where the reading starts in `seconds`: 0 when it is a take of its own after the review. */
+  read_from?: number;
+  /** The mic check waiting for the speaker to set the boost. */
+  review?: MicCheck | null;
   test_seconds?: number;
   test_phrase?: string;
   /** Done can be pressed once this much has been read; the take ends by itself at total_seconds. */
@@ -41,6 +45,12 @@ export type CalibrationStatus = {
   profile: VoiceProfile | null;
   /** Whether the reading itself was kept (deep calibration converts it); older calibrations kept only numbers. */
   has_sample?: boolean;
+};
+
+/** A mic check as the microphone picked it up, with the boost suggested for it. */
+export type MicCheck = {
+  noise_db: number; test_level_db: number; test_peak: number; suggested_gain: number;
+  min_gain: number; max_gain: number; target_db: number;
 };
 
 /** The speaker-recognition model deep calibration scores with; downloaded only when the person agrees. */
@@ -84,5 +94,9 @@ export const calibrationApi = {
   preview: (body: { voice_id: string; quality: number; pitch_shift: number; likeness: number; advanced?: Record<string, unknown> }) =>
     audioUrl("/calibration/preview", body),
   /** The last mic check, as the microphone picked it up, to play. */
-  testAudioUrl: () => audioUrl("/calibration/test-audio"),
+  testAudioUrl: (gain = 1) => audioUrl(`/calibration/test-audio?gain=${gain}`),
+  /** Ends the mic check, for review. */
+  check: () => call<CalibrationStatus>("POST", "/calibration/check"),
+  /** Starts the reading with the boost chosen at the review. */
+  read: (gain: number) => call<CalibrationStatus>("POST", "/calibration/read", { gain }),
 };
