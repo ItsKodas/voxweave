@@ -156,3 +156,79 @@ def repair_creak(f0: np.ndarray, voice_like: np.ndarray, max_frames: int = CREAK
                 recent.pop(0)
         held = 0 if f0[i] > 0 else held
     return f0
+
+
+# ---- octave errors, wobble and blips
+
+OCTAVE_REACH = 15  # frames either side (150 ms) that make the speaker's pitch at a moment
+OCTAVE_TOLERANCE_ST = 3.0  # an octave error lands within this many semitones of an octave away
+SPIKE_ST = 5.0  # a short stretch this far from the pitch around it is a tracker error, not intonation
+SPIKE_MAX_FRAMES = 8
+SMOOTH_FRAMES = 5
+MIN_VOICED_FRAMES = 4  # voiced stretches shorter than this, alone in a pause, are dropped
+
+
+def _voiced_runs(f0: np.ndarray) -> list[tuple[int, int]]:
+    edges = np.diff(np.concatenate([[0], (f0 > 0).astype(np.int8), [0]]))
+    return list(zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)))
+
+
+def _local_median(x: np.ndarray, reach: int) -> np.ndarray:
+    return np.array([np.median(x[max(0, i - reach):i + reach + 1]) for i in range(len(x))])
+
+
+def fix_octave_errors(f0: np.ndarray, reach: int = OCTAVE_REACH) -> np.ndarray:
+    """Within each voiced stretch, a frame about an octave (or two) away from the speaker's pitch around it is moved
+    back by whole octaves, up or down; a short stretch still far from it afterwards (a tracker error that is not an
+    octave) takes the pitch around it. Rises and falls that take the time real speech takes are left as they are."""
+    f0 = np.asarray(f0, dtype=np.float32).copy()
+    for a, b in _voiced_runs(f0):
+        if b - a < 5:
+            continue
+        st = 12.0 * np.log2(f0[a:b].astype(np.float64))
+        off = st - _local_median(st, reach)
+        octaves = np.round(off / 12.0)
+        wrong = (octaves != 0) & (np.abs(off - 12.0 * octaves) <= OCTAVE_TOLERANCE_ST)
+        st[wrong] -= 12.0 * octaves[wrong]
+        reference = _local_median(st, reach)
+        far = np.abs(st - reference) > SPIKE_ST
+        for s, e in _voiced_runs(far.astype(np.float32)):
+            if e - s <= SPIKE_MAX_FRAMES:
+                st[s:e] = reference[s:e]
+        f0[a:b] = (2.0 ** (st / 12.0)).astype(np.float32)
+    return f0
+
+
+def smooth_pitch(f0: np.ndarray, width: int = SMOOTH_FRAMES, min_frames: int = MIN_VOICED_FRAMES) -> np.ndarray:
+    """A running median over each voiced stretch (in semitones), which takes out single-frame wobble and keeps
+    glides; voiced blips too short to be a syllable, alone in a pause, are dropped, so the model does not chirp."""
+    f0 = np.asarray(f0, dtype=np.float32).copy()
+    half = width // 2
+    for a, b in _voiced_runs(f0):
+        if b - a < min_frames:
+            f0[a:b] = 0.0
+            continue
+        st = np.log2(f0[a:b].astype(np.float64))
+        f0[a:b] = (2.0 ** _local_median(st, half)).astype(np.float32)
+    return f0
+
+
+# ---- joins between live windows
+
+def blend_join(current: np.ndarray, previous: np.ndarray, offset: int, start: int, length: int) -> np.ndarray:
+    """Live mode converts overlapping windows, and two windows can track a slightly different pitch for the same
+    moment; heard at the join, that is a warble. Frame j of this window is frame j + offset of the previous one.
+    Before `start` (audio already played) the previous window's pitch is used, and over the `length` frames from
+    `start` (the crossfade) the pitch moves from it to this window's own. Unvoiced frames are left alone."""
+    out = np.asarray(current, dtype=np.float32).copy()
+    previous = np.asarray(previous, dtype=np.float32)
+    if offset <= 0:
+        return out
+    end = min(len(out), len(previous) - offset, start + length)
+    for j in range(end):
+        p = previous[j + offset]
+        if out[j] <= 0 or p <= 0:
+            continue
+        w = 0.0 if j < start else (j - start) / max(1, length - 1)
+        out[j] = np.float32(np.exp(np.log(p) * (1.0 - w) + np.log(out[j]) * w))
+    return out

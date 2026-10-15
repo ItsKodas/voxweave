@@ -131,3 +131,72 @@ def test_consonants_pauses_and_long_stretches_are_left_alone():
     out = repair_creak(long_gap, np.ones(len(long_gap), bool), max_frames=40)
     assert np.all(out[20:60] == 110.0) and np.all(out[60:] == 0)  # held for 0.4 s, no longer
     assert not repair_creak(np.zeros(10, np.float32), np.ones(10, bool)).any()  # nothing good to hold
+
+
+def _glide(n=60, start=200.0, end=240.0):
+    return np.geomspace(start, end, n).astype(np.float32)
+
+
+def test_octave_errors_up_and_down_are_moved_back_to_the_speakers_pitch():
+    from aivoice.engines.pitch import fix_octave_errors
+
+    f0 = _glide()
+    f0[20:24] *= 2.0  # the tracker jumped an octave up for 40 ms
+    f0[40:43] /= 2.0  # and down
+    fixed = fix_octave_errors(f0)
+    assert np.allclose(fixed, _glide(), rtol=1e-4)
+
+
+def test_a_short_spike_that_is_not_an_octave_is_replaced_by_the_pitch_around_it():
+    from aivoice.engines.pitch import fix_octave_errors
+
+    f0 = _glide()
+    f0[30:33] *= 2 ** (7 / 12)  # 7 semitones up for 30 ms
+    fixed = fix_octave_errors(f0)
+    assert np.all(np.abs(12 * np.log2(fixed[30:33] / _glide()[30:33])) < 0.5)
+
+
+def test_real_intonation_and_pauses_are_kept():
+    from aivoice.engines.pitch import fix_octave_errors
+
+    rise = np.concatenate([np.full(30, 150.0), np.geomspace(150, 300, 15), np.full(30, 300.0)]).astype(np.float32)
+    assert np.allclose(fix_octave_errors(rise), rise)  # an octave rise over 150 ms is speech, not an error
+    gapped = np.concatenate([np.full(20, 200.0), np.zeros(10), np.full(20, 200.0)]).astype(np.float32)
+    assert np.array_equal(fix_octave_errors(gapped), gapped)
+
+
+def test_smoothing_takes_out_wobble_and_lone_blips_but_keeps_a_glide():
+    from aivoice.engines.pitch import smooth_pitch
+
+    glide = _glide()
+    wobbly = glide.copy()
+    wobbly[::7] *= 2 ** (1.5 / 12)  # single-frame wobbles of 1.5 semitones
+    smooth = smooth_pitch(wobbly)
+    assert np.all(np.abs(12 * np.log2(smooth / glide)) < 0.2)
+    blip = np.zeros(40, np.float32)
+    blip[20:22] = 180.0  # 20 ms of "pitch" in a pause
+    assert np.all(smooth_pitch(blip) == 0)
+
+
+def test_join_pitch_starts_from_what_the_last_window_used_and_ends_on_this_ones():
+    from aivoice.engines.pitch import blend_join
+
+    current = np.full(50, 220.0, np.float32)
+    previous = np.full(50, 200.0, np.float32)
+    # the previous window covered this window's frames 0-29 (its frames 20-49)
+    out = blend_join(current, previous, offset=20, start=10, length=20)
+    assert np.allclose(out[:10], 200.0)  # before the join: what was already played
+    assert out[10] == pytest.approx(200.0, rel=0.01) and out[29] == pytest.approx(220.0, rel=0.01)
+    assert np.all(np.diff(out[10:30]) >= 0)  # a smooth move between the two
+    assert np.allclose(out[30:], 220.0)
+
+
+def test_join_blend_leaves_unvoiced_frames_and_missing_overlap_alone():
+    from aivoice.engines.pitch import blend_join
+
+    current = np.full(50, 220.0, np.float32)
+    current[12] = 0.0
+    previous = np.full(50, 200.0, np.float32)
+    out = blend_join(current, previous, offset=20, start=10, length=20)
+    assert out[12] == 0.0
+    assert np.array_equal(blend_join(current, previous, offset=60, start=10, length=20), current)  # no overlap

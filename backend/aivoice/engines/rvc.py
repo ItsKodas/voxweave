@@ -5,7 +5,7 @@ import numpy as np
 import soxr
 
 from aivoice.engines.f0 import extract_f0, shift_f0, to_coarse
-from aivoice.engines.pitch import fill_gaps, fit_to_range, repair_creak, voice_like_frames
+from aivoice.engines.pitch import blend_join, fix_octave_errors, smooth_pitch, fill_gaps, fit_to_range, repair_creak, voice_like_frames
 from aivoice.presets import LiveParams
 
 
@@ -52,6 +52,7 @@ def protect_consonants(phone: np.ndarray, phone0: np.ndarray, pitchf: np.ndarray
     return (phone * mask + phone0 * (1.0 - mask)).astype(np.float32)
 
 
+SOLA_SEARCH_MS = 12  # the processor may move a join this far (aivoice.processor.SOLA_SEARCH_S)
 ENVELOPE_FRAME_S = 0.04
 ENVELOPE_HOP_S = 0.01
 MAX_ENVELOPE_GAIN = 4.0  # before the follow strength: a near-silent output is never lifted into loud noise
@@ -91,6 +92,9 @@ class RvcEngine:
         self.noise_position: int | None = None
         # The training voice's usual pitch range (low, high) in Hz, when known: pitches outside it are moved inside.
         self.pitch_range: tuple[float, float] | None = None
+        # The pitch the last live window used and where it started (in frames since live mode started), so the next
+        # window's join starts from the same pitch.
+        self._last_pitch: tuple[float, np.ndarray] | None = None
         self._vec = factory(str(vec_path))
         self._net = factory(str(model_path))
         self._vec_input = self._vec.get_inputs()[0].name
@@ -119,6 +123,22 @@ class RvcEngine:
             self._noise[frames] = np.random.default_rng(1234).standard_normal((1, 192, frames)).astype(np.float32)
         return self._noise[frames]
 
+    def _join_previous(self, pitchf: np.ndarray, n: int, sample_rate: int, params: LiveParams) -> np.ndarray:
+        """In live mode, the pitch where this window's played audio begins starts from what the last window used
+        there (see blend_join). Text to speech, with no position in time, is left as it is."""
+        if self.noise_position is None:
+            self._last_pitch = None
+            return pitchf
+        rate = len(pitchf) * sample_rate / n  # frames a second
+        position = self.noise_position * rate / sample_rate
+        if self._last_pitch is not None:
+            last_position, last = self._last_pitch
+            join = round((params.crossfade_ms + SOLA_SEARCH_MS) * rate / 1000)
+            start = len(pitchf) - round(params.chunk_ms * rate / 1000) - join
+            pitchf = blend_join(pitchf, last, round(position - last_position), start, join)
+        self._last_pitch = (position, pitchf.copy())
+        return pitchf
+
     def convert(self, audio: np.ndarray, sample_rate: int, pitch_shift: float, params: LiveParams) -> np.ndarray:
         n = len(audio)
         wav16 = soxr.resample(audio.astype(np.float32), sample_rate, 16000).astype(np.float32)
@@ -130,9 +150,11 @@ class RvcEngine:
         frames = phone.shape[1]
         pitchf = fill_gaps(extract_f0(wav16, params.f0_method, frames, rmvpe=self._rmvpe))
         pitchf = repair_creak(pitchf, voice_like_frames(wav16, frames))
+        pitchf = smooth_pitch(fix_octave_errors(pitchf))
         pitchf = shift_f0(pitchf, pitch_shift)
         if self.pitch_range is not None:
             pitchf = fit_to_range(pitchf, *self.pitch_range)
+        pitchf = self._join_previous(pitchf, n, sample_rate, params)
         if self._index is not None:
             phone = protect_consonants(phone, phone0, pitchf, params.protect)
         feed = {

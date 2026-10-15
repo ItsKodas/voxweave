@@ -168,3 +168,19 @@ def test_volume_follow_never_lifts_a_near_silent_output_far():
     out = np.full(SR, 1e-4, dtype=np.float32)
     lifted = follow_envelope(out, sine(220), SR, 1.0)
     assert np.max(np.abs(lifted)) <= 1e-4 * 4.0 + 1e-7
+
+
+def test_live_windows_carry_their_pitch_into_the_next_join():
+    engine, net = make()
+    chunk_ms, crossfade_ms, context_ms = PARAMS.chunk_ms, PARAMS.crossfade_ms, PARAMS.context_ms
+    n = SR * (chunk_ms + crossfade_ms + context_ms) // 1000
+    step = SR * chunk_ms // 1000
+    engine.noise_position = 0
+    engine.convert(sine(200, n), SR, 0.0, PARAMS)
+    engine.noise_position = step
+    engine.convert(sine(240, n), SR, 0.0, PARAMS)
+    first, second = net.feeds[0]["pitchf"][0], net.feeds[1]["pitchf"][0]
+    head = len(second) - chunk_ms // 10 - round((crossfade_ms + 12) / 10)  # 100 frames a second
+    # where this window's played audio begins, it starts from the pitch the last window used for that moment
+    assert second[head] == pytest.approx(first[head + chunk_ms // 10], rel=0.03)
+    assert second[-1] == pytest.approx(240.0, rel=0.03)
